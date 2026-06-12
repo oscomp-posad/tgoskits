@@ -19,6 +19,8 @@ mod entry;
 #[cfg(target_os = "uefi")]
 mod http;
 #[cfg(target_os = "uefi")]
+mod udp;
+#[cfg(target_os = "uefi")]
 use uefi::{Status, prelude::*};
 
 #[cfg(target_os = "uefi")]
@@ -64,6 +66,7 @@ fn fetch_control_offer() -> bool {
                 logln!("entry_symbol: {entry_symbol}");
             }
             match elf_loader::download_and_load(
+                &offer.transfer,
                 &offer.kernel_url,
                 offer.kernel_size,
                 offer.entry_symbol.as_deref(),

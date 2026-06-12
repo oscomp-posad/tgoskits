@@ -8,7 +8,11 @@ use uefi::{
     mem::memory_map::MemoryType,
 };
 
-use crate::http::{self, KernelLoadError};
+use crate::{
+    control::BootTransfer,
+    http::{self, KernelLoadError},
+    udp,
+};
 
 const ELF_MAGIC: &[u8; 4] = b"\x7fELF";
 const ELF_CLASS_64: u8 = 2;
@@ -88,11 +92,20 @@ struct LoadSegment {
 }
 
 pub fn download_and_load(
+    transfer: &BootTransfer,
     url: &str,
     expected_size: u64,
     entry_symbol: Option<&str>,
 ) -> Result<LoadedElf, ElfLoadError> {
-    let image = http::download_sized_body(url, expected_size).map_err(ElfLoadError::Download)?;
+    let image = match transfer {
+        BootTransfer::Http => http::download_sized_body(url, expected_size),
+        BootTransfer::UdpBlocks {
+            transfer_id,
+            server_port,
+            block_size,
+        } => udp::download_sized_body(*transfer_id, *server_port, *block_size, expected_size),
+    }
+    .map_err(ElfLoadError::Download)?;
     load_elf(&image, entry_symbol)
 }
 

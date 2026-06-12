@@ -22,9 +22,20 @@ pub enum ControlError {
     LineTooLong,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BootTransfer {
+    Http,
+    UdpBlocks {
+        transfer_id: u32,
+        server_port: u16,
+        block_size: usize,
+    },
+}
+
 #[derive(Debug, Clone)]
 pub struct BootOffer {
     pub boot_id: String,
+    pub transfer: BootTransfer,
     pub kernel_url: String,
     pub kernel_size: u64,
     pub image_format: String,
@@ -108,6 +119,7 @@ fn parse_boot_offer(input: &str) -> Result<BootOffer, ControlError> {
         boot_id: json_string_field(input, "boot_id")
             .ok_or(ControlError::MissingField("boot_id"))?
             .into(),
+        transfer: parse_transfer(input)?,
         kernel_url: json_string_field(input, "kernel_url")
             .ok_or(ControlError::MissingField("kernel_url"))?
             .into(),
@@ -117,6 +129,29 @@ fn parse_boot_offer(input: &str) -> Result<BootOffer, ControlError> {
         arch: arch.into(),
         entry_symbol: json_nullable_string_field(input, "entry_symbol").map(String::from),
     })
+}
+
+fn parse_transfer(input: &str) -> Result<BootTransfer, ControlError> {
+    match json_string_field(input, "transfer").unwrap_or("http") {
+        "http" => Ok(BootTransfer::Http),
+        "udp_blocks" => {
+            let transfer_id = json_u64_field(input, "udp_transfer_id")
+                .ok_or(ControlError::MissingField("udp_transfer_id"))?;
+            let server_port = json_u64_field(input, "udp_server_port")
+                .ok_or(ControlError::MissingField("udp_server_port"))?;
+            let block_size = json_u64_field(input, "udp_block_size")
+                .ok_or(ControlError::MissingField("udp_block_size"))?;
+            Ok(BootTransfer::UdpBlocks {
+                transfer_id: u32::try_from(transfer_id)
+                    .map_err(|_| ControlError::InvalidNumber("udp_transfer_id"))?,
+                server_port: u16::try_from(server_port)
+                    .map_err(|_| ControlError::InvalidNumber("udp_server_port"))?,
+                block_size: usize::try_from(block_size)
+                    .map_err(|_| ControlError::InvalidNumber("udp_block_size"))?,
+            })
+        }
+        _ => Err(ControlError::ServerError),
+    }
 }
 
 fn json_string_field<'a>(input: &'a str, key: &str) -> Option<&'a str> {
