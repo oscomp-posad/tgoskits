@@ -1,25 +1,25 @@
 # axplat-x86-asus-nuc15crh
 
 Hardware platform implementation for ASUS NUC15CRH x86_64 machines used by
-AxVisor HTTP Boot.
+AxVisor UDP Loader.
 
 ## Overview
 
-This crate keeps real-machine HTTP Boot behavior separate from the QEMU Q35
-platform. It supports the normal x86_64 multiboot path and adds an `httpboot`
+This crate keeps real-machine UDP Loader behavior separate from the QEMU Q35
+platform. It supports the normal x86_64 multiboot path and adds an `udp`
 entry path used by the ostool UEFI loader.
 
-The HTTP Boot path expects the loader to:
+The UDP Loader path expects the loader to:
 
 - download the AxVisor image from `ostool-server`;
 - pass an ostool boot-info pointer in `rdi`;
-- jump to the exported `httpboot_entry` symbol;
+- jump to the exported `udp_entry` symbol;
 - leave the kernel image loaded at the configured physical address.
 
 ## Platform Notes
 
 - Serial console: COM1, 115200 baud.
-- Boot protocol: multiboot for the legacy path, ostool boot-info for HTTP Boot.
+- Boot protocol: multiboot for the legacy path, ostool boot-info for UDP Loader.
 - Memory discovery: uses ostool boot-info when present, otherwise falls back to
   multiboot memory information.
 - Shutdown behavior: `system_off` reboots the machine when
@@ -39,7 +39,7 @@ The HTTP Boot path expects the loader to:
 Use the dedicated AxVisor board config:
 
 ```bash
-cargo axvisor httpboot \
+cargo axvisor udp \
   --config os/axvisor/configs/board/asus-nuc15crh-x86_64.toml \
   --vmconfigs os/axvisor/configs/vms/linux-x86_64-qemu-smp1.toml
 ```

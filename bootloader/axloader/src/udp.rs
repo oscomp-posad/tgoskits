@@ -12,8 +12,6 @@ use uefi::{
     },
 };
 
-use crate::http::KernelLoadError;
-
 const ETHERTYPE_IPV4: u16 = 0x0800;
 const IPV4_PROTO_UDP: u8 = 17;
 const IPV4_HEADER_LEN: usize = 20;
@@ -38,28 +36,26 @@ pub enum UdpDownloadError {
     Timeout,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KernelLoadError {
+    ZeroSize,
+    SizeTooLarge,
+    SizeMismatch,
+}
+
 pub fn download_sized_body(
     transfer_id: u32,
-    server_port: u16,
     block_size: usize,
     expected_size: u64,
 ) -> Result<Vec<u8>, KernelLoadError> {
     let expected_size = checked_kernel_size(expected_size)?;
     crate::logln!(
-        "udp_download_start: size={} server_port={} block_size={}",
+        "udp_download_start: size={} block_size={}",
         expected_size,
-        server_port,
         block_size
     );
     let mut body = vec![0; expected_size];
-    download_to_addr(
-        transfer_id,
-        server_port,
-        block_size,
-        body.as_mut_ptr(),
-        expected_size,
-    )
-    .map_err(|err| {
+    download_to_addr(transfer_id, block_size, body.as_mut_ptr(), expected_size).map_err(|err| {
         crate::logln!("udp_download_error: {err:?}");
         KernelLoadError::SizeMismatch
     })?;
@@ -68,7 +64,6 @@ pub fn download_sized_body(
 
 fn download_to_addr(
     transfer_id: u32,
-    _server_port: u16,
     block_size: usize,
     dst: *mut u8,
     expected_size: usize,

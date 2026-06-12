@@ -17,8 +17,6 @@ mod elf_loader;
 #[cfg(target_os = "uefi")]
 mod entry;
 #[cfg(target_os = "uefi")]
-mod http;
-#[cfg(target_os = "uefi")]
 mod udp;
 #[cfg(target_os = "uefi")]
 use uefi::{Status, prelude::*};
@@ -33,7 +31,7 @@ const BOOT_ROUND_RETRY_STALL: core::time::Duration = core::time::Duration::from_
 fn efi_main() -> Status {
     uefi::helpers::init().expect("failed to initialize UEFI helpers");
     for round in 1..=BOOT_ROUND_RETRY_LIMIT {
-        logln!("HTTP bootloader");
+        logln!("AxLoader UDP bootloader");
         logln!("round: {round}/{BOOT_ROUND_RETRY_LIMIT}");
         logln!("board: {}", boards::active::BOARD_NAME);
         logln!("arch: {}", boards::active::ARCH_NAME);
@@ -46,7 +44,7 @@ fn efi_main() -> Status {
             uefi::boot::stall(BOOT_ROUND_RETRY_STALL);
         }
     }
-    logln!("error: HTTP Boot retry limit reached");
+    logln!("error: AxLoader UDP boot retry limit reached");
     Status::SUCCESS
 }
 
@@ -61,13 +59,12 @@ fn fetch_control_offer() -> bool {
                 offer.image_format,
                 offer.kernel_size
             );
-            logln!("kernel_url: {}", offer.kernel_url);
             if let Some(entry_symbol) = offer.entry_symbol.as_deref() {
                 logln!("entry_symbol: {entry_symbol}");
             }
             match elf_loader::download_and_load(
-                &offer.transfer,
-                &offer.kernel_url,
+                offer.udp_transfer_id,
+                offer.udp_block_size,
                 offer.kernel_size,
                 offer.entry_symbol.as_deref(),
             ) {

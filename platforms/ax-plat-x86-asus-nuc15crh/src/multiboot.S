@@ -10,8 +10,8 @@ _start:
     jmp     bsp_entry32
 
 .code64
-.global httpboot_entry
-httpboot_entry:
+.global udp_entry
+udp_entry:
     mov     rbx, rdi
     mov     dx, 0x3f8 + 5
 1:
@@ -25,11 +25,11 @@ httpboot_entry:
     mov     rax, offset .Ltmp_pml4 - {offset}
     mov     cr3, rax
 
-    movabs  rax, offset httpboot_entry_high
+    movabs  rax, offset udp_entry_high
     jmp     rax
 
 .code64
-httpboot_entry_high:
+udp_entry_high:
     mov     dx, 0x3f8 + 5
 2:
     in      al, dx
@@ -42,7 +42,7 @@ httpboot_entry_high:
     movabs  rsp, offset {boot_stack}
     add     rsp, {boot_stack_size}
     mov     rdi, rbx
-    movabs  rax, offset {httpboot_entry_rust}
+    movabs  rax, offset {udp_entry_rust}
     call    rax
 
 3:

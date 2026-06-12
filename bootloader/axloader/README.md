@@ -1,7 +1,7 @@
 # axloader
 
-`axloader` provides the reusable AxVisor HTTP Boot loader library and the UEFI
-loader binary.
+`axloader` provides the reusable AxVisor UDP loader library and the UEFI loader
+binary.
 
 Build a loader by selecting exactly one `board-*` feature and the matching UEFI
 target:

@@ -30,7 +30,7 @@ impl BootloaderTarget {
         uefi_target: "x86_64-unknown-uefi",
         output_file: "BOOTX64.EFI",
         default_kernel_load_addr: 0x200000,
-        preferred_entry_symbol: Some("httpboot_entry"),
+        preferred_entry_symbol: Some("udp_entry"),
     };
 }
 
@@ -57,7 +57,7 @@ mod tests {
         assert_eq!(target.uefi_target, "x86_64-unknown-uefi");
         assert_eq!(target.output_file, "BOOTX64.EFI");
         assert_eq!(target.default_kernel_load_addr, 0x200000);
-        assert_eq!(target.preferred_entry_symbol, Some("httpboot_entry"));
+        assert_eq!(target.preferred_entry_symbol, Some("udp_entry"));
     }
 
     #[test]

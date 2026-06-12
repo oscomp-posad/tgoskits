@@ -57,7 +57,7 @@ global_asm!(
     mb_hdr_magic = const MULTIBOOT_HEADER_MAGIC,
     mb_hdr_flags = const MULTIBOOT_HEADER_FLAGS,
     entry = sym crate::rust_entry,
-    httpboot_entry_rust = sym crate::rust_httpboot_entry,
+    udp_entry_rust = sym crate::rust_udp_entry,
     entry_secondary = sym crate::rust_entry_secondary,
 
     offset = const PHYS_VIRT_OFFSET,

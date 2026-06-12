@@ -8,11 +8,7 @@ use uefi::{
     mem::memory_map::MemoryType,
 };
 
-use crate::{
-    control::BootTransfer,
-    http::{self, KernelLoadError},
-    udp,
-};
+use crate::udp::{self, KernelLoadError};
 
 const ELF_MAGIC: &[u8; 4] = b"\x7fELF";
 const ELF_CLASS_64: u8 = 2;
@@ -92,20 +88,13 @@ struct LoadSegment {
 }
 
 pub fn download_and_load(
-    transfer: &BootTransfer,
-    url: &str,
+    transfer_id: u32,
+    block_size: usize,
     expected_size: u64,
     entry_symbol: Option<&str>,
 ) -> Result<LoadedElf, ElfLoadError> {
-    let image = match transfer {
-        BootTransfer::Http => http::download_sized_body(url, expected_size),
-        BootTransfer::UdpBlocks {
-            transfer_id,
-            server_port,
-            block_size,
-        } => udp::download_sized_body(*transfer_id, *server_port, *block_size, expected_size),
-    }
-    .map_err(ElfLoadError::Download)?;
+    let image = udp::download_sized_body(transfer_id, block_size, expected_size)
+        .map_err(ElfLoadError::Download)?;
     load_elf(&image, entry_symbol)
 }
 
@@ -139,6 +128,15 @@ fn load_elf(image: &[u8], entry_symbol: Option<&str>) -> Result<LoadedElf, ElfLo
     .ok_or(ElfLoadError::SegmentAddressOverflow)?;
     let page_count = usize::try_from((load_end - load_addr) / UEFI_PAGE_SIZE)
         .map_err(|_| ElfLoadError::SegmentAddressOverflow)?;
+    let entry = match entry_symbol {
+        Some("udp_entry") => find_symbol(image, header, "udp_entry")
+            .and_then(|symbol| virtual_to_physical(symbol, &segments))
+            .ok_or(ElfLoadError::EntryNotInLoadSegment)?,
+        Some(_) => return Err(ElfLoadError::UnsupportedEntrySymbol),
+        None => virtual_to_physical(header.e_entry, &segments)
+            .ok_or(ElfLoadError::EntryNotInLoadSegment)?,
+    };
+
     let target = boot::allocate_pages(
         AllocateType::Address(load_addr),
         MemoryType::LOADER_DATA,
@@ -152,15 +150,6 @@ fn load_elf(image: &[u8], entry_symbol: Option<&str>) -> Result<LoadedElf, ElfLo
         }
         return Err(err);
     }
-
-    let entry = match entry_symbol {
-        Some("httpboot_entry") => find_symbol(image, header, "httpboot_entry")
-            .and_then(|symbol| virtual_to_physical(symbol, &segments))
-            .ok_or(ElfLoadError::EntryNotInLoadSegment)?,
-        Some(_) => return Err(ElfLoadError::UnsupportedEntrySymbol),
-        None => virtual_to_physical(header.e_entry, &segments)
-            .ok_or(ElfLoadError::EntryNotInLoadSegment)?,
-    };
 
     Ok(LoadedElf {
         entry_point: entry,

@@ -62,7 +62,7 @@ unsafe extern "C" fn rust_entry(magic: usize, mbi: usize) {
     }
 }
 
-unsafe extern "C" fn rust_httpboot_entry(boot_info: usize) {
+unsafe extern "C" fn rust_udp_entry(boot_info: usize) {
     ax_plat::call_main(current_cpu_id(), boot_info);
 }
 
