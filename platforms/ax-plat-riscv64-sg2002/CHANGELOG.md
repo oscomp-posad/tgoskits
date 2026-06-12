@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.3](https://github.com/rcore-os/tgoskits/compare/ax-plat-riscv64-sg2002-v0.4.2...ax-plat-riscv64-sg2002-v0.4.3) - 2026-06-12
+
+### Other
+
+- updated the following local packages: ax-plat, ax-driver, axklib, some-serial, rdif-block
+
 ## [0.4.2](https://github.com/rcore-os/tgoskits/compare/ax-plat-riscv64-sg2002-v0.4.1...ax-plat-riscv64-sg2002-v0.4.2) - 2026-06-11
 
 ### Fixed
