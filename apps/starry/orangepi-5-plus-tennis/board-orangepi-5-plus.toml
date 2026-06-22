@@ -1,0 +1,22 @@
+# Default board run: a bounded dry-run smoke. It needs NO camera and NO model,
+# so it deterministically exercises the full state machine + benchmark output on
+# real StarryOS and proves the binary runs. Use configs/board-orangepi-5-plus-
+# bench.toml for the live perception benchmark (camera + model required).
+board_type = "OrangePi-5-Plus"
+shell_prefix = "root@starry:/root #"
+shell_init_cmd = '''
+cd /tennis_app && ./tennis_app --mode dry-run --duration-sec 20 --fps 30 --log-every 30 --virtual-actuators
+'''
+success_regex = [
+  "(?m)^TENNIS_BENCH_RESULT .*\\bprocessed=[1-9][0-9]*\\b.*\\binference_errors=0\\b.*$",
+  "(?m)^TENNIS_BENCH_DONE$",
+]
+fail_regex = [
+  "(?i)\\bpanic(?:ked)?\\b",
+  "(?m)^TENNIS_ERROR .*$",
+  "(?m)^rknn_init fail!.*$",
+  "(?m)^(uvc_init|uvc_open|uvc_start_streaming|uvc_get_device_list) failed: .*$",
+  "(?i)error while loading shared libraries",
+  "(?i)(tennis_app|sh): .*not found",
+]
+timeout = 120

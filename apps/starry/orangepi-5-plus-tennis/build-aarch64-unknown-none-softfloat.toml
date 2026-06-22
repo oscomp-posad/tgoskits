@@ -1,0 +1,21 @@
+# Build-time config for the Orange Pi 5 Plus tennis-ball pickup Starry demo.
+# Driver/feature set mirrors the orangepi-5-plus-uvc-rknn app (UVC over USB,
+# RKNN NPU, RTL8125 for the optional HTTP path, Rockchip SoC/storage).
+target = "aarch64-unknown-none-softfloat"
+features = [
+  "ax-driver/irq",
+  "ax-driver/list-pci-devices",
+  "ax-driver/rk3588-pcie",
+  "ax-driver/realtek-rtl8125",
+  "ax-driver/rockchip-soc",
+  "ax-driver/rockchip-dwc-xhci",
+  "ax-driver/rockchip-sdhci",
+  "ax-driver/rockchip-dwmmc",
+  "rknpu",
+]
+log = "Warn"
+# The live pipeline runs the libuvc capture thread and the perception/control
+# loop on separate cores, so SMP helps end-to-end latency. 4 is a conservative
+# middle ground: set to 1 if StarryOS SMP boot is unstable on your board, or up
+# to 8 (the value the profiling branch uses for this board) for more headroom.
+max_cpu_num = 4

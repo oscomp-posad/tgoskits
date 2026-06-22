@@ -1,0 +1,32 @@
+# Live perception benchmark: UVC camera -> RKNN tennis-ball detection -> state
+# machine -> virtual actuators, for 60s, emitting TENNIS_BENCH_RESULT.
+#
+# Requires on the board rootfs at /tennis_app: the model (model/tennis.rknn) and
+# label file (model/labels.txt), plus a connected UVC camera and libuvc.
+# WORKS-TODAY fallback (no dedicated tennis.rknn yet): edit the command to point
+# at the sibling COCO model and select the sports-ball class, e.g.
+#   --model /rknn_yolov8_image/model/yolov8.rknn \
+#   --label /rknn_yolov8_image/model/coco_80_labels_list.txt --ball-class 32
+# See model/README.md.
+#
+# Select with: cargo xtask starry app board -t orangepi-5-plus-tennis \
+#   --board-config configs/board-orangepi-5-plus-bench.toml
+board_type = "OrangePi-5-Plus"
+shell_prefix = "root@starry:/root #"
+shell_init_cmd = '''
+cd /tennis_app && ./tennis_app --mode live --model model/tennis.rknn --label model/labels.txt --ball-class 0 --device 0 --width 640 --height 480 --fps 30 --duration-sec 60 --core-mask all --min-confidence 50 --log-every 30 --virtual-actuators
+'''
+success_regex = [
+  "(?m)^TENNIS_BENCH_RESULT .*\\bprocessed=[1-9][0-9]*\\b.*\\binference_errors=0\\b.*$",
+  "(?m)^TENNIS_BENCH_DONE$",
+]
+fail_regex = [
+  "(?i)\\bpanic(?:ked)?\\b",
+  "(?m)^TENNIS_ERROR .*$",
+  "(?m)^rknn_init fail!.*$",
+  "(?m)^(uvc_init|uvc_open|uvc_start_streaming|uvc_get_device_list) failed: .*$",
+  "(?m)^dlopen libuvc\\.so failed: .*$",
+  "(?i)error while loading shared libraries",
+  "(?i)(tennis_app|sh): .*not found",
+]
+timeout = 240

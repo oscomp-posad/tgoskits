@@ -1,0 +1,18 @@
+# Continuous live run: the tennis pickup pipeline runs effectively forever
+# (24h duration cap) for manual observation/soak. No success_regex (never
+# self-terminates); stop with Ctrl+C. Requires a camera + model like the bench.
+#
+# Select with: cargo xtask starry app board -t orangepi-5-plus-tennis \
+#   --board-config configs/board-orangepi-5-plus-long-run.toml
+board_type = "OrangePi-5-Plus"
+shell_prefix = "root@starry:/root #"
+shell_init_cmd = '''
+cd /tennis_app && ./tennis_app --mode live --model model/tennis.rknn --label model/labels.txt --ball-class 0 --device 0 --width 640 --height 480 --fps 30 --duration-sec 86400 --core-mask all --min-confidence 50 --log-every 60 --virtual-actuators
+'''
+fail_regex = [
+  "(?i)\\bpanic(?:ked)?\\b",
+  "(?m)^rknn_init fail!.*$",
+  "(?m)^(uvc_init|uvc_open|uvc_start_streaming|uvc_get_device_list) failed: .*$",
+  "(?i)error while loading shared libraries",
+]
+timeout = 86400

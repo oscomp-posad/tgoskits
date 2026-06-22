@@ -1,0 +1,17 @@
+# tennis app — fixed-image validation golden detections (PLACEHOLDER)
+#
+# OPTIONAL and not yet active: the tennis app does not implement an on-device
+# fixed-image validation harness yet, and no tennis.rknn model is pinned. This
+# file will hold the GOLDEN DETECTIONS for the images listed in images.txt once
+# a tennis.rknn model is pinned, so a run can be compared against a committed
+# reference and flagged on drift.
+#
+# Format (once the harness + a pinned model exist): a line-oriented, versioned
+# golden-detection file — one header line, then per-image records with their
+# expected bounding boxes / scores. Follow the sibling app
+# apps/starry/orangepi-5-plus-uvc-rknn as the model to follow; the tennis app
+# uses image paths relative to /tennis_app and a single-class tennis model.
+#
+# See validation/README.md for details.
+#
+# NO real golden detections yet — generate them when a tennis.rknn is pinned.
