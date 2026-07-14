@@ -12,9 +12,13 @@ use core::{
 };
 
 use ax_errno::{AxError, AxResult};
+use ax_memory_addr::PhysAddr;
 use axpoll::Pollable;
 use kbpf_basic::perf::{PerfProbeArgs, PerfProbeConfig};
 use kprobe::{CallBackFunc, KretprobeBuilder, ProbeBuilder, PtRegs};
+
+#[cfg(target_arch = "aarch64")]
+use super::probe_sample;
 
 /// Config value for entry probes (kprobe/uprobe), per Linux PERF_TYPE_PROBE ABI.
 pub const PROBE_CONFIG_ENTRY: u64 = 0;
@@ -50,6 +54,11 @@ pub struct ProbePerfEvent {
     _args: PerfProbeArgs,
     probe: ProbeTy,
     callback_list: Vec<u32>,
+    /// Sampling state for `perf record -e kprobe:`/`uprobe:` (`sample_period > 0`):
+    /// the mmap ring the hit-callback writes `PERF_RECORD_SAMPLE` into. `None` for
+    /// a BPF-attach or non-sampling probe.
+    #[cfg(target_arch = "aarch64")]
+    sampling: Option<Arc<probe_sample::ProbeSampling>>,
 }
 
 impl ProbePerfEvent {
@@ -59,8 +68,69 @@ impl ProbePerfEvent {
             _args: args,
             probe,
             callback_list: Vec::new(),
+            #[cfg(target_arch = "aarch64")]
+            sampling: None,
         }
     }
+}
+
+/// Monotonic per-probe callback id, unique across the BPF and sample callbacks a
+/// probe may carry. `Relaxed` suffices — only atomic unique-id allocation is
+/// required, not synchronization with other memory.
+fn next_callback_id() -> u32 {
+    static CALLBACK_ID: AtomicU32 = AtomicU32::new(0);
+    CALLBACK_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Register the sample-emitting callback (`perf record`) on `ev`'s probe when it
+/// was opened with `sample_period > 0`. A sampling probe writes a
+/// `PERF_RECORD_SAMPLE` into its ring on each hit (every `sample_period` hits).
+#[cfg(target_arch = "aarch64")]
+fn attach_sampling(
+    ev: &mut ProbePerfEvent,
+    sample_period: u64,
+    sample_type: u64,
+    is_user: bool,
+    probe_addr: u64,
+) -> AxResult<()> {
+    if let Some(s) = probe_sample::make_sampling(sample_period, sample_type, is_user, probe_addr)? {
+        let id = next_callback_id();
+        let cb = probe_sample::ProbeSampleCallback::new(s.clone());
+        match ev.probe {
+            ProbeTy::Kprobe(ref k) => k.register_event_callback(id, cb),
+            ProbeTy::Kretprobe(ref k) => k.register_event_callback(id, cb),
+            ProbeTy::Uprobe(ref u) => u.register_event_callback(id, cb),
+        }
+        ev.callback_list.push(id);
+        ev.sampling = Some(s);
+    }
+    Ok(())
+}
+
+/// Finish a probe open: attach the sample-emit callback (aarch64; a no-op off-arch
+/// or for a non-sampling probe). Shared by the kprobe / uprobe opens.
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn finish_probe_open(
+    mut ev: ProbePerfEvent,
+    sample_period: u64,
+    sample_type: u64,
+    is_user: bool,
+    probe_addr: u64,
+) -> AxResult<ProbePerfEvent> {
+    attach_sampling(&mut ev, sample_period, sample_type, is_user, probe_addr)?;
+    Ok(ev)
+}
+
+/// Off-arch stub: no sampling ring, so a probe stays BPF-attach-only.
+#[cfg(not(target_arch = "aarch64"))]
+pub(crate) fn finish_probe_open(
+    ev: ProbePerfEvent,
+    _sample_period: u64,
+    _sample_type: u64,
+    _is_user: bool,
+    _probe_addr: u64,
+) -> AxResult<ProbePerfEvent> {
+    Ok(ev)
 }
 
 impl Drop for ProbePerfEvent {
@@ -82,13 +152,27 @@ impl Drop for ProbePerfEvent {
 
 impl Pollable for ProbePerfEvent {
     fn poll(&self) -> axpoll::IoEvents {
+        // A sampling probe (`perf record`) is readable when its ring has unread
+        // bytes. A BPF-attach probe delivers no fd readiness — its output goes
+        // through the attached BPF program / ringbuf, a separate fd.
+        #[cfg(target_arch = "aarch64")]
+        if let Some(s) = &self.sampling {
+            return if s.has_data() {
+                axpoll::IoEvents::IN
+            } else {
+                axpoll::IoEvents::empty()
+            };
+        }
         axpoll::IoEvents::empty()
     }
 
-    fn register(&self, _context: &mut core::task::Context<'_>, _events: axpoll::IoEvents) {
-        // No-op: kprobe perf events do not deliver poll readiness; reads
-        // happen through the attached BPF program / ringbuf, not the event
-        // fd itself.
+    fn register(&self, context: &mut core::task::Context<'_>, events: axpoll::IoEvents) {
+        #[cfg(target_arch = "aarch64")]
+        if let Some(s) = &self.sampling {
+            s.register_poll(context.waker());
+            return;
+        }
+        let _ = (context, events);
     }
 }
 
@@ -117,17 +201,7 @@ impl PerfEventOps for ProbePerfEvent {
 
     fn set_bpf_prog(&mut self, bpf_prog: Arc<dyn FileLike>) -> AxResult<()> {
         let vm = OwnedEbpfVm::new(bpf_prog)?;
-
-        // Monotonically-increasing per-probe callback id. `fetch_add` is
-        // itself atomic and never returns the same value twice regardless
-        // of ordering, so `Relaxed` is sufficient — we only require atomic
-        // unique-id allocation, not synchronization with any other memory
-        // location. The counter is `u32`-wide so a tight 4-billion-attach
-        // loop would eventually wrap; we never anticipate that here, but
-        // if it ever became real we'd switch to `AtomicU64`.
-        static CALLBACK_ID: AtomicU32 = AtomicU32::new(0);
-        let id = CALLBACK_ID.fetch_add(1, Ordering::Relaxed);
-
+        let id = next_callback_id();
         let callback = Arc::new(KprobePerfCallBack::new(vm));
         match self.probe {
             ProbeTy::Kprobe(ref k) => k.register_event_callback(id, callback),
@@ -136,6 +210,28 @@ impl PerfEventOps for ProbePerfEvent {
         }
         self.callback_list.push(id);
         Ok(())
+    }
+
+    /// `mmap(perf_fd)`: allocate the sampling ring for a `perf record` probe. For a
+    /// BPF-attach or non-sampling probe (no ring), `mmap` stays unsupported.
+    fn device_mmap(&mut self, len: usize) -> AxResult<(PhysAddr, Arc<dyn Any + Send + Sync>)> {
+        #[cfg(target_arch = "aarch64")]
+        if let Some(s) = &self.sampling {
+            return s.device_mmap(len);
+        }
+        let _ = len;
+        Err(AxError::Unsupported)
+    }
+
+    /// Record the event id a probe sample carries in `PERF_SAMPLE_ID` /
+    /// `IDENTIFIER`. No-op for a non-sampling probe.
+    fn set_sample_id(&mut self, id: u64) {
+        #[cfg(target_arch = "aarch64")]
+        if let Some(s) = &self.sampling {
+            s.set_id(id);
+            return;
+        }
+        let _ = id;
     }
 }
 
@@ -199,7 +295,15 @@ fn perf_probe_arg_to_kretprobe_builder(
 
 /// Build a `ProbePerfEvent` for a `PERF_TYPE_KPROBE` perf_event_open call.
 /// Config `PROBE_CONFIG_ENTRY` (0) = kprobe; `PROBE_CONFIG_RETURN` (1) = kretprobe.
-pub fn perf_event_open_kprobe(args: PerfProbeArgs) -> AxResult<ProbePerfEvent> {
+///
+/// When `sample_period > 0` (`perf record -e kprobe:`), a sample-emitting callback
+/// is attached so each hit writes a `PERF_RECORD_SAMPLE` into the event's ring
+/// (aarch64 only); otherwise the probe stays BPF-attach-only.
+pub fn perf_event_open_kprobe(
+    args: PerfProbeArgs,
+    sample_period: u64,
+    sample_type: u64,
+) -> AxResult<ProbePerfEvent> {
     let probe = match args.config {
         PerfProbeConfig::Raw(PROBE_CONFIG_ENTRY) => {
             let builder = perf_probe_arg_to_kprobe_builder(&args)?;
@@ -211,5 +315,14 @@ pub fn perf_event_open_kprobe(args: PerfProbeArgs) -> AxResult<ProbePerfEvent> {
         }
         _ => return Err(AxError::InvalidInput),
     };
-    Ok(ProbePerfEvent::new(args, probe))
+    // The sample IP is the probe's (kallsyms) address, not the single-step pc.
+    let probe_addr = lookup_symbol_addr(&args.name).unwrap_or(0) as u64;
+    // Kprobe/kretprobe hits are kernel context (`is_user = false`).
+    finish_probe_open(
+        ProbePerfEvent::new(args, probe),
+        sample_period,
+        sample_type,
+        false,
+        probe_addr,
+    )
 }

@@ -278,7 +278,7 @@ impl core::fmt::Debug for SamplingState {
 /// Spawn the deferred worker that turns IRQ-context `notify_irq` pokes into
 /// `axpoll` wakeups. Mirrors `bpf::start_bpf_perf_notify_worker`.
 #[cfg(target_arch = "aarch64")]
-fn start_sampling_notify_worker(
+pub(crate) fn start_sampling_notify_worker(
     poll_ready: Arc<PollSet>,
     notify: Arc<IrqNotify>,
     poll_alive: Arc<AtomicBool>,
@@ -305,7 +305,7 @@ fn start_sampling_notify_worker(
 /// strong `Arc<GlobalPage>` (the caller threads it into the VMA retainer and/or
 /// keeps an anchor), the ring's kernel vaddr, and its physical start.
 #[cfg(target_arch = "aarch64")]
-fn alloc_sampling_ring(len: usize) -> AxResult<(Arc<GlobalPage>, usize, PhysAddr)> {
+pub(crate) fn alloc_sampling_ring(len: usize) -> AxResult<(Arc<GlobalPage>, usize, PhysAddr)> {
     // libbpf/`perf` require `(1 + 2^N) * PAGE_SIZE`: one header page plus a
     // power-of-two-page data ring. Reject anything else.
     if len == 0 || !len.is_multiple_of(ax_memory_addr::PAGE_SIZE_4K) {

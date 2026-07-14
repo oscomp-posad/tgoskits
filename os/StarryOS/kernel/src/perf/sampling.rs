@@ -113,9 +113,9 @@ const PERF_RECORD_LOST: u32 = 2;
 /// `u64 lost`.
 const PERF_RECORD_LOST_LEN: usize = 8 + 8 + 8;
 /// `PERF_RECORD_MISC_KERNEL`: the sample landed in kernel (EL1) context.
-const PERF_RECORD_MISC_KERNEL: u16 = 1;
+pub(crate) const PERF_RECORD_MISC_KERNEL: u16 = 1;
 /// `PERF_RECORD_MISC_USER`: the sample landed in user (EL0) context.
-const PERF_RECORD_MISC_USER: u16 = 2;
+pub(crate) const PERF_RECORD_MISC_USER: u16 = 2;
 
 /// Max u64 words in the `PERF_SAMPLE_READ` block: for a single event this is
 /// `value` (+ `id` if `PERF_FORMAT_ID`) ≤ 2; for a group-leader read
@@ -136,7 +136,7 @@ const MAX_GROUP_READ_WORDS: usize = 1 + (1 + MAX_GROUP_MEMBERS) * 2;
 /// the per-CPU [`RECORD_SCRATCH`] (not the IRQ stack — a stack dump is multi-KiB)
 /// and returns the actual length. Each optional term reserves its worst case, so
 /// no requested field combination can overrun the record buffer.
-const SAMPLE_RECORD_MAX_LEN: usize = 8
+pub(crate) const SAMPLE_RECORD_MAX_LEN: usize = 8
     + 9 * 8
     + MAX_GROUP_READ_WORDS * 8
     + (1 + 2 + 2 * MAX_STACK_DEPTH) * 8
@@ -204,7 +204,7 @@ pub const READ_FORMAT_GROUP: u64 = 1 << 3;
 
 /// Callchain marker: the entries that follow are kernel (EL1) instruction
 /// pointers (Linux `PERF_CONTEXT_KERNEL`). Counts as one callchain entry.
-const PERF_CONTEXT_KERNEL: u64 = (-128i64) as u64;
+pub(crate) const PERF_CONTEXT_KERNEL: u64 = (-128i64) as u64;
 /// Callchain marker: the entries that follow are user (EL0) instruction pointers
 /// (Linux `PERF_CONTEXT_USER`). Counts as one callchain entry.
 const PERF_CONTEXT_USER: u64 = (-512i64) as u64;
@@ -1201,6 +1201,60 @@ fn build_sample(buf: &mut [u8], sample_type: u64, misc: u16, d: &SampleData<'_>)
     // Back-patch the header's `size` field now that the total length is known.
     buf[size_off..size_off + 2].copy_from_slice(&(off as u16).to_ne_bytes());
     off
+}
+
+/// The values a probe-hit sample (`perf record -e kprobe:`/`tracepoint:`) carries.
+/// Probe events emit only the scalar fields plus an optional callchain, so this
+/// is the subset of [`SampleData`] the probe path fills (the rest are zero/empty).
+pub(crate) struct ProbeSampleData<'a> {
+    /// Instruction pointer of the hit (`pt_regs.pc`).
+    pub ip: u64,
+    /// Real userspace `(tgid, tid)` of the task that hit the probe.
+    pub pid: u32,
+    pub tid: u32,
+    /// Monotonic timestamp (ns).
+    pub time: u64,
+    /// The CPU the probe fired on.
+    pub cpu: u32,
+    /// Event id (`PERF_SAMPLE_ID` / `IDENTIFIER`).
+    pub id: u64,
+    /// Sampling period (`PERF_SAMPLE_PERIOD`) — the probe emits one sample per
+    /// `period` hits, so this reports that many events since the last sample.
+    pub period: u64,
+    /// `PERF_SAMPLE_CALLCHAIN` entries (`PERF_CONTEXT_*` markers + IPs), or empty.
+    pub callchain: &'a [u64],
+}
+
+/// Assemble one `PERF_RECORD_SAMPLE` for a probe hit into `buf`, returning its
+/// byte length. A thin wrapper over [`build_sample`] that fills a [`SampleData`]
+/// from the probe-relevant fields (the `READ` / `REGS_USER` / `STACK_USER` /
+/// `ADDR` / `STREAM_ID` fields a probe never emits are zero/empty). `buf` must be
+/// at least [`SAMPLE_RECORD_MAX_LEN`] bytes; `sample_type` must be within
+/// [`SUPPORTED_SAMPLE_TYPE`] (validated at open).
+pub(crate) fn build_probe_sample(
+    buf: &mut [u8],
+    sample_type: u64,
+    misc: u16,
+    d: &ProbeSampleData<'_>,
+) -> usize {
+    let data = SampleData {
+        ip: d.ip,
+        pid: d.pid,
+        tid: d.tid,
+        time: d.time,
+        addr: 0,
+        id: d.id,
+        stream_id: 0,
+        cpu: d.cpu,
+        period: d.period,
+        callchain: d.callchain,
+        read: &[],
+        regs_abi: 0,
+        regs_user: &[],
+        stack_user: &[],
+        stack_dyn_size: 0,
+    };
+    build_sample(buf, sample_type, misc, &data)
 }
 
 /// Writes one record into a perf ring buffer, IRQ-safe and self-contained.

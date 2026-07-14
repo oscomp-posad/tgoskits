@@ -18,6 +18,12 @@ pub mod nofault;
 /// the per-core counter pools + cluster classification live here.
 #[cfg(target_arch = "aarch64")]
 pub mod percpu;
+/// `PERF_RECORD_SAMPLE` emission for kprobe/tracepoint/uprobe perf events
+/// (`perf record -e kprobe:`), reusing the hardware sampling ring. ARM PMUv3-only
+/// (the sampling-ring machinery it reuses is aarch64-only), so it is gated like
+/// `sampling`.
+#[cfg(target_arch = "aarch64")]
+pub mod probe_sample;
 pub mod raw_tracepoint;
 /// PMU overflow-IRQ sampling backend (M2). ARM PMUv3 only; the counting and
 /// tracing paths are arch-agnostic, but sampling depends on CPU PMU registers.
@@ -644,8 +650,18 @@ pub fn perf_event_open(
             attr, pid, cpu, group_fd, flags,
         )
         .into_ax_result()?;
+        // Sampling params for the probe sample-emit path (`perf record -e kprobe:`),
+        // which `PerfProbeArgs` does not carry (its `sample_type` loses a bit-mask,
+        // and it drops `sample_period` entirely). SAFETY: both union arms are `u64`
+        // in the `repr(C)` POD.
+        let sample_period = unsafe { attr.__bindgen_anon_1.sample_period };
+        let sample_type = attr.sample_type;
         match args.type_ {
-            PerfTypeId::PERF_TYPE_KPROBE => Box::new(kprobe::perf_event_open_kprobe(args)?),
+            PerfTypeId::PERF_TYPE_KPROBE => Box::new(kprobe::perf_event_open_kprobe(
+                args,
+                sample_period,
+                sample_type,
+            )?),
             // The five counting software events (`perf stat`'s default rows) become
             // real per-task counters; every other software config (e.g.
             // `PERF_COUNT_SW_DUMMY`, `perf record`'s tracking event) keeps the
