@@ -33,10 +33,20 @@ copy_base_text_file_to_overlay() {
     chmod 0644 "$target"
 }
 
-# Best-effort prefetch of the Qt runtime + toolchain + fonts into the overlay,
-# resolving the full dependency closure from the Alpine APKINDEX. On-target the
-# test script installs these with `apk add --no-network` first, then falls back
-# to live mirrors. Reuses the wayland resolver approach.
+alpine_branch() {
+    local branch
+    branch="$(sed -n 's#.*/\(v[0-9][0-9.]*\)/main#\1#p' "$overlay_dir/etc/apk/repositories" 2>/dev/null | head -1)"
+    [[ -z "$branch" ]] && branch="v3.23"
+    echo "$branch"
+}
+
+# Best-effort prefetch of the Qt *runtime* + fonts into the overlay, resolving
+# the dependency closure from the Alpine APKINDEX. On-target the test script
+# installs these with `apk add --no-network` first, then falls back to live
+# mirrors. NOTE: the compiler/-dev packages are intentionally NOT prefetched —
+# the clock binary is cross-built at prebuild time in a matching-branch Alpine
+# container (see compile_clock_in_container), so the guest only needs runtime
+# libs. This keeps the prefetch closure small (~tens of apks, not hundreds).
 prefetch_qt_apks() {
     local apk_arch branch cache_dir guest_cache_dir
     case "$arch" in
@@ -44,9 +54,7 @@ prefetch_qt_apks() {
         *) echo "warning: unsupported apk arch for Qt prefetch: $arch" >&2; return 0 ;;
     esac
 
-    branch="$(sed -n 's#.*/\(v[0-9][0-9.]*\)/main#\1#p' "$overlay_dir/etc/apk/repositories" 2>/dev/null | head -1)"
-    [[ -z "$branch" ]] && branch="v3.22"
-
+    branch="$(alpine_branch)"
     cache_dir="$workspace/target/qt-demo-apks/$branch/$apk_arch"
     guest_cache_dir="$overlay_dir/usr/local/qt-demo-apks"
     mkdir -p "$cache_dir" "$guest_cache_dir"
@@ -56,21 +64,67 @@ prefetch_qt_apks() {
         return 0
     fi
 
-    QT_DEMO_ROOTS="${QT_DEMO_ROOTS:-qt6-qtbase qt6-qtbase-x11 font-dejavu fontconfig g++ musl-dev qt6-qtbase-dev}" \
+    QT_DEMO_ROOTS="${QT_DEMO_ROOTS:-qt6-qtbase qt6-qtbase-x11 font-dejavu fontconfig}" \
     python3 "$app_dir/prefetch_apks.py" "$apk_arch" "$branch" "$cache_dir" "$guest_cache_dir" || {
         echo "warning: Qt APK prefetch failed; runtime apk will fetch from network" >&2
         return 0
     }
 }
 
+# Cross-build the clock binary at prebuild time in an Alpine container whose
+# branch matches the guest rootfs, so the resulting dynamically-linked binary is
+# ABI-compatible with the guest's runtime Qt libs (verified: guest v3.23 and
+# alpine:3.23 both ship qt6-qtbase-6.10.3-r0). Writes /usr/local/qt-demo/clock
+# into the overlay. Best-effort: if docker is unavailable or the build fails,
+# no binary is shipped and the on-target test script compiles from clock.cpp
+# (which is also installed) as a fallback.
+compile_clock_in_container() {
+    local branch docker_tag plat out_dir
+    branch="$(alpine_branch)"
+    docker_tag="alpine:${branch#v}"
+    out_dir="$overlay_dir/usr/local/qt-demo"
+    mkdir -p "$out_dir"
+
+    if ! command -v docker >/dev/null 2>&1; then
+        echo "warning: docker not found; shipping clock.cpp for on-target compile" >&2
+        return 0
+    fi
+    case "$arch" in
+        aarch64) plat="linux/arm64" ;;
+        x86_64) plat="linux/amd64" ;;
+        *) echo "warning: no container platform for arch $arch; on-target compile" >&2; return 0 ;;
+    esac
+
+    echo "QT_PREBUILD compiling clock in $docker_tag ($plat)..."
+    if docker run --rm --platform "$plat" \
+        -v "$app_dir/clock.cpp:/src/clock.cpp:ro" \
+        -v "$out_dir:/out" \
+        "$docker_tag" sh -c '
+            set -e
+            apk add --no-cache qt6-qtbase-dev g++ musl-dev pkgconf >/dev/null
+            g++ -std=c++17 -fPIC -O2 /src/clock.cpp \
+                $(pkg-config --cflags --libs Qt6Widgets Qt6Gui Qt6Core) \
+                -o /out/clock
+            chmod 0755 /out/clock
+        '; then
+        echo "QT_PREBUILD compiled binary -> /usr/local/qt-demo/clock"
+    else
+        echo "warning: container compile failed; shipping clock.cpp for on-target compile" >&2
+        rm -f "$out_dir/clock"
+    fi
+}
+
 populate_overlay() {
     mkdir -p "$overlay_dir/usr/bin" "$overlay_dir/usr/local/qt-demo"
+    # Ship the source too, so the guest can compile as a fallback if the
+    # container prebuild did not produce a binary.
     install -Dm0644 "$app_dir/clock.cpp" "$overlay_dir/usr/local/qt-demo/clock.cpp"
     install -Dm0755 "$app_dir/qt-demo-test.sh" "$overlay_dir/usr/bin/qt-demo-test.sh"
 
     copy_base_text_file_to_overlay /etc/apk/repositories
     copy_base_text_file_to_overlay /etc/resolv.conf
     prefetch_qt_apks
+    compile_clock_in_container
 }
 
 require_env STARRY_ARCH "$arch"

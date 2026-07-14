@@ -31,10 +31,14 @@ EOF
 }
 
 # ---- packages ----
-# qt6-qtbase: core libs. qt6-qtbase-x11: carries the linuxfb QPA plugin
-# (libqlinuxfb.so) on Alpine aarch64. g++/musl-dev/qt6-qtbase-dev: on-target
-# native compile. font-dejavu + fontconfig: Qt needs fonts to render text.
-PKGS="qt6-qtbase qt6-qtbase-x11 qt6-qtbase-dev g++ musl-dev font-dejavu fontconfig"
+# Runtime only: qt6-qtbase (core libs), qt6-qtbase-x11 (carries the linuxfb QPA
+# plugin libqlinuxfb.so on Alpine aarch64), font-dejavu + fontconfig (Qt needs
+# fonts to render text). The clock binary is normally cross-built at prebuild
+# time in a matching-branch Alpine container, so no compiler is needed on-target.
+PKGS="qt6-qtbase qt6-qtbase-x11 font-dejavu fontconfig"
+# Fallback compiler/-dev set, installed on-target only if the prebuilt binary
+# is absent (e.g. docker was unavailable during prebuild).
+DEV_PKGS="qt6-qtbase-dev g++ musl-dev"
 
 install_packages() {
     # 1) prefetched offline install (fast, no network)
@@ -76,16 +80,31 @@ echo "QT_PREP linuxfb plugin: $QPA_DIR/libqlinuxfb.so"
 [ -e /dev/fb0 ] || fail "/dev/fb0 not present (display backend missing)"
 echo "QT_PREP /dev/fb0 present"
 
-# ---- compile the demo natively on-target ----
-echo "QT_STAGE compiling clock.cpp..."
-CXXFLAGS="$(pkg-config --cflags Qt6Widgets Qt6Gui Qt6Core 2>/dev/null || true)"
-LDFLAGS="$(pkg-config --libs Qt6Widgets Qt6Gui Qt6Core 2>/dev/null || true)"
-[ -n "$LDFLAGS" ] || fail "pkg-config could not resolve Qt6Widgets (dev headers missing)"
-# fPIC + position independent: Qt6 on Alpine is built PIE.
-run_with_timeout 420 g++ -std=c++17 -fPIC -O1 \
-    /usr/local/qt-demo/clock.cpp $CXXFLAGS $LDFLAGS -o /usr/local/qt-demo/clock \
-    || fail "g++ compile failed"
-echo "QT_STAGE compiled: /usr/local/qt-demo/clock"
+# ---- obtain the clock binary: prefer the prebuilt one, else compile on-target ----
+if [ -x /usr/local/qt-demo/clock ]; then
+    echo "QT_STAGE using prebuilt clock binary (/usr/local/qt-demo/clock)"
+else
+    echo "QT_STAGE no prebuilt binary; installing toolchain and compiling on-target..."
+    # Install the dev/compiler set (from network; not prefetched).
+    for mirror in \
+        "${STARRY_APK_MIRROR:-}" \
+        http://mirrors.huaweicloud.com/alpine \
+        http://dl-cdn.alpinelinux.org/alpine \
+        http://mirrors.aliyun.com/alpine; do
+        [ -z "$mirror" ] && continue
+        write_repos "$mirror"
+        if run_with_timeout 900 apk add --no-cache $DEV_PKGS; then break; fi
+        rm -rf /var/cache/apk/* 2>/dev/null || true
+    done
+    CXXFLAGS="$(pkg-config --cflags Qt6Widgets Qt6Gui Qt6Core 2>/dev/null || true)"
+    LDFLAGS="$(pkg-config --libs Qt6Widgets Qt6Gui Qt6Core 2>/dev/null || true)"
+    [ -n "$LDFLAGS" ] || fail "pkg-config could not resolve Qt6Widgets (dev headers missing)"
+    # fPIC + position independent: Qt6 on Alpine is built PIE.
+    run_with_timeout 600 g++ -std=c++17 -fPIC -O1 \
+        /usr/local/qt-demo/clock.cpp $CXXFLAGS $LDFLAGS -o /usr/local/qt-demo/clock \
+        || fail "g++ compile failed"
+    echo "QT_STAGE compiled: /usr/local/qt-demo/clock"
+fi
 
 # ---- run under linuxfb ----
 export QT_QPA_PLATFORM="linuxfb:fb=/dev/fb0"
