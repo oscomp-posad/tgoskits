@@ -130,13 +130,22 @@ const MAX_GROUP_READ_WORDS: usize = 1 + (1 + MAX_GROUP_MEMBERS) * 2;
 /// ([`MAX_GROUP_READ_WORDS`] u64, worst case a group-leader read) and an optional
 /// callchain block — a `u64 nr` count followed by up to two `PERF_CONTEXT_*`
 /// markers and `2 * MAX_STACK_DEPTH` instruction pointers (a kernel + a user
-/// region). [`build_sample`] writes into a stack buffer of this size and returns
-/// the actual length. The callchain term reserves the leading `u64 nr` count
-/// (`1 +`) in addition to the two `PERF_CONTEXT_*` markers and `2 * MAX_STACK_DEPTH`
-/// instruction pointers the on-stack chain buffer holds, so a future two-region
-/// callchain cannot overrun the record buffer.
-const SAMPLE_RECORD_MAX_LEN: usize =
-    8 + 9 * 8 + MAX_GROUP_READ_WORDS * 8 + (1 + 2 + 2 * MAX_STACK_DEPTH) * 8;
+/// region) — then the optional `PERF_SAMPLE_REGS_USER` block (`u64 abi` + up to
+/// [`REGS_USER_MAX`] registers) and `PERF_SAMPLE_STACK_USER` block (`u64 size` +
+/// [`MAX_STACK_USER_DUMP`] bytes + `u64 dyn_size`). [`build_sample`] writes into
+/// the per-CPU [`RECORD_SCRATCH`] (not the IRQ stack — a stack dump is multi-KiB)
+/// and returns the actual length. Each optional term reserves its worst case, so
+/// no requested field combination can overrun the record buffer.
+const SAMPLE_RECORD_MAX_LEN: usize = 8
+    + 9 * 8
+    + MAX_GROUP_READ_WORDS * 8
+    + (1 + 2 + 2 * MAX_STACK_DEPTH) * 8
+    // PERF_SAMPLE_REGS_USER: `u64 abi` + up to REGS_USER_MAX selected registers.
+    + (1 + REGS_USER_MAX) * 8
+    // PERF_SAMPLE_STACK_USER: `u64 size` + the bounded dump + `u64 dyn_size`.
+    + 8
+    + MAX_STACK_USER_DUMP
+    + 8;
 
 // `perf_event_sample_format` bits (see `man perf_event_open`). The scalar fields
 // below plus `PERF_SAMPLE_CALLCHAIN` are supported; every other bit (READ, RAW,
@@ -171,6 +180,16 @@ const PERF_SAMPLE_CALLCHAIN: u64 = 1 << 5;
 /// the `TOTAL_TIME_*` fields need per-event/per-group accounting reachable from
 /// the IRQ handler and are rejected at open (see `perf_event_open_hw`).
 pub const PERF_SAMPLE_READ: u64 = 1 << 10;
+/// `PERF_SAMPLE_REGS_USER`: the interrupted user register file — a `u64 abi`
+/// followed by the registers selected by `attr.sample_regs_user` (aarch64
+/// `PERF_REG_ARM64` order) — so a host `perf report --call-graph dwarf` can seed
+/// its DWARF unwind. Set (with `STACK_USER`) by `perf record --call-graph dwarf`.
+const PERF_SAMPLE_REGS_USER: u64 = 1 << 12;
+/// `PERF_SAMPLE_STACK_USER`: a bounded dump of the interrupted user stack — `u64
+/// size`, `size` stack bytes, `u64 dyn_size` — the companion of `REGS_USER` that
+/// lets the host DWARF-unwind `-fomit-frame-pointer` binaries. The dump length is
+/// clamped to [`MAX_STACK_USER_DUMP`].
+const PERF_SAMPLE_STACK_USER: u64 = 1 << 13;
 
 /// `read_format` bit `PERF_FORMAT_ID` (mirrors `super::PERF_FORMAT_ID`), needed
 /// here to lay out the `PERF_SAMPLE_READ` block.
@@ -195,6 +214,23 @@ const PERF_CONTEXT_USER: u64 = (-512i64) as u64;
 /// allocation-free in the overflow handler.
 const MAX_STACK_DEPTH: usize = 64;
 
+/// Upper bound on the user-stack dump a `PERF_SAMPLE_STACK_USER` sample carries.
+/// Matches perf's `--call-graph dwarf` default (8 KiB); a larger
+/// `attr.sample_stack_user` is clamped to this. Bounds the per-CPU record/stack
+/// scratch buffers so a multi-KiB dump never sits on the hard-IRQ stack.
+const MAX_STACK_USER_DUMP: usize = 8192;
+
+/// Number of `u64` registers a `PERF_SAMPLE_REGS_USER` block can carry (aarch64
+/// `PERF_REG_ARM64`: `x0..x30`, `SP`, `PC`). Bounds the record buffer; kept in
+/// lock-step with [`ax_cpu::pmu::INTERRUPTED_REGS_COUNT`], the accessor it reads.
+const REGS_USER_MAX: usize = 33;
+const _: () = assert!(REGS_USER_MAX == ax_cpu::pmu::INTERRUPTED_REGS_COUNT);
+
+/// `PERF_SAMPLE_REGS_ABI_64`: the `PERF_SAMPLE_REGS_USER` block that follows holds
+/// 64-bit registers. Emitted for a user (EL0) sample; a kernel sample uses the
+/// implicit `PERF_SAMPLE_REGS_ABI_NONE` (`0`) with no register words.
+const PERF_SAMPLE_REGS_ABI_64: u64 = 2;
+
 /// Every `sample_type` bit the sampling backend can emit a well-formed
 /// `PERF_RECORD_SAMPLE` for. A sampling event whose `sample_type` sets any bit
 /// outside this mask is rejected at open ([`super::hw`] reuses this constant);
@@ -210,7 +246,9 @@ pub const SUPPORTED_SAMPLE_TYPE: u64 = PERF_SAMPLE_IP
     | PERF_SAMPLE_STREAM_ID
     | PERF_SAMPLE_IDENTIFIER
     | PERF_SAMPLE_CALLCHAIN
-    | PERF_SAMPLE_READ;
+    | PERF_SAMPLE_READ
+    | PERF_SAMPLE_REGS_USER
+    | PERF_SAMPLE_STACK_USER;
 
 /// Whether a sampling event's `PERF_SAMPLE_READ` request is supported. `true`
 /// unless `PERF_SAMPLE_READ` is combined with a `read_format` bit outside
@@ -223,6 +261,17 @@ pub const SUPPORTED_SAMPLE_TYPE: u64 = PERF_SAMPLE_IP
 /// open.
 pub fn sample_read_supported(sample_type: u64, read_format: u64) -> bool {
     sample_type & PERF_SAMPLE_READ == 0 || read_format & !(READ_FORMAT_ID | READ_FORMAT_GROUP) == 0
+}
+
+/// Whether a sampling event's `PERF_SAMPLE_REGS_USER` request is supported: `true`
+/// unless it selects a register bit outside the aarch64 `PERF_REG_ARM64` range
+/// (`0..REGS_USER_MAX`), which the overflow handler cannot resolve. Mirrors Linux
+/// rejecting an out-of-range `sample_regs_user` with `EINVAL`. `PERF_SAMPLE_STACK_USER`
+/// needs no such gate — its dump size is clamped to [`MAX_STACK_USER_DUMP`] when
+/// captured. Checked at open (see `super::hw`).
+pub fn sample_regs_user_supported(sample_type: u64, sample_regs_user: u64) -> bool {
+    sample_type & PERF_SAMPLE_REGS_USER == 0
+        || sample_regs_user & !((1u64 << REGS_USER_MAX) - 1) == 0
 }
 
 /// Maximum number of counting members a group-leader sampling event carries in
@@ -365,6 +414,14 @@ pub struct SampleSlot {
     /// Number of populated entries in [`members`](Self::members) (`<=
     /// MAX_GROUP_MEMBERS`). `0` for a single-event read or a non-group leader.
     pub n_members: u8,
+    /// `attr.sample_regs_user`: the register mask a `PERF_SAMPLE_REGS_USER` sample
+    /// emits (aarch64 `PERF_REG_ARM64` bits). `0` when the event did not request
+    /// `PERF_SAMPLE_REGS_USER`.
+    pub sample_regs_user: u64,
+    /// `attr.sample_stack_user`: the requested user-stack dump length for a
+    /// `PERF_SAMPLE_STACK_USER` sample (clamped to [`MAX_STACK_USER_DUMP`] at dump
+    /// time). `0` when the event did not request `PERF_SAMPLE_STACK_USER`.
+    pub sample_stack_user: u32,
 }
 
 // SAFETY: `SampleSlot` is a plain bag of integers plus raw pointers (`notify`,
@@ -384,6 +441,22 @@ unsafe impl Send for SampleSlot {}
 /// sampling event currently owns that counter on this CPU.
 #[ax_percpu::def_percpu]
 static REGISTRY: [Option<SampleSlot>; 32] = [None; 32];
+
+/// Per-CPU scratch the overflow handler assembles each `PERF_RECORD_SAMPLE` into,
+/// so a large record (chiefly a `PERF_SAMPLE_STACK_USER` dump of up to
+/// [`MAX_STACK_USER_DUMP`] bytes) never lives on the hard-IRQ stack. The handler
+/// runs with local IRQs masked on its own core, so this CPU's buffer is
+/// exclusively owned for the whole handler; `build_sample` overwrites from offset
+/// 0 and only `[..len]` is ever read, so stale trailing bytes are inert.
+#[ax_percpu::def_percpu]
+static RECORD_SCRATCH: [u8; SAMPLE_RECORD_MAX_LEN] = [0u8; SAMPLE_RECORD_MAX_LEN];
+
+/// Per-CPU scratch the handler dumps the interrupted user stack into (via
+/// [`super::nofault`]) for `PERF_SAMPLE_STACK_USER`, before copying it into the
+/// record. Same per-CPU, IRQ-masked exclusive ownership as [`RECORD_SCRATCH`];
+/// the dump zero-fills its tail so no stale bytes from a prior sample leak.
+#[ax_percpu::def_percpu]
+static STACK_SCRATCH: [u8; MAX_STACK_USER_DUMP] = [0u8; MAX_STACK_USER_DUMP];
 
 /// Whether [`pmu_overflow_handler`] has been registered with the IRQ framework.
 ///
@@ -592,6 +665,8 @@ pub fn pmu_overflow_handler(_ctx: IrqContext) -> IrqReturn {
         let ring_len = slot.ring_len;
         let cur_period = slot.period;
         let owner_ids = slot.owner_ids;
+        let sample_regs_user = slot.sample_regs_user;
+        let sample_stack_user = slot.sample_stack_user;
 
         // Build one PERF_RECORD_SAMPLE honouring the event's `sample_type`
         // (validated at open to set IP and only supported bits). pid/tid are the
@@ -670,7 +745,35 @@ pub fn pmu_overflow_handler(_ctx: IrqContext) -> IrqReturn {
         } else {
             0
         };
-        let mut record = [0u8; SAMPLE_RECORD_MAX_LEN];
+        // PERF_SAMPLE_REGS_USER / PERF_SAMPLE_STACK_USER (host DWARF unwinding).
+        // Only a user (EL0) sample carries them; a kernel sample emits abi=NONE and
+        // a zero-size stack (Linux semantics). The register file comes from the
+        // published trap frame; the stack is dumped through the no-fault reader.
+        let mut regs_buf = [0u64; REGS_USER_MAX];
+        let n_regs = if sample_type & PERF_SAMPLE_REGS_USER != 0 && is_user {
+            gather_user_regs(sample_regs_user, &mut regs_buf)
+        } else {
+            0
+        };
+        let regs_abi = if n_regs > 0 {
+            PERF_SAMPLE_REGS_ABI_64
+        } else {
+            0
+        };
+        // SAFETY: this CPU's STACK_SCRATCH is exclusively owned in the handler
+        // (local IRQs masked on this core). `dump_user_stack` fills `[..stack_size]`
+        // and zero-fills any tail past the captured `stack_dyn` bytes.
+        let stack_scratch = unsafe { STACK_SCRATCH.current_ref_mut_raw() };
+        let (stack_size, stack_dyn) = if sample_type & PERF_SAMPLE_STACK_USER != 0 && is_user {
+            dump_user_stack(sample_stack_user as usize, stack_scratch)
+        } else {
+            (0, 0)
+        };
+
+        // Assemble the record in this CPU's scratch, not on the IRQ stack (a
+        // STACK_USER dump is several KiB). SAFETY: as for STACK_SCRATCH above; a
+        // distinct static, so the two mutable borrows do not alias.
+        let record = unsafe { RECORD_SCRATCH.current_ref_mut_raw() };
         let data = SampleData {
             ip,
             pid,
@@ -683,8 +786,12 @@ pub fn pmu_overflow_handler(_ctx: IrqContext) -> IrqReturn {
             period: cur_period as u64,
             callchain: &chain[..nchain],
             read: &read_blk[..nread],
+            regs_abi,
+            regs_user: &regs_buf[..n_regs],
+            stack_user: &stack_scratch[..stack_size],
+            stack_dyn_size: stack_dyn,
         };
-        let len = build_sample(&mut record, sample_type, misc, &data);
+        let len = build_sample(&mut record[..], sample_type, misc, &data);
 
         // Flush any not-yet-reported dropped samples as an in-band
         // `PERF_RECORD_LOST` before this sample, so `perf report` shows
@@ -803,6 +910,74 @@ fn build_callchain(ip: u64, is_user: bool, chain: &mut [u64]) -> usize {
     }
 }
 
+/// Fills `out` with the interrupted user registers selected by `mask` (aarch64
+/// `PERF_REG_ARM64` bits, ascending), returning the count written, for a
+/// `PERF_SAMPLE_REGS_USER` block. Reads the whole register file from the trap
+/// frame published at IRQ entry ([`ax_cpu::pmu::interrupted_regs`]) — alloc-free,
+/// IRQ-safe, and never from the live GPRs (the handler's own frames have clobbered
+/// them). `0` (no register words) if no frame is published. `out` must hold at
+/// least [`REGS_USER_MAX`] entries.
+fn gather_user_regs(mask: u64, out: &mut [u64]) -> usize {
+    let Some(regs) = ax_cpu::pmu::interrupted_regs() else {
+        return 0;
+    };
+    let mut w = 0;
+    for (i, r) in regs.iter().enumerate() {
+        if mask & (1 << i) != 0 {
+            out[w] = *r;
+            w += 1;
+        }
+    }
+    w
+}
+
+/// Dumps `min(want, MAX_STACK_USER_DUMP)` bytes (rounded down to whole `u64`
+/// words) of the interrupted user stack into `scratch` for `PERF_SAMPLE_STACK_USER`,
+/// returning `(size, dyn_size)`: `size` is the dump length written into `scratch`
+/// (zero-padded past the captured bytes) and `dyn_size` is how many bytes were read
+/// before an unmapped word truncated the walk (Linux semantics). Reads upward from
+/// the interrupted user `SP` through the IRQ-safe no-fault `TTBR0` reader
+/// ([`super::nofault::read_user_word_nofault`]), so a bogus `SP` yields a short
+/// dump, never a fault. `scratch` must be at least [`MAX_STACK_USER_DUMP`] bytes.
+fn dump_user_stack(want: usize, scratch: &mut [u8]) -> (usize, u64) {
+    // Whole `u64` words only (the no-fault reader takes 8-aligned addresses; the
+    // aarch64 user SP is ABI-16-aligned, so `& !7` is a no-op for a valid SP).
+    let size = want.min(MAX_STACK_USER_DUMP) & !7;
+    if size == 0 {
+        return (0, 0);
+    }
+    let Some(sp) = ax_cpu::pmu::interrupted_sp().map(|s| s & !7) else {
+        return (0, 0);
+    };
+    let mut captured = 0usize;
+    let mut truncated = false;
+    let mut off = 0usize;
+    while off < size {
+        // Zero-fill each word once truncated (or on address overflow) so no stale
+        // scratch bytes from a prior sample leak into this record.
+        let word = if truncated {
+            None
+        } else {
+            match sp.checked_add(off) {
+                Some(va) => super::nofault::read_user_word_nofault(va),
+                None => None,
+            }
+        };
+        match word {
+            Some(w) => {
+                scratch[off..off + 8].copy_from_slice(&w.to_ne_bytes());
+                captured = off + 8;
+            }
+            None => {
+                truncated = true;
+                scratch[off..off + 8].fill(0);
+            }
+        }
+        off += 8;
+    }
+    (size, captured as u64)
+}
+
 /// Lays out one `PERF_RECORD_SAMPLE` into `buf` per `sample_type`, returning its
 /// total length in bytes.
 ///
@@ -822,6 +997,10 @@ fn build_callchain(ip: u64, is_user: bool, chain: &mut [u64]) -> usize {
 /// 10. `PERIOD` → `u64 period`
 /// 11. `CALLCHAIN` → `u64 nr`, then `nr` u64 entries (`PERF_CONTEXT_*` markers +
 ///     instruction pointers) from `d.callchain`
+/// 12. `REGS_USER` → `u64 abi`, then the selected registers `d.regs_user` (present
+///     only when `abi != 0`)
+/// 13. `STACK_USER` → `u64 size`, then `size` bytes `d.stack_user`, then `u64
+///     dyn_size` (only `size` is emitted when the dump is empty)
 ///
 /// `buf` must be at least [`SAMPLE_RECORD_MAX_LEN`] bytes. With
 /// `sample_type == PERF_SAMPLE_IP` exactly, the result is the original 16-byte
@@ -846,6 +1025,21 @@ struct SampleData<'a> {
     /// The `PERF_SAMPLE_READ` block (`value`, optionally `id`), or an empty slice
     /// when the event did not request `PERF_SAMPLE_READ`. Emitted verbatim.
     read: &'a [u64],
+    /// `PERF_SAMPLE_REGS_USER` abi word: [`PERF_SAMPLE_REGS_ABI_64`] for a user
+    /// sample, `0` (`PERF_SAMPLE_REGS_ABI_NONE`) for a kernel sample — in which case
+    /// [`regs_user`](Self::regs_user) is empty and no register words follow.
+    regs_abi: u64,
+    /// The `PERF_SAMPLE_REGS_USER` registers already masked to `attr.sample_regs_user`
+    /// (ascending `PERF_REG_ARM64` order), or empty when not requested / not a user
+    /// sample. Emitted verbatim after the abi word.
+    regs_user: &'a [u64],
+    /// The `PERF_SAMPLE_STACK_USER` dump: `stack_user.len()` bytes at the leaf of the
+    /// interrupted user stack (zero-padded past the captured portion), or empty when
+    /// not requested / not a user sample. Borrows the handler's per-CPU stack scratch.
+    stack_user: &'a [u8],
+    /// Bytes of [`stack_user`](Self::stack_user) actually captured before an unmapped
+    /// word truncated the walk (Linux `dyn_size`); `<= stack_user.len()`.
+    stack_dyn_size: u64,
 }
 
 /// Serialize a `PERF_RECORD_LOST` into `buf`: `perf_event_header` (`type`,
@@ -981,6 +1175,26 @@ fn build_sample(buf: &mut [u8], sample_type: u64, misc: u16, d: &SampleData<'_>)
         put!(d.callchain.len() as u64);
         for &entry in d.callchain {
             put!(entry);
+        }
+    }
+    if sample_type & PERF_SAMPLE_REGS_USER != 0 {
+        // `{ u64 abi; u64 regs[weight(mask)]; }` — the register words are present
+        // only when `abi != 0` (a user sample); `regs_user` is empty otherwise.
+        put!(d.regs_abi);
+        for &r in d.regs_user {
+            put!(r);
+        }
+    }
+    if sample_type & PERF_SAMPLE_STACK_USER != 0 {
+        // `{ u64 size; char data[size]; u64 dyn_size; }`. Linux emits only the
+        // `size` word when `size == 0` (a kernel sample, where `stack_user` is
+        // empty); otherwise the `size` bytes and the captured `dyn_size` follow.
+        let size = d.stack_user.len();
+        put!(size as u64);
+        if size != 0 {
+            buf[off..off + size].copy_from_slice(d.stack_user);
+            off += size;
+            put!(d.stack_dyn_size);
         }
     }
 

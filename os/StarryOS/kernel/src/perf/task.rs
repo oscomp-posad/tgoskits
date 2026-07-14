@@ -204,6 +204,13 @@ pub struct PerTaskCounter {
     sample_period: u32,
     /// `attr.sample_type`. For sampling this is exactly `PERF_SAMPLE_IP`.
     sample_type: u64,
+    /// `attr.sample_regs_user`: the `PERF_SAMPLE_REGS_USER` register mask, copied
+    /// into each per-slice [`SampleSlot`] so the overflow handler emits the user
+    /// register file for `perf record --call-graph dwarf`.
+    sample_regs_user: u64,
+    /// `attr.sample_stack_user`: the requested `PERF_SAMPLE_STACK_USER` user-stack
+    /// dump length (clamped to the kernel cap when the handler dumps it).
+    sample_stack_user: u32,
     /// Frequency mode (`attr.freq`): the overflow handler re-derives the period
     /// after each sample to converge on `freq_target` Hz. Fixed period when false.
     freq: bool,
@@ -334,6 +341,10 @@ pub struct PerTaskConfig {
     pub sample_period: u32,
     /// `attr.sample_type` (only meaningful when `sample_period > 0`).
     pub sample_type: u64,
+    /// `attr.sample_regs_user`: the `PERF_SAMPLE_REGS_USER` register mask.
+    pub sample_regs_user: u64,
+    /// `attr.sample_stack_user`: the requested `PERF_SAMPLE_STACK_USER` dump length.
+    pub sample_stack_user: u32,
     /// Frequency mode (`attr.freq`): the overflow handler adapts the period each
     /// slice toward `target_freq` Hz. Fixed `-c` period when false.
     pub freq: bool,
@@ -391,6 +402,8 @@ impl PerTaskCounter {
             is_sampling: cfg.sample_period > 0,
             sample_period: cfg.sample_period,
             sample_type: cfg.sample_type,
+            sample_regs_user: cfg.sample_regs_user,
+            sample_stack_user: cfg.sample_stack_user,
             freq: cfg.freq,
             freq_target: cfg.target_freq,
             sample_id: AtomicU64::new(0),
@@ -771,6 +784,8 @@ fn arm_slice(ptc: &PerTaskCounter, n: usize, now: u64, owner_pid: u32, owner_tid
                 read_value_sink: &ptc.sample_read_value as *const AtomicU64 as *const (),
                 members,
                 n_members,
+                sample_regs_user: ptc.sample_regs_user,
+                sample_stack_user: ptc.sample_stack_user,
             },
         );
         ax_cpu::pmu::overflow::enable_irq(n);
@@ -1288,6 +1303,8 @@ pub fn on_clone_inherit(parent_thr: &Thread, child_thr: &Thread) {
                     enable_on_exec: false,
                     sample_period: p.sample_period,
                     sample_type: p.sample_type,
+                    sample_regs_user: p.sample_regs_user,
+                    sample_stack_user: p.sample_stack_user,
                     freq: p.freq,
                     target_freq: p.freq_target,
                     want_comm: p.want_comm,

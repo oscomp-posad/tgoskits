@@ -824,6 +824,39 @@ pub fn interrupted_sp() -> Option<usize> {
     Some(unsafe { (*tf).sp as usize })
 }
 
+/// The number of user registers captured for `PERF_SAMPLE_REGS_USER`, indexed by
+/// the aarch64 `PERF_REG_ARM64` enum: `0..=30` are `x0..x30`, `31` is `SP`, and
+/// `32` is `PC`. Matches Linux `PERF_REG_ARM64_MAX`, so a host `perf` decodes the
+/// register block against the same layout.
+pub const INTERRUPTED_REGS_COUNT: usize = 33;
+
+/// The interrupted register file for `PERF_SAMPLE_REGS_USER`, in `PERF_REG_ARM64`
+/// order (`[x0..x30, SP, PC]`; see [`INTERRUPTED_REGS_COUNT`]).
+///
+/// Returns `None` when no trap frame is published (same condition as
+/// [`interrupted_fp`]). The general-purpose registers come from the frame
+/// published at IRQ entry — the handler's own frames have already clobbered the
+/// live GPRs, so they must be read from the saved frame, never from the CPU. `SP`
+/// reuses [`interrupted_sp`] (live `SP_EL0` for a user interrupt, the saved frame
+/// SP for a kernel one) and `PC` is the saved `ELR_EL1` (== [`interrupted_pc`]).
+/// Intended for a *user* (EL0) sample; a kernel sample has no meaningful user
+/// register state and the caller emits `PERF_SAMPLE_REGS_ABI_NONE` instead.
+pub fn interrupted_regs() -> Option<[u64; INTERRUPTED_REGS_COUNT]> {
+    let p = PMU_TRAP_FRAME.read_current();
+    if p == 0 {
+        return None;
+    }
+    // SAFETY: `p` was published from a live `&TrapFrame` by `set_trap_frame` and
+    // stays valid for the duration of this CPU's IRQ dispatch, during which we run
+    // (see `interrupted_fp`).
+    let tf = unsafe { &*(p as *const TrapFrame) };
+    let mut regs = [0u64; INTERRUPTED_REGS_COUNT];
+    regs[0..31].copy_from_slice(&tf.x);
+    regs[31] = interrupted_sp().unwrap_or(tf.sp as usize) as u64;
+    regs[32] = tf.elr;
+    Some(regs)
+}
+
 #[cfg(test)]
 mod hw_cache_tests {
     use super::hw_cache_to_arm;

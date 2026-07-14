@@ -225,6 +225,12 @@ struct SamplingState {
     target_freq: u32,
     /// `attr.sample_type`. M2 requires exactly `PERF_SAMPLE_IP`.
     sample_type: u64,
+    /// `attr.sample_regs_user`: the `PERF_SAMPLE_REGS_USER` register mask (aarch64
+    /// `PERF_REG_ARM64` bits); `0` when the event does not sample user registers.
+    sample_regs_user: u64,
+    /// `attr.sample_stack_user`: the requested `PERF_SAMPLE_STACK_USER` dump length
+    /// (clamped to the kernel cap at dump time); `0` when not sampling the stack.
+    sample_stack_user: u32,
     /// Readiness set readers wait on; woken (with `IoEvents::IN`) by the worker.
     poll_ready: Arc<PollSet>,
     /// IRQ-safe notification the overflow handler pokes; drained by the worker.
@@ -601,6 +607,8 @@ impl HwPerfEvent {
             };
             let period = sampling.period;
             let sample_type = sampling.sample_type;
+            let sample_regs_user = sampling.sample_regs_user;
+            let sample_stack_user = sampling.sample_stack_user;
             let freq = sampling.freq;
             let target_freq = sampling.target_freq;
             let (ring_vaddr, ring_len) = if let Some((rv, rl, _anchor)) = &sampling.redirect {
@@ -647,6 +655,8 @@ impl HwPerfEvent {
                     // open, so its `PERF_SAMPLE_READ` block is single-event.
                     members: [sampling::GroupMember::EMPTY; sampling::MAX_GROUP_MEMBERS],
                     n_members: 0,
+                    sample_regs_user,
+                    sample_stack_user,
                 },
             );
             ax_cpu::pmu::overflow::enable_irq(n);
@@ -1375,6 +1385,14 @@ pub fn perf_event_open_hw(attr: &perf_event_attr, pid: i32, cpu: i32) -> AxResul
             );
             return Err(AxError::Unsupported);
         }
+        if !super::sampling::sample_regs_user_supported(attr.sample_type, attr.sample_regs_user) {
+            warn!(
+                "perf_event_open: -a sample_regs_user {:#x} selects a register outside \
+                 PERF_REG_ARM64",
+                attr.sample_regs_user
+            );
+            return Err(AxError::InvalidInput);
+        }
         if !super::sampling::sample_read_supported(attr.sample_type, attr.read_format)
             || attr.read_format & super::sampling::READ_FORMAT_GROUP != 0
         {
@@ -1434,6 +1452,8 @@ pub fn perf_event_open_hw(attr: &perf_event_attr, pid: i32, cpu: i32) -> AxResul
                 freq: is_freq,
                 target_freq,
                 sample_type: attr.sample_type,
+                sample_regs_user: attr.sample_regs_user,
+                sample_stack_user: attr.sample_stack_user,
                 poll_ready,
                 notify,
                 poll_alive,
@@ -1521,6 +1541,13 @@ pub fn perf_event_open_hw(attr: &perf_event_attr, pid: i32, cpu: i32) -> AxResul
                 attr.sample_type
             );
             return Err(AxError::Unsupported);
+        }
+        if !super::sampling::sample_regs_user_supported(attr.sample_type, attr.sample_regs_user) {
+            warn!(
+                "perf_event_open: sample_regs_user {:#x} selects a register outside PERF_REG_ARM64",
+                attr.sample_regs_user
+            );
+            return Err(AxError::InvalidInput);
         }
         if !super::sampling::sample_read_supported(attr.sample_type, attr.read_format) {
             warn!(
@@ -1627,6 +1654,8 @@ pub fn perf_event_open_hw(attr: &perf_event_attr, pid: i32, cpu: i32) -> AxResul
             freq: is_freq,
             target_freq,
             sample_type: attr.sample_type,
+            sample_regs_user: attr.sample_regs_user,
+            sample_stack_user: attr.sample_stack_user,
             poll_ready,
             notify,
             poll_alive,
@@ -1709,6 +1738,14 @@ fn perf_event_open_hw_per_task(attr: &perf_event_attr, pid: i32) -> AxResult<HwP
             );
             return Err(AxError::Unsupported);
         }
+        if !super::sampling::sample_regs_user_supported(attr.sample_type, attr.sample_regs_user) {
+            warn!(
+                "perf_event_open: per-task sample_regs_user {:#x} selects a register outside \
+                 PERF_REG_ARM64",
+                attr.sample_regs_user
+            );
+            return Err(AxError::InvalidInput);
+        }
         if !super::sampling::sample_read_supported(attr.sample_type, attr.read_format) {
             warn!(
                 "perf_event_open: per-task PERF_SAMPLE_READ read_format {:#x} unsupported (only 0 \
@@ -1774,6 +1811,8 @@ fn perf_event_open_hw_per_task(attr: &perf_event_attr, pid: i32) -> AxResult<HwP
             // `0` ⇒ counting; `> 0` ⇒ per-task sampling.
             sample_period,
             sample_type: attr.sample_type,
+            sample_regs_user: attr.sample_regs_user,
+            sample_stack_user: attr.sample_stack_user,
             freq: is_freq,
             target_freq,
             // Side-band records for `perf report` symbolization.
