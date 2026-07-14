@@ -33,6 +33,25 @@ copy_base_text_file_to_overlay() {
     chmod 0644 "$target"
 }
 
+# The stock Alpine rootfs image ships nearly full (~135 MiB free); the Qt
+# runtime closure is ~276 MiB installed, so the guest apk install would run out
+# of space (manifesting as partial installs / missing qt6-qtbase-x11 → no
+# linuxfb plugin). Grow the ext4 image to a comfortable absolute size so the
+# runtime fits. Idempotent: only grows if below target. Requires resize2fs
+# (e2fsprogs — already required for debugfs) and BSD/GNU `dd` (portable seek).
+grow_rootfs() {
+    local img="$rootfs" target_mib=3072 cur_mib
+    [ -f "$img" ] || { echo "warning: rootfs is not a file ($img); skip grow" >&2; return 0; }
+    command -v resize2fs >/dev/null 2>&1 || { echo "warning: resize2fs missing; skip rootfs grow" >&2; return 0; }
+    cur_mib=$(( $(wc -c <"$img") / 1048576 ))
+    if [ "$cur_mib" -lt "$target_mib" ]; then
+        echo "QT_PREBUILD growing rootfs ${cur_mib}MiB -> ${target_mib}MiB for Qt runtime..."
+        dd if=/dev/zero bs=1048576 count=0 seek="$target_mib" of="$img" 2>/dev/null
+        e2fsck -fy "$img" >/dev/null 2>&1 || true
+        resize2fs "$img" >/dev/null 2>&1 || echo "warning: resize2fs failed (Qt install may run out of space)" >&2
+    fi
+}
+
 alpine_branch() {
     local branch
     branch="$(sed -n 's#.*/\(v[0-9][0-9.]*\)/main#\1#p' "$overlay_dir/etc/apk/repositories" 2>/dev/null | head -1)"
@@ -139,6 +158,7 @@ compile_clock_in_container() {
 }
 
 populate_overlay() {
+    grow_rootfs
     mkdir -p "$overlay_dir/usr/bin" "$overlay_dir/usr/local/qt-demo"
     # Ship the source too, so the guest can compile as a fallback if the
     # container prebuild did not produce a binary.
