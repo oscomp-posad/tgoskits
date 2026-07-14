@@ -6787,6 +6787,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rockchip-vop2"
+version = "0.1.0"
+dependencies = [
+ "log",
+]
+
+[[package]]
 name = "rsext4"
 version = "0.7.5"
 dependencies = [

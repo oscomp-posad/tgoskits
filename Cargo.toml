@@ -65,6 +65,7 @@ members = [
 
     "drivers/ax-driver",
     "drivers/blk/*",
+    "drivers/display/*",
     "drivers/examples/*",
     "drivers/firmware/*",
     "drivers/gpu/*",
