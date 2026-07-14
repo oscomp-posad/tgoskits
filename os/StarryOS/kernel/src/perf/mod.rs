@@ -632,56 +632,57 @@ pub fn perf_event_open(
     // resolves from sysfs) must be dispatched before
     // `PerfProbeArgs::try_from_perf_attr`, which maps any non-probe type through
     // `perf_sw_ids` and rejects hardware configs with `EINVAL`.
-    let event: Box<dyn PerfEventOps> = if attr.type_ == PerfTypeId::PERF_TYPE_HARDWARE as u32
-        || attr.type_ == PerfTypeId::PERF_TYPE_HW_CACHE as u32
-        || attr.type_ == PerfTypeId::PERF_TYPE_RAW as u32
-        || attr.type_ == hw::ARMV8_PMUV3_PERF_TYPE
-        || attr.type_ == hw::ARMV8_CORTEX_A55_TYPE
-        || attr.type_ == hw::ARMV8_CORTEX_A76_TYPE
-    {
-        // Thread `pid` + `cpu` into the hardware path: it chooses between
-        // per-task counting (`pid > 0`), a cpu-bound system-wide event
-        // (`pid <= 0 && cpu >= 0`, the `perf stat -a` fan-out — counts on that
-        // core via its per-CPU pool), and the current-core path (`cpu < 0`).
-        // `group_fd` / `flags` are not consumed by the hardware path.
-        Box::new(hw::perf_event_open_hw(attr, pid, cpu)?)
-    } else {
-        let args = PerfProbeArgs::try_from_perf_attr::<EbpfKernelAuxiliary>(
-            attr, pid, cpu, group_fd, flags,
-        )
-        .into_ax_result()?;
-        // Sampling params for the probe sample-emit path (`perf record -e kprobe:`),
-        // which `PerfProbeArgs` does not carry (its `sample_type` loses a bit-mask,
-        // and it drops `sample_period` entirely). SAFETY: both union arms are `u64`
-        // in the `repr(C)` POD.
-        let sample_period = unsafe { attr.__bindgen_anon_1.sample_period };
-        let sample_type = attr.sample_type;
-        match args.type_ {
-            PerfTypeId::PERF_TYPE_KPROBE => Box::new(kprobe::perf_event_open_kprobe(
-                args,
-                sample_period,
-                sample_type,
-            )?),
-            // The five counting software events (`perf stat`'s default rows) become
-            // real per-task counters; every other software config (e.g.
-            // `PERF_COUNT_SW_DUMMY`, `perf record`'s tracking event) keeps the
-            // BPF/ring path.
-            PerfTypeId::PERF_TYPE_SOFTWARE => match &args.config {
-                PerfProbeConfig::PerfSwIds(sw_id) if sw::is_counting_sw(*sw_id) => {
-                    Box::new(sw::perf_event_open_sw(attr, *sw_id, pid)?)
+    let event: Box<dyn PerfEventOps> =
+        if attr.type_ == PerfTypeId::PERF_TYPE_HARDWARE as u32
+            || attr.type_ == PerfTypeId::PERF_TYPE_HW_CACHE as u32
+            || attr.type_ == PerfTypeId::PERF_TYPE_RAW as u32
+            || attr.type_ == hw::ARMV8_PMUV3_PERF_TYPE
+            || attr.type_ == hw::ARMV8_CORTEX_A55_TYPE
+            || attr.type_ == hw::ARMV8_CORTEX_A76_TYPE
+        {
+            // Thread `pid` + `cpu` into the hardware path: it chooses between
+            // per-task counting (`pid > 0`), a cpu-bound system-wide event
+            // (`pid <= 0 && cpu >= 0`, the `perf stat -a` fan-out — counts on that
+            // core via its per-CPU pool), and the current-core path (`cpu < 0`).
+            // `group_fd` / `flags` are not consumed by the hardware path.
+            Box::new(hw::perf_event_open_hw(attr, pid, cpu)?)
+        } else {
+            let args = PerfProbeArgs::try_from_perf_attr::<EbpfKernelAuxiliary>(
+                attr, pid, cpu, group_fd, flags,
+            )
+            .into_ax_result()?;
+            // Sampling params for the probe sample-emit path (`perf record -e kprobe:`),
+            // which `PerfProbeArgs` does not carry (its `sample_type` loses a bit-mask,
+            // and it drops `sample_period` entirely). SAFETY: both union arms are `u64`
+            // in the `repr(C)` POD.
+            let sample_period = unsafe { attr.__bindgen_anon_1.sample_period };
+            let sample_type = attr.sample_type;
+            match args.type_ {
+                PerfTypeId::PERF_TYPE_KPROBE => Box::new(kprobe::perf_event_open_kprobe(
+                    args,
+                    sample_period,
+                    sample_type,
+                )?),
+                // The five counting software events (`perf stat`'s default rows) become
+                // real per-task counters; every other software config (e.g.
+                // `PERF_COUNT_SW_DUMMY`, `perf record`'s tracking event) keeps the
+                // BPF/ring path.
+                PerfTypeId::PERF_TYPE_SOFTWARE => match &args.config {
+                    PerfProbeConfig::PerfSwIds(sw_id) if sw::is_counting_sw(*sw_id) => {
+                        Box::new(sw::perf_event_open_sw(attr, *sw_id, pid)?)
+                    }
+                    _ => Box::new(bpf::perf_event_open_bpf(args)),
+                },
+                PerfTypeId::PERF_TYPE_TRACEPOINT => Box::new(
+                    tracepoint::perf_event_open_tracepoint(args, sample_period, sample_type)?,
+                ),
+                PerfTypeId::PERF_TYPE_UPROBE => Box::new(uprobe::perf_event_open_uprobe(args)?),
+                _ => {
+                    warn!("perf_event_open: unsupported type {:?}", args.type_);
+                    return Err(AxError::Unsupported);
                 }
-                _ => Box::new(bpf::perf_event_open_bpf(args)),
-            },
-            PerfTypeId::PERF_TYPE_TRACEPOINT => {
-                Box::new(tracepoint::perf_event_open_tracepoint(args)?)
             }
-            PerfTypeId::PERF_TYPE_UPROBE => Box::new(uprobe::perf_event_open_uprobe(args)?),
-            _ => {
-                warn!("perf_event_open: unsupported type {:?}", args.type_);
-                return Err(AxError::Unsupported);
-            }
-        }
-    };
+        };
     let perf_event = Arc::new(PerfEvent::new(event));
     // Group membership: a non-negative `group_fd` makes this event a member of the
     // group led by that fd (`perf stat -e '{a,b}'`). The member follows the

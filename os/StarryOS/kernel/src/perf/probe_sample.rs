@@ -165,6 +165,77 @@ impl ProbeSampling {
         // `register` runs in task/deferred context (the `poll` syscall).
         unsafe { self.poll_ready.register(waker, IoEvents::IN) };
     }
+
+    /// Emit one `PERF_RECORD_SAMPLE` (every `period` hits) into the ring.
+    /// `callchain` is the optional `PERF_SAMPLE_CALLCHAIN` block (`[PERF_CONTEXT_*,
+    /// ip, callers...]`), empty for an event with no interrupted register frame to
+    /// unwind (a tracepoint hit). Callable from exception / process / hard-IRQ
+    /// context: the ring write is a bounded copy under masked local IRQs, and the
+    /// ring pages are pinned via `Weak::upgrade` for the whole write (UAF-safe).
+    pub fn emit(&self, callchain: &[u64]) {
+        // Emit one sample per `period` hits.
+        let n = self.hits.fetch_add(1, Ordering::Relaxed) + 1;
+        if self.period > 1 && !n.is_multiple_of(self.period) {
+            return;
+        }
+        // Snapshot the ring and pin its pages for the whole write (UAF-safe).
+        let (pin, ring_vaddr, ring_len) = {
+            let guard = self.ring.lock();
+            let Some((pages, vaddr, len)) = guard.as_ref() else {
+                return;
+            };
+            let Some(pin) = pages.upgrade() else {
+                return;
+            };
+            (pin, *vaddr, *len)
+        };
+        if ring_vaddr == 0 {
+            return;
+        }
+
+        // Attribute to the task that hit the probe. `try_as_thread` is a lock-free
+        // downcast; a kernel task with no `Thread` falls back to the scheduler id.
+        let curr = ax_task::current();
+        let (pid, tid) = match curr.try_as_thread() {
+            Some(thr) => (thr.proc_data.proc.pid() as u32, thr.tid()),
+            None => {
+                let id = curr.id().as_u64() as u32;
+                (id, id)
+            }
+        };
+        let misc = if self.is_user {
+            PERF_RECORD_MISC_USER
+        } else {
+            PERF_RECORD_MISC_KERNEL
+        };
+
+        let data = ProbeSampleData {
+            // The stable probe location (kallsyms-symbolizable), not the single-step
+            // trampoline pc; `0` for a tracepoint (a hit has no code-address IP).
+            ip: self.probe_addr,
+            pid,
+            tid,
+            time: ax_runtime::hal::time::monotonic_time_nanos(),
+            cpu: ax_hal::percpu::this_cpu_id() as u32,
+            id: self.id.load(Ordering::Relaxed),
+            period: self.period,
+            callchain,
+        };
+
+        // Assemble in this CPU's scratch (not the exception stack) and publish.
+        // The guard makes the per-CPU scratch exclusive and serializes the write.
+        let _guard = NoPreemptIrqSave::new();
+        // SAFETY: preemption + local IRQs off, so this CPU's scratch is exclusive.
+        let record = unsafe { PROBE_RECORD_SCRATCH.current_ref_mut_raw() };
+        let len = sampling::build_probe_sample(&mut record[..], self.sample_type, misc, &data);
+        // SAFETY: `pin` keeps the ring pages alive for this write; `ring_vaddr` is
+        // the header page of a `ring_len`-byte ring initialized by `device_mmap`.
+        unsafe { sampling::ring_write_process(ring_vaddr, ring_len, &record[..len]) };
+        drop(_guard);
+        drop(pin);
+        // Wake the deferred worker so it delivers POLLIN to `perf record`'s poll.
+        self.notify.notify_irq();
+    }
 }
 
 impl core::fmt::Debug for ProbeSampling {
@@ -225,42 +296,6 @@ impl ProbeSampleCallback {
 impl CallBackFunc for ProbeSampleCallback {
     fn call(&self, pt_regs: &mut PtRegs) {
         let s = &self.s;
-        // Emit one sample per `period` hits.
-        let n = s.hits.fetch_add(1, Ordering::Relaxed) + 1;
-        if s.period > 1 && !n.is_multiple_of(s.period) {
-            return;
-        }
-        // Snapshot the ring and pin its pages for the whole write (UAF-safe).
-        let (pin, ring_vaddr, ring_len) = {
-            let guard = s.ring.lock();
-            let Some((pages, vaddr, len)) = guard.as_ref() else {
-                return;
-            };
-            let Some(pin) = pages.upgrade() else {
-                return;
-            };
-            (pin, *vaddr, *len)
-        };
-        if ring_vaddr == 0 {
-            return;
-        }
-
-        // Attribute to the task that hit the probe. `try_as_thread` is a lock-free
-        // downcast; a kernel task with no `Thread` falls back to the scheduler id.
-        let curr = ax_task::current();
-        let (pid, tid) = match curr.try_as_thread() {
-            Some(thr) => (thr.proc_data.proc.pid() as u32, thr.tid()),
-            None => {
-                let id = curr.id().as_u64() as u32;
-                (id, id)
-            }
-        };
-        let misc = if s.is_user {
-            PERF_RECORD_MISC_USER
-        } else {
-            PERF_RECORD_MISC_KERNEL
-        };
-
         // Optional kernel callchain (`perf report -g` "who calls this function"):
         // leaf = the stable probe location, callers walked from the interrupted
         // frame pointer (`regs[29]`). Kernel probes only — a uprobe hit's user
@@ -276,33 +311,7 @@ impl CallBackFunc for ProbeSampleCallback {
         } else {
             0
         };
-
-        let data = ProbeSampleData {
-            // The stable probe location (kallsyms-symbolizable), not the
-            // single-step trampoline pc in `pt_regs`.
-            ip: s.probe_addr,
-            pid,
-            tid,
-            time: ax_runtime::hal::time::monotonic_time_nanos(),
-            cpu: ax_hal::percpu::this_cpu_id() as u32,
-            id: s.id.load(Ordering::Relaxed),
-            period: s.period,
-            callchain: &chain[..nchain],
-        };
-
-        // Assemble in this CPU's scratch (not the exception stack) and publish.
-        // The guard makes the per-CPU scratch exclusive and serializes the write.
-        let _guard = NoPreemptIrqSave::new();
-        // SAFETY: preemption + local IRQs off, so this CPU's scratch is exclusive.
-        let record = unsafe { PROBE_RECORD_SCRATCH.current_ref_mut_raw() };
-        let len = sampling::build_probe_sample(&mut record[..], s.sample_type, misc, &data);
-        // SAFETY: `pin` keeps the ring pages alive for this write; `ring_vaddr` is
-        // the header page of a `ring_len`-byte ring initialized by `device_mmap`.
-        unsafe { sampling::ring_write_process(ring_vaddr, ring_len, &record[..len]) };
-        drop(_guard);
-        drop(pin);
-        // Wake the deferred worker so it delivers POLLIN to `perf record`'s poll.
-        s.notify.notify_irq();
+        s.emit(&chain[..nchain]);
     }
 }
 
