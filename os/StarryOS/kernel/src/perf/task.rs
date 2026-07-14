@@ -1134,11 +1134,15 @@ fn collect_exec_maps(thr: &Thread) -> Vec<Mmap2Info> {
 /// (so [`current`] is this task and `thr`'s address space is the new image).
 /// `perf record` mmaps the ring before releasing the child, so the ring exists.
 pub fn on_exec_sideband(thr: &Thread) {
-    if PERF_TASK_ACTIVE.load(Ordering::Acquire) == 0 {
+    let sys_active = super::syswide::active();
+    if PERF_TASK_ACTIVE.load(Ordering::Acquire) == 0 && !sys_active {
         return;
     }
     let pid = thr.proc_data.proc.pid() as u32;
     let tid = thr.tid() as u32;
+    // The new process name (this hook runs in the exec'd task's context).
+    let curr = ax_task::current();
+    let name = curr.name();
 
     /// A target plus which record kinds it wants (so the COMM/MMAP2 loops below
     /// can each skip non-subscribers without re-walking the counter list).
@@ -1161,20 +1165,12 @@ pub fn on_exec_sideband(thr: &Thread) {
             })
             .collect()
     };
-    if targets.is_empty() {
-        return;
-    }
-
-    // COMM: the new process name (this hook runs in the exec'd task's context).
-    let curr = ax_task::current();
-    let name = curr.name();
+    // Per-task fan-out. COMM first, then one MMAP2 per executable mapping.
     for wt in &targets {
         if wt.comm {
             sideband::emit_comm(&wt.target, &name, true);
         }
     }
-
-    // MMAP2: one per executable file-backed mapping of the new image.
     if targets.iter().any(|wt| wt.mmap2) {
         let maps = collect_exec_maps(thr);
         for wt in &targets {
@@ -1184,6 +1180,20 @@ pub fn on_exec_sideband(thr: &Thread) {
                 }
             }
         }
+    }
+
+    // System-wide (`perf record -a`) fan-out: also into this core's `-a` ring.
+    if sys_active {
+        super::syswide::with_local_target(pid, tid, |v| {
+            if v.want_comm {
+                sideband::emit_comm(v.target, &name, true);
+            }
+            if v.want_mmap2 {
+                for m in &collect_exec_maps(thr) {
+                    sideband::emit_mmap2(v.target, m);
+                }
+            }
+        });
     }
 }
 
@@ -1201,7 +1211,8 @@ pub fn on_mmap_sideband(
     shared: bool,
     filename: &str,
 ) {
-    if PERF_TASK_ACTIVE.load(Ordering::Acquire) == 0 {
+    let sys_active = super::syswide::active();
+    if PERF_TASK_ACTIVE.load(Ordering::Acquire) == 0 && !sys_active {
         return;
     }
     let pid = thr.proc_data.proc.pid() as u32;
@@ -1214,7 +1225,7 @@ pub fn on_mmap_sideband(
             .filter_map(|ptc| sideband_target(ptc, pid, tid))
             .collect()
     };
-    if targets.is_empty() {
+    if targets.is_empty() && !sys_active {
         return;
     }
     let m = Mmap2Info {
@@ -1231,6 +1242,14 @@ pub fn on_mmap_sideband(
     for t in &targets {
         sideband::emit_mmap2(t, &m);
     }
+    // System-wide (`perf record -a`): also into this core's `-a` ring.
+    if sys_active {
+        super::syswide::with_local_target(pid, tid, |v| {
+            if v.want_mmap2 {
+                sideband::emit_mmap2(v.target, &m);
+            }
+        });
+    }
 }
 
 /// Clone side-band hook: emit a `PERF_RECORD_FORK` describing the new child into
@@ -1241,7 +1260,8 @@ pub fn on_mmap_sideband(
 /// `child_tid`) with the parent as `ppid`/`ptid`; its `sample_id_all` trailer is
 /// the parent's id (the event's monitored task), so `t.pid`/`t.tid` = parent.
 pub fn on_clone_sideband(parent_thr: &Thread, child_pid: u32, child_tid: u32) {
-    if PERF_TASK_ACTIVE.load(Ordering::Acquire) == 0 {
+    let sys_active = super::syswide::active();
+    if PERF_TASK_ACTIVE.load(Ordering::Acquire) == 0 && !sys_active {
         return;
     }
     let ppid = parent_thr.proc_data.proc.pid();
@@ -1257,6 +1277,14 @@ pub fn on_clone_sideband(parent_thr: &Thread, child_pid: u32, child_tid: u32) {
     };
     for t in &targets {
         sideband::emit_fork(t, child_pid, ppid, child_tid, ptid);
+    }
+    // System-wide (`perf record -a`): also into this core's `-a` ring (parent ctx).
+    if sys_active {
+        super::syswide::with_local_target(ppid, ptid, |v| {
+            if v.want_task {
+                sideband::emit_fork(v.target, child_pid, ppid, child_tid, ptid);
+            }
+        });
     }
 }
 
@@ -1354,7 +1382,8 @@ pub fn on_clone_inherit(parent_thr: &Thread, child_thr: &Thread) {
 /// `free_hw` is idempotent per counter; safe even if the perf fd is still open
 /// (its `Drop` will call `free_hw` again and find it already freed).
 pub fn on_task_exit(thr: &Thread) {
-    if PERF_TASK_ACTIVE.load(Ordering::Acquire) == 0 {
+    let sys_active = super::syswide::active();
+    if PERF_TASK_ACTIVE.load(Ordering::Acquire) == 0 && !sys_active {
         return;
     }
     let pid = thr.proc_data.proc.pid();
@@ -1380,6 +1409,14 @@ pub fn on_task_exit(thr: &Thread) {
             sideband::emit_exit(&t, pid, ppid, tid, ptid);
         }
         free_hw(ptc);
+    }
+    // System-wide (`perf record -a`): also into this core's `-a` ring (exiting ctx).
+    if sys_active {
+        super::syswide::with_local_target(pid, tid, |v| {
+            if v.want_task {
+                sideband::emit_exit(v.target, pid, ppid, tid, ptid);
+            }
+        });
     }
 }
 

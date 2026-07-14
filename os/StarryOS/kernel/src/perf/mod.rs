@@ -33,6 +33,12 @@ pub mod sideband;
 /// page-faults). Pure accounting driven by the scheduler + fault hooks, no PMU,
 /// so it is arch-independent.
 pub mod sw;
+/// System-wide (`perf record -a`) side-band subscriber registry: routes
+/// COMM/MMAP2/FORK/EXIT to each per-CPU `-a` ring in addition to the per-task
+/// events. Writes the local core's ring from process context, so it is gated like
+/// `sideband`.
+#[cfg(target_arch = "aarch64")]
+pub mod syswide;
 /// Per-task hardware-PMU counting (`perf stat -- cmd`, M3). ARM PMUv3 only; the
 /// scheduler hooks call into CPU PMU register helpers, so it is gated like
 /// `sampling`.

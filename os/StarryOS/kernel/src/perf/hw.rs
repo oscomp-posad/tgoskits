@@ -231,6 +231,15 @@ struct SamplingState {
     /// `attr.sample_stack_user`: the requested `PERF_SAMPLE_STACK_USER` dump length
     /// (clamped to the kernel cap at dump time); `0` when not sampling the stack.
     sample_stack_user: u32,
+    /// `attr.comm`: this system-wide event wants `PERF_RECORD_COMM` side-band
+    /// records for whatever runs on its `home_cpu` (`perf record -a`).
+    want_comm: bool,
+    /// `attr.mmap2`: wants `PERF_RECORD_MMAP2` side-band records.
+    want_mmap2: bool,
+    /// `attr.task`: wants `PERF_RECORD_FORK` / `EXIT` side-band records.
+    want_task: bool,
+    /// `attr.sample_id_all`: side-band records carry the sample-id trailer.
+    sample_id_all: bool,
     /// Readiness set readers wait on; woken (with `IoEvents::IN`) by the worker.
     poll_ready: Arc<PollSet>,
     /// IRQ-safe notification the overflow handler pokes; drained by the worker.
@@ -455,6 +464,10 @@ impl HwPerfEvent {
             ax_cpu::pmu::counter::disable(n);
             sampling::unregister(n);
         }
+        // Drop this core's system-wide side-band subscriber, if this event
+        // registered one (idempotent; a no-op for a sampler without `-a` side-band).
+        // Runs on `home_cpu`, the core it was registered on.
+        super::syswide::unregister();
     }
 
     /// `device_mmap` for a counting event: the single-page `perf_event_mmap_page`
@@ -659,6 +672,26 @@ impl HwPerfEvent {
                     sample_stack_user,
                 },
             );
+            // System-wide (`perf record -a`) side-band: this core's ring also
+            // receives COMM/MMAP2/FORK/EXIT for whatever runs here, written locally
+            // by the side-band hooks. Only a real ring (not a `SET_OUTPUT`
+            // redirect) that requested any side-band record subscribes.
+            if (sampling.want_comm || sampling.want_mmap2 || sampling.want_task)
+                && sampling.redirect.is_none()
+                && let Some(ring) = sampling.ring.as_ref()
+            {
+                super::syswide::register(super::syswide::SysSidebandEntry {
+                    pages: ring.pages.clone(),
+                    ring_vaddr: ring.ring_vaddr,
+                    ring_len: ring.ring_len,
+                    sample_type,
+                    sample_id_all: sampling.sample_id_all,
+                    id: self.sample_id,
+                    want_comm: sampling.want_comm,
+                    want_mmap2: sampling.want_mmap2,
+                    want_task: sampling.want_task,
+                });
+            }
             ax_cpu::pmu::overflow::enable_irq(n);
             ax_cpu::pmu::counter::enable(n);
             return;
@@ -1454,6 +1487,10 @@ pub fn perf_event_open_hw(attr: &perf_event_attr, pid: i32, cpu: i32) -> AxResul
                 sample_type: attr.sample_type,
                 sample_regs_user: attr.sample_regs_user,
                 sample_stack_user: attr.sample_stack_user,
+                want_comm: attr.comm() != 0,
+                want_mmap2: attr.mmap2() != 0,
+                want_task: attr.task() != 0,
+                sample_id_all: attr.sample_id_all() != 0,
                 poll_ready,
                 notify,
                 poll_alive,
@@ -1656,6 +1693,10 @@ pub fn perf_event_open_hw(attr: &perf_event_attr, pid: i32, cpu: i32) -> AxResul
             sample_type: attr.sample_type,
             sample_regs_user: attr.sample_regs_user,
             sample_stack_user: attr.sample_stack_user,
+            want_comm: attr.comm() != 0,
+            want_mmap2: attr.mmap2() != 0,
+            want_task: attr.task() != 0,
+            sample_id_all: attr.sample_id_all() != 0,
             poll_ready,
             notify,
             poll_alive,
