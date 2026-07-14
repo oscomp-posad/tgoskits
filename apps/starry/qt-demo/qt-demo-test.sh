@@ -40,17 +40,29 @@ PKGS="qt6-qtbase qt6-qtbase-x11 font-dejavu fontconfig"
 # is absent (e.g. docker was unavailable during prebuild).
 DEV_PKGS="qt6-qtbase-dev g++ musl-dev"
 
+have_linuxfb_plugin() {
+    find /usr/lib -name libqlinuxfb.so -path '*qt6*' 2>/dev/null | grep -q .
+}
+
 install_packages() {
-    # 1) prefetched offline install (fast, no network)
+    # 1) prefetched offline install (no network). apk's post-install *triggers*
+    #    (fontconfig cache, etc.) routinely fail in the minimal guest and make
+    #    apk exit non-zero even though every package's files were installed, so
+    #    we treat the exit code as advisory and gate on artifact presence below
+    #    instead. (Observed: "N errors; <size> in <count> packages" — files are
+    #    in place; the errors are trigger scripts.)
     if [ -f /usr/local/qt-demo-apks/install.list ]; then
-        echo "QT_PREP installing prefetched APKs"
+        echo "QT_PREP installing prefetched runtime APKs (offline; trigger errors non-fatal)"
         # shellcheck disable=SC2046
-        if run_with_timeout 600 apk add --allow-untrusted --no-network $(cat /usr/local/qt-demo-apks/install.list); then
-            echo "QT_PREP prefetched install OK"; return 0
-        fi
-        echo "QT_PREP prefetched install failed; trying network mirrors"
+        run_with_timeout 600 apk add --allow-untrusted --no-network $(cat /usr/local/qt-demo-apks/install.list) 2>&1 | tail -6 || true
     fi
-    # 2) network mirrors with retry
+    if have_linuxfb_plugin; then
+        echo "QT_PREP Qt runtime present after offline install"
+        return 0
+    fi
+    # 2) network mirrors, best-effort (the guest may have no NIC/DNS; the
+    #    artifact check after this function is the real gate).
+    echo "QT_PREP linuxfb plugin missing after offline install; trying network mirrors"
     for mirror in \
         "${STARRY_APK_MIRROR:-}" \
         http://mirrors.huaweicloud.com/alpine \
@@ -59,16 +71,17 @@ install_packages() {
         [ -z "$mirror" ] && continue
         echo "QT_PREP apk mirror: $mirror"
         write_repos "$mirror"
-        if run_with_timeout 420 apk add --no-cache $PKGS; then return 0; fi
+        run_with_timeout 420 apk add --no-cache $PKGS 2>&1 | tail -6 || true
+        have_linuxfb_plugin && return 0
         rm -rf /var/cache/apk/* 2>/dev/null || true
     done
-    return 1
+    return 0
 }
 
-echo "QT_PREP installing Qt6 + toolchain..."
-install_packages || fail "apk add Qt6 packages failed"
+echo "QT_PREP installing Qt6 runtime..."
+install_packages
 
-# ---- locate the linuxfb plugin ----
+# ---- locate the linuxfb plugin (the real gate for runtime availability) ----
 QPA_DIR="$(find /usr/lib -type d -name platforms -path '*qt6*' 2>/dev/null | head -1)"
 if [ -z "$QPA_DIR" ] || [ ! -e "$QPA_DIR/libqlinuxfb.so" ]; then
     echo "QT_PREP available QPA plugins:"; find /usr/lib -name 'libq*.so' -path '*platforms*' 2>/dev/null || true
