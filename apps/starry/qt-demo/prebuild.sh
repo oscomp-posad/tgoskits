@@ -66,6 +66,7 @@ prefetch_qt_apks() {
 populate_overlay() {
     mkdir -p "$overlay_dir/usr/bin" "$overlay_dir/usr/local/qt-demo"
     install -Dm0644 "$app_dir/clock.cpp" "$overlay_dir/usr/local/qt-demo/clock.cpp"
+    install -Dm0755 "$app_dir/qt-demo-test.sh" "$overlay_dir/usr/bin/qt-demo-test.sh"
 
     copy_base_text_file_to_overlay /etc/apk/repositories
     copy_base_text_file_to_overlay /etc/resolv.conf
