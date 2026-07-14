@@ -424,7 +424,13 @@ jobs:
           - name: Test starry aarch64 qemu
             use_container: true
             runs_on: '["ubuntu-latest"]'
-            command: target/debug/tg-xtask starry test qemu --arch aarch64
+            # Build the on-target `perf` from source (reproducible, in-container)
+            # before the tests, so perf-tool-smoke runs against a freshly-built
+            # binary and starry/rootfs.rs ships it in the base aarch64 image
+            # (both no-op / silently skip when the binary is absent).
+            command: |
+              bash test-suit/starryos/qemu/system/perf-tool-smoke/build-perf-ci.sh
+              target/debug/tg-xtask starry test qemu --arch aarch64
             cache_key: test-starry-aarch64
             container_image: base
             apk_region: us
