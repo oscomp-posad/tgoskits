@@ -79,9 +79,8 @@ prefetch_qt_apks() {
 # no binary is shipped and the on-target test script compiles from clock.cpp
 # (which is also installed) as a fallback.
 compile_clock_in_container() {
-    local branch docker_tag plat out_dir
+    local branch plat out_dir builder base_img prep
     branch="$(alpine_branch)"
-    docker_tag="alpine:${branch#v}"
     out_dir="$overlay_dir/usr/local/qt-demo"
     mkdir -p "$out_dir"
 
@@ -95,18 +94,43 @@ compile_clock_in_container() {
         *) echo "warning: no container platform for arch $arch; on-target compile" >&2; return 0 ;;
     esac
 
-    echo "QT_PREBUILD compiling clock in $docker_tag ($plat)..."
+    # Prefer a cached builder image with the Qt SDK preinstalled (instant
+    # compile). Build it once if missing so subsequent runs are fast; the SDK
+    # download is then a one-time, docker-layer-cached cost per machine. Fall
+    # back to a plain alpine image + on-the-fly apk-add if the build is
+    # unavailable.
+    builder="qt-demo-builder:${branch#v}"
+    base_img="alpine:${branch#v}"
+    if ! docker image inspect "$builder" >/dev/null 2>&1; then
+        echo "QT_PREBUILD building cached Qt builder image $builder (one-time)..."
+        local ctx
+        ctx="$(mktemp -d)"
+        printf 'FROM %s\nRUN apk add --no-cache qt6-qtbase-dev g++ musl-dev pkgconf\n' "$base_img" >"$ctx/Dockerfile"
+        if ! docker build --platform "$plat" -t "$builder" "$ctx" >/dev/null 2>&1; then
+            echo "warning: builder image build failed; falling back to inline apk-add" >&2
+            builder=""
+        fi
+        rm -rf "$ctx"
+    fi
+
+    if [[ -n "$builder" ]]; then
+        prep=""            # SDK already in the image
+        base_img="$builder"
+    else
+        prep='apk add --no-cache qt6-qtbase-dev g++ musl-dev pkgconf >/dev/null &&'
+    fi
+
+    echo "QT_PREBUILD compiling clock in $base_img ($plat)..."
     if docker run --rm --platform "$plat" \
         -v "$app_dir/clock.cpp:/src/clock.cpp:ro" \
         -v "$out_dir:/out" \
-        "$docker_tag" sh -c '
+        "$base_img" sh -c "
             set -e
-            apk add --no-cache qt6-qtbase-dev g++ musl-dev pkgconf >/dev/null
-            g++ -std=c++17 -fPIC -O2 /src/clock.cpp \
-                $(pkg-config --cflags --libs Qt6Widgets Qt6Gui Qt6Core) \
+            ${prep} g++ -std=c++17 -fPIC -O2 /src/clock.cpp \
+                \$(pkg-config --cflags --libs Qt6Widgets Qt6Gui Qt6Core) \
                 -o /out/clock
             chmod 0755 /out/clock
-        '; then
+        "; then
         echo "QT_PREBUILD compiled binary -> /usr/local/qt-demo/clock"
     else
         echo "warning: container compile failed; shipping clock.cpp for on-target compile" >&2
