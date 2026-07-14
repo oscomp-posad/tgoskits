@@ -25,7 +25,7 @@
 //! common case (mirrors [`super::task::PERF_TASK_ACTIVE`]). Mutation is entirely
 //! through atomics, so the counter is `Sync` and the hooks need no allocation.
 
-use alloc::sync::Arc;
+use alloc::{sync::Arc, vec::Vec};
 use core::{
     any::Any,
     sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
@@ -33,6 +33,7 @@ use core::{
 };
 
 use ax_errno::{AxError, AxResult};
+use ax_kspin::SpinNoIrq;
 use axpoll::{IoEvents, Pollable};
 use kbpf_basic::linux_bpf::{perf_event_attr, perf_sw_ids};
 
@@ -44,6 +45,17 @@ use crate::task::{AsThread, Thread};
 /// software perf event exists. Incremented at open, decremented when the owning
 /// fd drops.
 static PERF_SW_ACTIVE: AtomicUsize = AtomicUsize::new(0);
+
+/// Number of live *system-wide* (`pid < 0`) software counters — a separate gate
+/// from [`PERF_SW_ACTIVE`]. The scheduler + fault hooks bump the global
+/// [`SYS_SW`] counters for EVERY task's switch/fault, so a `perf stat/top -a`
+/// software event aggregates machine-wide. `0` ⇒ the hooks skip the global path.
+static PERF_SYS_SW_ACTIVE: AtomicUsize = AtomicUsize::new(0);
+
+/// The system-wide (`-a`) software counters, aggregated across all tasks by the
+/// hooks. Small (one per open `-a` software event); the `SpinNoIrq` is taken on
+/// the switch/fault hot path only while [`PERF_SYS_SW_ACTIVE`] is nonzero.
+static SYS_SW: SpinNoIrq<Vec<Arc<SwPerTaskCounter>>> = SpinNoIrq::new(Vec::new());
 
 /// Sentinel for [`SwPerTaskCounter::last_cpu`] before the first slice, so the
 /// first `sched_in` does not falsely count a migration.
@@ -99,6 +111,10 @@ pub fn is_counting_sw(id: perf_sw_ids) -> bool {
 #[derive(Debug)]
 pub struct SwPerTaskCounter {
     kind: SwId,
+    /// Opened system-wide (`pid < 0`): the hooks aggregate it across ALL tasks via
+    /// [`SYS_SW`], `cpu-clock` counts every online CPU's wall time, and it lives in
+    /// the global registry rather than a thread's list.
+    system_wide: bool,
     /// `attr.read_format`, controlling which fields `read(perf_fd)` emits.
     read_format: u64,
     /// Userspace wants this event counting (`!disabled` at open or after
@@ -125,7 +141,7 @@ pub struct SwPerTaskCounter {
 }
 
 impl SwPerTaskCounter {
-    fn new(kind: SwId, attr: &perf_event_attr) -> Self {
+    fn new(kind: SwId, attr: &perf_event_attr, system_wide: bool) -> Self {
         // Enable at open unless the event is opened disabled *and* not armed to
         // start on exec. `perf stat -- cmd` opens with enable_on_exec; treat that
         // as enable-at-open (the pre-exec window is negligible) so counts appear
@@ -134,6 +150,7 @@ impl SwPerTaskCounter {
         let now = now_ns();
         Self {
             kind,
+            system_wide,
             read_format: attr.read_format,
             enabled: AtomicBool::new(enabled),
             dead: AtomicBool::new(false),
@@ -188,6 +205,10 @@ impl SwPerTaskCounter {
                 0
             };
         let value = match self.kind {
+            // `perf stat -a` cpu-clock is the summed wall time across every online
+            // CPU (each contributes its own clock), so scale by the CPU count; a
+            // per-task cpu-clock is just the enabled wall time.
+            SwId::CpuClock if self.system_wide => time_enabled * ax_hal::cpu_num() as u64,
             SwId::CpuClock => time_enabled,
             SwId::TaskClock => {
                 let run_since = self.run_since_ns.load(Ordering::Acquire);
@@ -223,7 +244,11 @@ impl Drop for SwPerfEvent {
         // once. The counter's `Arc` may linger in the thread's list until the
         // next open reaps it, or until the thread exits.
         if !self.ctr.dead.swap(true, Ordering::AcqRel) {
-            PERF_SW_ACTIVE.fetch_sub(1, Ordering::AcqRel);
+            if self.ctr.system_wide {
+                PERF_SYS_SW_ACTIVE.fetch_sub(1, Ordering::AcqRel);
+            } else {
+                PERF_SW_ACTIVE.fetch_sub(1, Ordering::AcqRel);
+            }
         }
     }
 }
@@ -274,16 +299,45 @@ fn attach(thr: &Thread, ctr: Arc<SwPerTaskCounter>) {
     PERF_SW_ACTIVE.fetch_add(1, Ordering::AcqRel);
 }
 
-/// Open a `PERF_TYPE_SOFTWARE` counting event on the task selected by `pid`
-/// (`pid > 0` a specific tid, `pid == 0` the caller). System-wide software
-/// counters (`pid < 0`) are not supported.
+/// Register a *system-wide* software counter in [`SYS_SW`], reaping dead entries
+/// left by closed fds, and bump the global gate.
+fn attach_sys(ctr: Arc<SwPerTaskCounter>) {
+    let mut list = SYS_SW.lock();
+    list.retain(|c| !c.dead.load(Ordering::Acquire));
+    list.push(ctr);
+    PERF_SYS_SW_ACTIVE.fetch_add(1, Ordering::AcqRel);
+}
+
+/// Add `n` to every enabled system-wide counter of `kind` — the machine-wide
+/// aggregation the switch / fault hooks feed. Called only while
+/// [`PERF_SYS_SW_ACTIVE`] is nonzero.
+fn sys_bump(kind: SwId, n: u64) {
+    let list = SYS_SW.lock();
+    for c in list.iter() {
+        if c.kind == kind && !c.dead.load(Ordering::Acquire) && c.enabled.load(Ordering::Acquire) {
+            c.count.fetch_add(n, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Open a `PERF_TYPE_SOFTWARE` counting event.
+///
+/// * `pid > 0` — a specific tid; `pid == 0` — the caller: a per-task counter in
+///   that thread's list (`task-clock` / `cpu-migrations` etc. all accurate).
+/// * `pid < 0` — system-wide (`perf stat/top -a`): a global counter the hooks
+///   aggregate across all tasks. `cpu-clock` (wall time × online CPUs),
+///   `context-switches` and `page-faults` are accurate machine-wide;
+///   `task-clock` and `cpu-migrations` — which need per-task state — read `0` in
+///   v1 (`cpu-clock` is the default `-a` clock event, so `perf stat -a` is
+///   correct for its standard software rows).
 pub fn perf_event_open_sw(
     attr: &perf_event_attr,
     sw_id: perf_sw_ids,
     pid: i32,
 ) -> AxResult<SwPerfEvent> {
     let kind = SwId::from_raw(sw_id).ok_or(AxError::Unsupported)?;
-    let ctr = Arc::new(SwPerTaskCounter::new(kind, attr));
+    let system_wide = pid < 0;
+    let ctr = Arc::new(SwPerTaskCounter::new(kind, attr, system_wide));
 
     if pid > 0 {
         let task = crate::task::get_task(pid as u32)?;
@@ -294,7 +348,7 @@ pub fn perf_event_open_sw(
         let thr = curr.try_as_thread().ok_or(AxError::NoSuchProcess)?;
         attach(thr, ctr.clone());
     } else {
-        return Err(AxError::Unsupported);
+        attach_sys(ctr.clone());
     }
 
     Ok(SwPerfEvent { ctr })
@@ -332,8 +386,13 @@ pub fn sched_in(thr: &Thread) {
 /// Scheduler hook: `thr` is about to stop running on this CPU. Folds the
 /// `task-clock` slice and counts a `context-switches` event (one per deschedule).
 pub fn sched_out(thr: &Thread) {
-    if PERF_SW_ACTIVE.load(Ordering::Acquire) == 0 {
+    let sys = PERF_SYS_SW_ACTIVE.load(Ordering::Acquire) != 0;
+    if PERF_SW_ACTIVE.load(Ordering::Acquire) == 0 && !sys {
         return;
+    }
+    // System-wide: one machine-wide context-switch per deschedule of any task.
+    if sys {
+        sys_bump(SwId::ContextSwitches, 1);
     }
     let list = thr.perf_sw_counters.lock();
     if list.is_empty() {
@@ -362,8 +421,13 @@ pub fn sched_out(thr: &Thread) {
 
 /// Fault hook: `thr` just took a user page fault. Counts a `page-faults` event.
 pub fn on_page_fault(thr: &Thread) {
-    if PERF_SW_ACTIVE.load(Ordering::Acquire) == 0 {
+    let sys = PERF_SYS_SW_ACTIVE.load(Ordering::Acquire) != 0;
+    if PERF_SW_ACTIVE.load(Ordering::Acquire) == 0 && !sys {
         return;
+    }
+    // System-wide: one machine-wide page-fault per user fault of any task.
+    if sys {
+        sys_bump(SwId::PageFaults, 1);
     }
     let list = thr.perf_sw_counters.lock();
     for c in list.iter() {
