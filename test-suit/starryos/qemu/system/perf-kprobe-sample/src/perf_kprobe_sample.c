@@ -12,8 +12,13 @@
  * The on-target perf binary lacks libelf/traceevent, so we drive the syscall
  * directly (like perf-hw-sample): open PERF_TYPE_KPROBE(6), config=0 (entry
  * kprobe), config1 = a pointer to the target function name, sample_period=1,
- * sample_type = IP|TID|TIME; mmap the ring; ENABLE; issue syscalls to trigger the
- * probe; DISABLE; walk the ring for PERF_RECORD_SAMPLE records.
+ * sample_type = IP|TID|TIME|CALLCHAIN; mmap the ring; ENABLE; issue syscalls to
+ * trigger the probe; DISABLE; walk the ring for PERF_RECORD_SAMPLE records.
+ *
+ * The CALLCHAIN request also exercises `perf report -g`: each probe sample carries
+ * a kernel callchain `[PERF_CONTEXT_KERNEL, <probe addr>, callers...]` (leaf-only
+ * unless the kernel keeps frame pointers), so the leaf identifies the probed
+ * function.
  *
  * Target: the syscall dispatcher `handle_syscall`, which fires on every syscall.
  * Kernel symbols are Rust-mangled and matched exactly, so we read /proc/kallsyms
@@ -23,7 +28,9 @@
  *     the target symbol is found in kallsyms
  *   AND the kprobe event opens + mmaps
  *   AND at least one PERF_RECORD_SAMPLE is captured whose IP falls in the probed
- *       function (== its kallsyms address).
+ *       function (== its kallsyms address)
+ *   AND at least one sample's callchain leaf is the probed function under a
+ *       PERF_CONTEXT_KERNEL marker.
  * Prints STARRY_PERF_KPROBE_SAMPLE_OK.
  */
 #ifndef _GNU_SOURCE
@@ -47,6 +54,11 @@
 #define PERF_SAMPLE_IP (1ull << 0)
 #define PERF_SAMPLE_TID (1ull << 1)
 #define PERF_SAMPLE_TIME (1ull << 2)
+#define PERF_SAMPLE_CALLCHAIN (1ull << 5)
+
+/* Linux PERF_CONTEXT_KERNEL: a callchain marker word (counts as an entry) that
+ * introduces the kernel region's instruction pointers. */
+#define PERF_CONTEXT_KERNEL 0xffffffffffffff80ull
 
 #define PERF_ATTR_FLAG_DISABLED (1ull << 0)
 
@@ -220,7 +232,8 @@ int main(void) {
     attr.config = PROBE_CONFIG_ENTRY;
     attr.config1 = (uint64_t)(uintptr_t)sym; /* kprobe_func = &name */
     attr.sample_period = 1;                  /* a sample per hit */
-    attr.sample_type = PERF_SAMPLE_IP | PERF_SAMPLE_TID | PERF_SAMPLE_TIME;
+    attr.sample_type = PERF_SAMPLE_IP | PERF_SAMPLE_TID | PERF_SAMPLE_TIME |
+                       PERF_SAMPLE_CALLCHAIN;
     attr.flags = PERF_ATTR_FLAG_DISABLED;
 
     long fd = perf_event_open(&attr, 0, -1, -1, 0ul);
@@ -256,8 +269,8 @@ int main(void) {
     uint64_t data_size = meta->data_size;
     const uint8_t *data_base = (const uint8_t *)base + data_offset;
 
-    uint64_t samples = 0, ip_in_fn = 0;
-    uint64_t first_ip = 0;
+    uint64_t samples = 0, ip_in_fn = 0, chains_ok = 0;
+    uint64_t first_ip = 0, first_chain_leaf = 0;
     uint64_t off = data_tail;
     while (off < data_head && data_size != 0) {
         uint64_t rel = off % data_size;
@@ -268,10 +281,11 @@ int main(void) {
         }
         if (hdr.type == PERF_RECORD_SAMPLE) {
             samples++;
-            /* body: u64 ip; u32 pid; u32 tid; u64 time */
+            /* body (sample_type = IP|TID|TIME|CALLCHAIN, in ascending-bit order):
+             *   u64 ip; u32 pid; u32 tid; u64 time; u64 nr; u64 ips[nr] */
+            uint64_t body = (rel + sizeof(hdr)) % data_size;
             uint64_t ip = 0;
-            ring_copy(data_base, data_size, (rel + sizeof(hdr)) % data_size, &ip,
-                      8);
+            ring_copy(data_base, data_size, body, &ip, 8);
             if (first_ip == 0) {
                 first_ip = ip;
             }
@@ -280,13 +294,33 @@ int main(void) {
             if (ip >= sym_addr && ip < sym_addr + 64) {
                 ip_in_fn++;
             }
+            /* Callchain block after the 24-byte scalar prefix (ip+pid+tid+time). */
+            uint64_t nr = 0;
+            ring_copy(data_base, data_size, (body + 24) % data_size, &nr, 8);
+            if (nr >= 2) {
+                uint64_t marker = 0, leaf = 0;
+                ring_copy(data_base, data_size, (body + 32) % data_size, &marker,
+                          8);
+                ring_copy(data_base, data_size, (body + 40) % data_size, &leaf, 8);
+                if (first_chain_leaf == 0) {
+                    first_chain_leaf = leaf;
+                }
+                /* [PERF_CONTEXT_KERNEL, <probe addr>, callers...] — leaf must be
+                 * the probed function (leaf-only unless the kernel keeps FPs). */
+                if (marker == PERF_CONTEXT_KERNEL && leaf >= sym_addr &&
+                    leaf < sym_addr + 64) {
+                    chains_ok++;
+                }
+            }
         }
         off += hdr.size;
     }
 
-    printf("STARRY_PERF_KPROBE_SAMPLE samples=%llu ip_in_fn=%llu first_ip=%#llx\n",
+    printf("STARRY_PERF_KPROBE_SAMPLE samples=%llu ip_in_fn=%llu first_ip=%#llx "
+           "chains_ok=%llu first_leaf=%#llx\n",
            (unsigned long long)samples, (unsigned long long)ip_in_fn,
-           (unsigned long long)first_ip);
+           (unsigned long long)first_ip, (unsigned long long)chains_ok,
+           (unsigned long long)first_chain_leaf);
 
     (void)munmap(base, PERF_MMAP_TOTAL_BYTES);
     close(efd);
@@ -296,6 +330,9 @@ int main(void) {
     }
     if (ip_in_fn == 0) {
         return fail("sample IP did not match the probed function address");
+    }
+    if (chains_ok == 0) {
+        return fail("no PERF_SAMPLE_CALLCHAIN block with the probe as leaf");
     }
 
     printf("STARRY_PERF_KPROBE_SAMPLE_OK\n");

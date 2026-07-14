@@ -35,7 +35,8 @@ use kbpf_basic::linux_bpf::perf_event_mmap_page;
 use kprobe::{CallBackFunc, PtRegs};
 
 use super::sampling::{
-    self, PERF_RECORD_MISC_KERNEL, PERF_RECORD_MISC_USER, ProbeSampleData, SAMPLE_RECORD_MAX_LEN,
+    self, PERF_CONTEXT_KERNEL, PERF_RECORD_MISC_KERNEL, PERF_RECORD_MISC_USER, ProbeSampleData,
+    SAMPLE_RECORD_MAX_LEN,
 };
 use crate::task::AsThread;
 
@@ -45,6 +46,17 @@ use crate::task::AsThread;
 /// fill + write, so this CPU's buffer is exclusively owned for that window.
 #[ax_percpu::def_percpu]
 static PROBE_RECORD_SCRATCH: [u8; SAMPLE_RECORD_MAX_LEN] = [0u8; SAMPLE_RECORD_MAX_LEN];
+
+/// `PERF_SAMPLE_CALLCHAIN`: the sample carries a `u64 nr` count then `nr` IPs
+/// (a `PERF_CONTEXT_*` marker counts as an entry). Already within the
+/// probe-supported set ([`probe_sample_type_supported`]).
+const PERF_SAMPLE_CALLCHAIN: u64 = 1 << 5;
+
+/// Max kernel frames captured for a probe-hit callchain: one
+/// `PERF_CONTEXT_KERNEL` marker plus up to this many instruction pointers. Kept
+/// at the PMU sampler's per-region cap so the assembled record stays within
+/// [`SAMPLE_RECORD_MAX_LEN`].
+const PROBE_CALLCHAIN_MAX: usize = 64;
 
 /// Sampling state for a probe/tracepoint `perf record` event: the mmap ring the
 /// hit-callback writes into, plus the deferred `poll()` wakeup. Shared (`Arc`)
@@ -211,7 +223,7 @@ impl ProbeSampleCallback {
 }
 
 impl CallBackFunc for ProbeSampleCallback {
-    fn call(&self, _pt_regs: &mut PtRegs) {
+    fn call(&self, pt_regs: &mut PtRegs) {
         let s = &self.s;
         // Emit one sample per `period` hits.
         let n = s.hits.fetch_add(1, Ordering::Relaxed) + 1;
@@ -248,9 +260,26 @@ impl CallBackFunc for ProbeSampleCallback {
         } else {
             PERF_RECORD_MISC_KERNEL
         };
+
+        // Optional kernel callchain (`perf report -g` "who calls this function"):
+        // leaf = the stable probe location, callers walked from the interrupted
+        // frame pointer (`regs[29]`). Kernel probes only — a uprobe hit's user
+        // unwind needs an interrupted SP the BRK frame does not carry on aarch64
+        // (`pt_regs.sp == 0`), so user probes emit no chain. Leaf-only unless the
+        // kernel keeps frame pointers (same caveat as the PMU callchain); the block
+        // layout is what `perf report -g` consumes either way.
+        let mut chain = [0u64; 1 + PROBE_CALLCHAIN_MAX];
+        let nchain = if s.sample_type & PERF_SAMPLE_CALLCHAIN != 0 && !s.is_user {
+            chain[0] = PERF_CONTEXT_KERNEL;
+            let fp = pt_regs.regs[29] as usize;
+            1 + super::unwind::kernel_callchain(s.probe_addr as usize, fp, &mut chain[1..])
+        } else {
+            0
+        };
+
         let data = ProbeSampleData {
             // The stable probe location (kallsyms-symbolizable), not the
-            // single-step trampoline pc in `_pt_regs`.
+            // single-step trampoline pc in `pt_regs`.
             ip: s.probe_addr,
             pid,
             tid,
@@ -258,7 +287,7 @@ impl CallBackFunc for ProbeSampleCallback {
             cpu: ax_hal::percpu::this_cpu_id() as u32,
             id: s.id.load(Ordering::Relaxed),
             period: s.period,
-            callchain: &[],
+            callchain: &chain[..nchain],
         };
 
         // Assemble in this CPU's scratch (not the exception stack) and publish.
