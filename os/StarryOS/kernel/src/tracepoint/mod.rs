@@ -16,7 +16,6 @@ use ax_kspin::SpinNoPreempt;
 use ax_lazyinit::LazyInit;
 use ax_memory_addr::VirtAddr;
 use ax_runtime::hal::{percpu::this_cpu_id, time::monotonic_time_nanos};
-use ax_sync::Mutex;
 use ax_task::{IrqNotify, current};
 use axfs_ng_vfs::NodePermission;
 use axpoll::{IoEvents, PollSet};
@@ -65,10 +64,21 @@ pub fn find_ext_tracepoint_by_name(name: &str) -> Option<KernelExtTracePoint> {
 
 struct TraceState {
     point_map: LazyInit<TracePointMap<KernelTraceAux>>,
-    raw_pipe: Mutex<TracePipeRaw>,
+    // The trace ring buffer and the pid→cmdline cache are BOTH written from the
+    // tracepoint fire path (`trace_pipe_push_raw_record` / `trace_cmdline_push`),
+    // which runs with preemption disabled (the registry entry above is
+    // `SpinNoPreempt`; for `sched:sched_switch` the fire path is inside
+    // `axtask::switch_to`, IRQs off). A sleeping `ax_sync::Mutex` here would try to
+    // sleep in atomic context on the first enabled-tracepoint hit and wedge the
+    // CPU, so — like the registry entry and the perf output path — these are
+    // non-sleeping spinlocks. Every current tracepoint fires from a preempt-gated
+    // context (syscall path or `switch_to`), never a hard-IRQ handler, so
+    // `SpinNoPreempt` suffices; a tracepoint added to hard-IRQ context would need
+    // `SpinNoIrq` here (and for the registry entry).
+    raw_pipe: SpinNoPreempt<TracePipeRaw>,
     pipe_event: PollSet,
     pipe_notify: IrqNotify,
-    cmdline_cache: LazyInit<Mutex<TraceCmdLineCache>>,
+    cmdline_cache: LazyInit<SpinNoPreempt<TraceCmdLineCache>>,
     ext_tracepoints: LazyInit<BTreeMap<u32, KernelExtTracePoint>>,
 }
 
@@ -76,7 +86,7 @@ impl TraceState {
     const fn new() -> Self {
         Self {
             point_map: LazyInit::new(),
-            raw_pipe: Mutex::new(TracePipeRaw::new(TRACE_RAW_PIPE_CAPACITY)),
+            raw_pipe: SpinNoPreempt::new(TracePipeRaw::new(TRACE_RAW_PIPE_CAPACITY)),
             pipe_event: PollSet::new(),
             pipe_notify: IrqNotify::new(),
             cmdline_cache: LazyInit::new(),
@@ -98,12 +108,16 @@ impl KernelTraceOps for KernelTraceAux {
     }
 
     fn trace_pipe_push_raw_record(buf: &[u8]) {
-        // log::debug!("trace_pipe_push_raw_record: {}", record.len());
-        TRACE_STATE.raw_pipe.lock().push_record(
-            monotonic_time_nanos(),
-            this_cpu_id() as _,
-            buf.to_vec(),
-        );
+        // Build the owned record BEFORE taking the ring lock so the heap copy is
+        // not done inside the (preempt-disabled) critical section — keep the lock
+        // hold to the bounded ring append. See `TraceState::raw_pipe`.
+        let timestamp = monotonic_time_nanos();
+        let cpu_id = this_cpu_id() as _;
+        let event = buf.to_vec();
+        TRACE_STATE
+            .raw_pipe
+            .lock()
+            .push_record(timestamp, cpu_id, event);
         TRACE_STATE.pipe_notify.notify_irq();
     }
 
@@ -281,7 +295,7 @@ pub fn tracepoint_init() -> AxResult<()> {
     TRACE_STATE.ext_tracepoints.init_once(ext_tps);
     TRACE_STATE
         .cmdline_cache
-        .init_once(Mutex::new(TraceCmdLineCache::new(
+        .init_once(SpinNoPreempt::new(TraceCmdLineCache::new(
             NonZero::new(TRACE_CMDLINE_CACHE_SIZE).unwrap(),
         )));
     start_trace_pipe_notify_worker();
