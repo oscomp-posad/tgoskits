@@ -12,6 +12,10 @@
 //! register dump are the oracle). This compiles + links so the board session is
 //! "debug against lock bits", not "write from scratch". It is opt-in
 //! (`rockchip-vop2-coldinit` feature) and never on a default boot path.
+//!
+//! Runs at device-probe time (PostKernel), not from an interrupt: the shared CRU
+//! handle it drives (reset/clock pokes) is guarded by a non-IRQ-safe spinlock, so
+//! this must stay on a normal-context path.
 
 use core::time::Duration;
 
@@ -39,10 +43,23 @@ const PD_VOP: u32 = 24;
 const PD_VO1: u32 = 26;
 
 // --- HDPTX PHY CRU reset ids (DT `resets` of phy@fed60000: apb/init/cmn/lane) ---
+// These are the vendor register-encoded reset ids (`id = con_word*16 + bit`,
+// spanning CRU sub-blocks). The generic `ResetRockchip` linear decode
+// (`addr = softrst_base + (id/16)*4`, `bit = id%16`) reproduces the sub-block
+// offset by construction: `apb=0x485` -> SOFTRST_CON72 bit5, and
+// `init/cmn/lane=0xc003b..d` -> the PHP-CRU window (`(0xc0000/16)*4 == 0x30000
+// == RK3588_PHP_CRU_BASE`) at php_softrst_con(3) bits 11/12/13. The whole
+// 0x5c000 CRU reg range is mapped, so all four land on real softrst registers.
 const RST_HDPTX_APB: usize = 0x485;
 const RST_HDPTX_INIT: usize = 0xc003b;
 const RST_HDPTX_CMN: usize = 0xc003c;
 const RST_HDPTX_LANE: usize = 0xc003d;
+
+// --- HDPTX PHY source clocks (DT `clocks` of phy@fed60000: ref 24MHz + apb) ---
+// The PHY sequence assumes these are running before its first APB access; ungate
+// them explicitly since a cold boot may have left them gated (idempotent).
+const CLK_HDPTX0_REF: usize = 0x2b5;
+const PCLK_HDPTX0_APB: usize = 0x267;
 
 // --- GRF register offsets + hiword-masked write values (mainline) ---
 // VOP_GRF CON2: route VP output to the HDMI0 TX (BIT1).
@@ -89,19 +106,22 @@ impl PhyEnv for KEnv {
     }
 }
 
-/// One-shot hiword-masked write to a GRF syscon register.
-fn grf_write(base: usize, off: usize, val: u32) -> Result<(), &'static str> {
+/// Map a GRF syscon page once and apply a batch of hiword-masked writes. Batched
+/// (rather than one map per register) so a multi-register GRF is only mapped once.
+fn grf_write_batch(base: usize, writes: &[(usize, u32)]) -> Result<(), &'static str> {
     let p = iomap(base, GRF_SIZE).map_err(|_| "grf iomap failed")?;
-    // SAFETY: `off` is within the mapped GRF_SIZE page; GRF regs are 32-bit.
-    unsafe { core::ptr::write_volatile(p.as_ptr().add(off) as *mut u32, val) };
+    for &(off, val) in writes {
+        // SAFETY: `off` is within the mapped GRF_SIZE page; GRF regs are 32-bit.
+        unsafe { core::ptr::write_volatile(p.as_ptr().add(off) as *mut u32, val) };
+    }
     Ok(())
 }
 
 /// Cold-init HDMI0 for a 1080p60 RGB output displaying `fb_phys`, from scratch
-/// (no U-Boot reuse). Programs, in order: power domains -> HDPTX PHY (blocks on
-/// PLL/lane lock) -> CRU dclk mux + VOP gates -> GRF muxes -> VOP2 modeset ->
-/// TX enable. Returns the first failing step; the caller keeps the fb registered
-/// regardless so /dev/fb0 exists.
+/// (no U-Boot reuse). Programs, in order: power domains -> ungate PHY ref/apb
+/// clocks -> HDPTX PHY (blocks on PLL/lane lock) -> CRU dclk mux + VOP gates ->
+/// GRF muxes -> VOP2 modeset -> TX enable. Returns the first failing step; the
+/// caller keeps the fb registered regardless so /dev/fb0 exists.
 pub fn cold_init_hdmi0_1080p60(vop_mmio: &mut VopMmio, fb_phys: u64) -> Result<(), &'static str> {
     let mode = DisplayMode::fhd_vp0();
 
@@ -113,7 +133,15 @@ pub fn cold_init_hdmi0_1080p60(vop_mmio: &mut VopMmio, fb_phys: u64) -> Result<(
     }
     let _ = crate::soc::rockchip::pm::power_on_domain(PD_VO1);
 
-    // 2. HDPTX PHY: generate the 148.5 MHz TMDS + pixel clock. Blocks on the
+    // 2. Ungate the PHY's own ref (24 MHz) + apb source clocks before touching
+    //    it — the PHY sequence's first APB access assumes they are running, and a
+    //    cold boot may have left them gated. Best-effort (idempotent if already on).
+    if !crate::soc::rockchip::cru::clk_enable(CLK_HDPTX0_REF) {
+        warn!("coldinit: HDPTX0 ref clock ungate skipped (no CRU / unknown id)");
+    }
+    let _ = crate::soc::rockchip::cru::clk_enable(PCLK_HDPTX0_APB);
+
+    // 3. HDPTX PHY: generate the 148.5 MHz TMDS + pixel clock. Blocks on the
     //    two GRF lock polls (the on-board pass/fail oracle).
     let phy_ptr = iomap(PHY_BASE, PHY_SIZE).map_err(|_| "phy iomap failed")?;
     let grf_ptr = iomap(HDPTX_GRF_BASE, GRF_SIZE).map_err(|_| "hdptx-grf iomap failed")?;
@@ -127,23 +155,29 @@ pub fn cold_init_hdmi0_1080p60(vop_mmio: &mut VopMmio, fb_phys: u64) -> Result<(
     })?;
     info!("coldinit: HDPTX PHY locked @ 148.5MHz");
 
-    // 3. CRU: mux DCLK_VOP0 to the now-running PHY pixel clock + ungate VOP.
+    // 4. CRU: mux DCLK_VOP0 to the now-running PHY pixel clock + ungate VOP.
     if crate::soc::rockchip::cru::with_cru(|c| c.vop_hdmi0_clocks_setup()).is_none() {
         warn!("coldinit: no CRU handle; VOP dclk not muxed");
     }
 
-    // 4. GRF: route VP0->HDMI0 + polarity + DDC/HPD io + color depth (8bpc RGB).
-    grf_write(VOP_GRF_BASE, VOP_GRF_CON2, VOP_GRF_CON2_HDMI0)?;
-    grf_write(VO1_GRF_BASE, VO1_GRF_CON0, VO1_GRF_CON0_HDMI0_POL)?;
-    grf_write(VO1_GRF_BASE, VO1_GRF_CON3, VO1_GRF_CON3_IO)?;
-    grf_write(VO1_GRF_BASE, VO1_GRF_CON9, VO1_GRF_CON9_GRANT)?;
-    grf_write(SYS_GRF_BASE, SYS_GRF_CON7, SYS_GRF_CON7_HPD_IO)?;
+    // 5. GRF: route VP0->HDMI0 + polarity + DDC/HPD io + color depth (8bpc RGB).
+    //    Each GRF syscon is mapped once; VO1_GRF carries three of the writes.
+    grf_write_batch(VOP_GRF_BASE, &[(VOP_GRF_CON2, VOP_GRF_CON2_HDMI0)])?;
+    grf_write_batch(
+        VO1_GRF_BASE,
+        &[
+            (VO1_GRF_CON0, VO1_GRF_CON0_HDMI0_POL),
+            (VO1_GRF_CON3, VO1_GRF_CON3_IO),
+            (VO1_GRF_CON9, VO1_GRF_CON9_GRANT),
+        ],
+    )?;
+    grf_write_batch(SYS_GRF_BASE, &[(SYS_GRF_CON7, SYS_GRF_CON7_HPD_IO)])?;
 
-    // 5. VOP2 modeset (timing + Esmart0 window + overlay + DSP_IF_EN mux).
+    // 6. VOP2 modeset (timing + Esmart0 window + overlay + DSP_IF_EN mux).
     modeset_vp0(vop_mmio, fb_phys, &mode).map_err(|_| "vop2 modeset failed")?;
     info!("coldinit: VOP2 VP0 modeset done");
 
-    // 6. HDMI-QP TX enable (HDMI op-mode + AVI infoframe).
+    // 7. HDMI-QP TX enable (HDMI op-mode + AVI infoframe).
     let tx_ptr = iomap(TX_BASE, TX_SIZE).map_err(|_| "tx iomap failed")?;
     // SAFETY: freshly-mapped device region.
     let mut tx = unsafe { dw_hdmi_qp::mmio::MmioRegs::new(tx_ptr.as_ptr(), TX_SIZE) };

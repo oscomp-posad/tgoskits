@@ -117,6 +117,9 @@ pub fn power_on_1080p60<R: Regs, G: Regs, RS: PhyResets, E: PhyEnv>(
     env.delay_us(15);
     resets.deassert(ResetLine::Cmn);
     if !poll_status(grf, env, 20, 400, |s| s & grf::O_PHY_CLK_RDY != 0) {
+        // Unwind the still-asserted Lane reset so a retry starts from a clean
+        // state (Apb/Init/Cmn are already deasserted by this point).
+        resets.deassert(ResetLine::Lane);
         return Err(PhyError::PllClkTimeout);
     }
 

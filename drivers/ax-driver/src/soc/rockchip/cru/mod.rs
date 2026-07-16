@@ -35,6 +35,13 @@ pub fn reset_deassert(id: usize) -> bool {
     with_cru(|c| c.reset_deassert(RstId::from(id))).is_some()
 }
 
+/// Enable (ungate) a CRU clock by its DT clock id. Returns `false` if no CRU
+/// exists or the id is unknown to the gate table. Ungating an already-running
+/// clock is idempotent, so this is safe to call unconditionally on a cold path.
+pub fn clk_enable(id: usize) -> bool {
+    with_cru(|c| c.clk_enable(ClkId::from(id)).is_ok()).unwrap_or(false)
+}
+
 pub struct ClkDrv {
     name: &'static str,
     inner: SharedCru,
