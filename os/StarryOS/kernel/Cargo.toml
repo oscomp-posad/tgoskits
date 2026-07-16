@@ -22,6 +22,7 @@ ipi = ["ax-runtime/ipi"]
 loongarch64-low-va = []
 memtrack = ["axbacktrace/alloc", "ax-alloc/tracking"]
 rknpu = ["ax-driver/rknpu", "dep:ax-dma"]
+rockchip-vop2 = ["ax-driver/rockchip-vop2"]
 jpeg = ["ax-driver/jpeg", "dep:ax-dma"]
 rk3588-pwm = [
     "ax-driver/rk3588-pwm",
