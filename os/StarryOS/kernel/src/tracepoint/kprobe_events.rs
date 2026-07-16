@@ -55,6 +55,11 @@ struct DynKprobeEvent {
     group: String,
     name: String,
     symbol: String,
+    /// Byte offset past `symbol` for the probe address (`symbol+offset`). `perf`
+    /// without a vmlinux expresses every kernel probe relative to `_stext`
+    /// (e.g. `_stext+2404788`), so the offset is where the real target lives —
+    /// dropping it would place the kprobe at the wrong address.
+    offset: u64,
     /// `true` for a return probe (`r:`), `false` for an entry probe (`p:`).
     is_ret: bool,
 }
@@ -65,16 +70,16 @@ static KPROBE_EVENTS: SpinNoPreempt<BTreeMap<u32, DynKprobeEvent>> =
     SpinNoPreempt::new(BTreeMap::new());
 static NEXT_ID: AtomicU32 = AtomicU32::new(KPROBE_EVENT_ID_BASE);
 
-/// Resolve a dynamic id to `(symbol, is_ret)` for the perf-open routing. `None`
-/// if `id` is not a dynamic kprobe event (a static tracepoint or unknown).
-pub fn resolve(id: u32) -> Option<(String, bool)> {
+/// Resolve a dynamic id to `(symbol, offset, is_ret)` for the perf-open routing.
+/// `None` if `id` is not a dynamic kprobe event (a static tracepoint or unknown).
+pub fn resolve(id: u32) -> Option<(String, u64, bool)> {
     if id < KPROBE_EVENT_ID_BASE {
         return None;
     }
     KPROBE_EVENTS
         .lock()
         .get(&id)
-        .map(|e| (e.symbol.clone(), e.is_ret))
+        .map(|e| (e.symbol.clone(), e.offset, e.is_ret))
 }
 
 /// Whether `symbol` exists in the kernel's kallsyms (same table `perf/kprobe.rs`
@@ -86,12 +91,32 @@ fn symbol_exists(symbol: &str) -> bool {
         .is_some()
 }
 
+/// Parse a number in decimal or `0x`-hex (perf writes decimal offsets).
+fn parse_num(s: &str) -> Option<u64> {
+    match s.strip_prefix("0x") {
+        Some(hex) => u64::from_str_radix(hex, 16).ok(),
+        None => s.parse().ok(),
+    }
+}
+
+/// Parse a probe target `SYMBOL[+OFFS]` (ignoring any trailing `%return` / arg
+/// spec) into `(symbol, offset)`. `perf` without a vmlinux writes every kernel
+/// probe as `_stext+<offset>`, so the offset must be honored.
+fn parse_symbol_offset(spec: &str) -> (String, u64) {
+    // Strip a `%...`/` ...`-style suffix (arg specs); we keep only SYMBOL[+OFFS].
+    let core = spec.split('%').next().unwrap_or(spec);
+    match core.split_once('+') {
+        Some((sym, off)) => (sym.to_string(), parse_num(off).unwrap_or(0)),
+        None => (core.to_string(), 0),
+    }
+}
+
 /// Parse + apply one `kprobe_events` write line. Accepts:
 ///   `p[:[GROUP/]NAME] SYMBOL[+OFFS]`   — add an entry probe
 ///   `r[:[GROUP/]NAME] SYMBOL`          — add a return probe
 ///   `-:[GROUP/]NAME`                   — remove an event
-/// Offsets/arg-fetch specs beyond the symbol are ignored (v1: symbol-name
-/// probes only). Returns `Err` (→ `EINVAL`) on malformed input / unknown symbol.
+/// Arg-fetch specs beyond the symbol+offset are ignored (v1: no variable capture).
+/// Returns `Err` (→ `EINVAL`) on malformed input / unknown symbol.
 fn apply_line(line: &str) -> Result<(), &'static str> {
     let line = line.trim();
     if line.is_empty() {
@@ -127,18 +152,13 @@ fn apply_line(line: &str) -> Result<(), &'static str> {
     };
 
     let symbol_spec = it.next().ok_or("missing symbol")?;
-    // Drop any `+offset` / `%return` suffix — v1 probes the symbol entry.
-    let symbol = symbol_spec
-        .split(['+', '%', ':'])
-        .next()
-        .unwrap_or(symbol_spec)
-        .to_string();
+    let (symbol, offset) = parse_symbol_offset(symbol_spec);
     if !symbol_exists(&symbol) {
         return Err("symbol not found in kallsyms");
     }
     // Default the event name to the symbol when userspace omits it.
     let name = name_opt.unwrap_or_else(|| symbol.clone());
-    add_event(group, name, symbol, is_ret);
+    add_event(group, name, symbol, offset, is_ret);
     Ok(())
 }
 
@@ -150,7 +170,7 @@ fn split_group_name(spec: &str) -> (String, String) {
     }
 }
 
-fn add_event(group: String, name: String, symbol: String, is_ret: bool) {
+fn add_event(group: String, name: String, symbol: String, offset: u64, is_ret: bool) {
     let mut map = KPROBE_EVENTS.lock();
     // Replace an existing (group,name) rather than duplicating it.
     map.retain(|_, e| !(e.group == group && e.name == name));
@@ -162,6 +182,7 @@ fn add_event(group: String, name: String, symbol: String, is_ret: bool) {
             group,
             name,
             symbol,
+            offset,
             is_ret,
         },
     );
@@ -174,18 +195,21 @@ fn remove_event(group: &str, name: &str) -> bool {
     map.len() != before
 }
 
-/// The `kprobe_events` file's read content: one `p:GROUP/NAME SYMBOL` line each.
+/// The `kprobe_events` file's read content: one `p:GROUP/NAME SYMBOL[+OFFS]` line
+/// each (the classic form perf/trace-cmd expect, offset shown when non-zero).
 fn list_text() -> String {
     let map = KPROBE_EVENTS.lock();
     let mut out = String::new();
     for e in map.values() {
-        out.push_str(&format!(
-            "{}:{}/{} {}\n",
-            if e.is_ret { 'r' } else { 'p' },
-            e.group,
-            e.name,
-            e.symbol
-        ));
+        let kind = if e.is_ret { 'r' } else { 'p' };
+        if e.offset != 0 {
+            out.push_str(&format!(
+                "{}:{}/{} {}+{}\n",
+                kind, e.group, e.name, e.symbol, e.offset
+            ));
+        } else {
+            out.push_str(&format!("{}:{}/{} {}\n", kind, e.group, e.name, e.symbol));
+        }
     }
     out
 }

@@ -274,10 +274,13 @@ fn perf_probe_arg_to_kprobe_builder(
 ) -> AxResult<ProbeBuilder<KprobeAuxiliary>> {
     let symbol = &args.name;
     let addr = lookup_symbol_addr(symbol)?;
+    // `symbol+offset`: the probe lands at `addr + offset`. `perf probe` without a
+    // vmlinux expresses every kernel probe relative to `_stext`, so the offset is
+    // load-bearing — a `_stext+N` probe with offset dropped would fire at `_stext`.
     Ok(ProbeBuilder::new()
         .with_symbol(symbol.clone())
         .with_symbol_addr(addr)
-        .with_offset(0)
+        .with_offset(args.offset as usize)
         .with_enable(false))
 }
 
@@ -315,8 +318,11 @@ pub fn perf_event_open_kprobe(
         }
         _ => return Err(AxError::InvalidInput),
     };
-    // The sample IP is the probe's (kallsyms) address, not the single-step pc.
-    let probe_addr = lookup_symbol_addr(&args.name).unwrap_or(0) as u64;
+    // The sample IP is the probe's address (`symbol + offset`), not the
+    // single-step pc — so `perf report` symbolizes the actual probed location.
+    let probe_addr = lookup_symbol_addr(&args.name)
+        .map(|a| a as u64 + args.offset)
+        .unwrap_or(0);
     // Kprobe/kretprobe hits are kernel context (`is_user = false`).
     finish_probe_open(
         ProbePerfEvent::new(args, probe),

@@ -166,8 +166,10 @@ static ssize_t read_file(const char *path, char *buf, size_t cap) {
 }
 
 /* Scan /proc/kallsyms for the first symbol whose (mangled) name contains
- * `needle`; copy the exact name into `name`. Returns 0 on success. */
-static int find_symbol(const char *needle, char *name, size_t name_sz) {
+ * `needle`; copy the exact name into `name` and its address into `*addr`.
+ * Returns 0 on success. */
+static int find_symbol(const char *needle, char *name, size_t name_sz,
+                       uint64_t *addr) {
     int fd = open("/proc/kallsyms", O_RDONLY);
     if (fd < 0) {
         return -1;
@@ -199,6 +201,9 @@ static int find_symbol(const char *needle, char *name, size_t name_sz) {
                 size_t sl = strlen(sym);
                 if (sl + 1 <= name_sz) {
                     memcpy(name, sym, sl + 1);
+                    if (addr) {
+                        *addr = strtoull(line, NULL, 16);
+                    }
                     found = 0;
                     break;
                 }
@@ -227,13 +232,22 @@ int main(void) {
     return 0;
 #endif
     char sym[256];
-    if (find_symbol("handle_syscall", sym, sizeof(sym)) != 0) {
+    uint64_t hsc_addr = 0, stext_addr = 0;
+    if (find_symbol("handle_syscall", sym, sizeof(sym), &hsc_addr) != 0) {
         return fail("could not resolve handle_syscall in /proc/kallsyms");
     }
+    char stext[64];
+    if (find_symbol("_stext", stext, sizeof(stext), &stext_addr) != 0 ||
+        stext_addr == 0 || hsc_addr <= stext_addr) {
+        return fail("could not resolve _stext / bad kallsyms addresses");
+    }
+    unsigned long long offset = (unsigned long long)(hsc_addr - stext_addr);
 
-    /* 1. perf probe -a: create the dynamic kprobe event. */
+    /* 1. perf probe -a: create the dynamic kprobe event. `perf probe` with no
+     * vmlinux writes every kernel probe as `_stext+<offset>`, so drive that exact
+     * form here — the offset must be honored or the kprobe fires at _stext. */
     char add[320];
-    snprintf(add, sizeof(add), "p:probe/hsc %s\n", sym);
+    snprintf(add, sizeof(add), "p:probe/hsc _stext+%llu\n", offset);
     if (write_file(KPROBE_EVENTS, add) != 0) {
         return fail("write kprobe_events (add) failed");
     }
@@ -326,7 +340,10 @@ int main(void) {
             ring_copy(data_base, data_size, (body + 24) % data_size, &raw_size, 4);
             ring_copy(data_base, data_size, (body + 28 + 8) % data_size, &probe_ip,
                       8);
-            if (raw_size >= 16 && probe_ip != 0) {
+            /* __probe_ip must be symbol_addr + offset = _stext + off =
+             * handle_syscall's address: proves the +offset was honored (not
+             * dropped, which would place the probe at _stext). */
+            if (raw_size >= 16 && probe_ip == hsc_addr) {
                 raw_ok++;
             }
         }
@@ -336,8 +353,9 @@ int main(void) {
     (void)munmap(base, PERF_MMAP_TOTAL_BYTES);
     close(efd);
 
-    printf("STARRY_PERF_CLI_KPROBE samples=%llu raw_ok=%llu\n",
-           (unsigned long long)samples, (unsigned long long)raw_ok);
+    printf("STARRY_PERF_CLI_KPROBE samples=%llu raw_ok=%llu off=%llu ip=%#llx\n",
+           (unsigned long long)samples, (unsigned long long)raw_ok, offset,
+           (unsigned long long)hsc_addr);
 
     /* 4. remove the event; assert it is gone. */
     if (write_file(KPROBE_EVENTS, "-:probe/hsc\n") != 0) {
@@ -352,7 +370,8 @@ int main(void) {
         return fail("no PERF_RECORD_SAMPLE from the dynamic kprobe tracepoint");
     }
     if (raw_ok == 0) {
-        return fail("no sample carried a well-formed PERF_SAMPLE_RAW block");
+        return fail("no sample's RAW __probe_ip matched handle_syscall "
+                    "(the +offset was dropped -> probe fired at _stext)");
     }
 
     printf("STARRY_PERF_CLI_KPROBE_OK\n");

@@ -679,7 +679,7 @@ pub fn perf_event_open(
                 // route it to the kprobe path — a kprobe fires through the
                 // breakpoint handler, not the static-key tracepoint dispatch.
                 if let PerfProbeConfig::Raw(raw_id) = args.config
-                    && let Some((symbol, is_ret)) =
+                    && let Some((symbol, offset, is_ret)) =
                         crate::tracepoint::kprobe_events::resolve(raw_id as u32)
                 {
                     let kp_args = PerfProbeArgs {
@@ -689,6 +689,10 @@ pub fn perf_event_open(
                             kprobe::PROBE_CONFIG_ENTRY
                         }),
                         name: symbol,
+                        // `symbol+offset`: perf without a vmlinux writes probes
+                        // relative to `_stext`, so the offset is where the real
+                        // target is — thread it into the kprobe placement.
+                        offset,
                         type_: PerfTypeId::PERF_TYPE_KPROBE,
                         ..args
                     };
