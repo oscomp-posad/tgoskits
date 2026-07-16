@@ -21,6 +21,9 @@ pub enum Vop2Error {
     NoActiveWindow,
     /// The framebuffer physical address is not 4-byte aligned (VOP2 requires it).
     MisalignedFramebuffer,
+    /// The framebuffer physical address is above 4 GiB; VOP2's YRGB_MST is a
+    /// 32-bit byte address and cannot reach it.
+    FramebufferAbove4Gib,
     /// The requested mode is not supported by this driver core.
     UnsupportedMode,
 }

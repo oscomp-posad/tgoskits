@@ -4,11 +4,22 @@
 /// Writing (a mask into) this register latches all shadow-register writes.
 pub const REG_CFG_DONE: usize = 0x000;
 
-/// On RK3588 config-done is per-VP maskable. Bit `vp` enables that VP's latch;
-/// the high half is a write-enable mask mirroring the low half.
+/// Global config-done enable (`RK3568_REG_CFG_DONE__GLB_CFG_DONE_EN`, BIT 15) —
+/// the master "shadow writes take effect" gate. Mainline `vop2_cfg_done` ORs
+/// this into every config-done write; per the mainline comment it has **no**
+/// write-mask bit, so a raw write that omits it drives bit 15 to 0 and disables
+/// the latch entirely (the commit silently never fires).
+pub const GLB_CFG_DONE_EN: u32 = 1 << 15;
+
+/// Value to write to [`REG_CFG_DONE`] to latch video port `vp`'s shadow
+/// registers. Matches mainline `vop2_cfg_done`:
+/// `GLB_CFG_DONE_EN | BIT(vp) | (BIT(vp) << 16)`. The `BIT(vp) << 16` is the
+/// per-VP bit's write-enable mask (so a raw `write32` only affects VP `vp`'s
+/// commit bit; other VPs' bits, whose mask bits are 0, are left untouched),
+/// while `GLB_CFG_DONE_EN` is written directly.
 pub const fn cfg_done_value(vp: u8) -> u32 {
     let bit = 1u32 << vp;
-    bit | (bit << 16)
+    GLB_CFG_DONE_EN | bit | (bit << 16)
 }
 
 /// Window base offsets (RK3588).

@@ -12,7 +12,14 @@ features = [
   "ax-driver/rockchip-dwmmc",
   "rknpu",
   "rk3588-pwm",
-  "rockchip-vop2",
+  # NOTE: the native VOP2 display driver (`rockchip-vop2`) is intentionally NOT
+  # enabled by default. Its probe reads VOP2 MMIO at boot, and this driver does
+  # not power the VOP domain itself (Stage 1 assumes U-Boot did) — on a board
+  # where U-Boot left the VOP unpowered an MMIO read can be a synchronous
+  # external abort that hangs boot, which would break the other tests that share
+  # this config. Add `"rockchip-vop2"` here for a watched display bring-up
+  # session (see the Stage-1 plan: dump-first, confirm a live window). The driver
+  # is fully built + host-tested regardless via `ax-driver/rockchip-vop2`.
 ]
 log = "Info"
 max_cpu_num = 8

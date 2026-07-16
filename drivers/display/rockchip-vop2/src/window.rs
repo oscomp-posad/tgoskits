@@ -73,6 +73,13 @@ pub fn repoint<R: Regs>(
     if !fb_phys.is_multiple_of(4) {
         return Err(Vop2Error::MisalignedFramebuffer);
     }
+    // YRGB_MST is a 32-bit byte address; VOP2 can only scan the low 4 GiB. The
+    // caller's DMA mask should already guarantee this, but reject explicitly
+    // rather than silently truncate `fb_phys as u32` (which would point the
+    // scanout engine at the wrong physical page).
+    if fb_phys > u32::MAX as u64 {
+        return Err(Vop2Error::FramebufferAbove4Gib);
+    }
     regs.write32(win.yrgb_mst, fb_phys as u32);
     regs.write32(win.vir, mode.vir_words());
     regs.write32(win.act_info, mode.act_info());
@@ -125,5 +132,18 @@ mod tests {
             repoint(&mut r, Window::esmart0(), 0x8000_0001, &m),
             Err(Vop2Error::MisalignedFramebuffer)
         );
+    }
+
+    #[test]
+    fn repoint_rejects_fb_above_4gib() {
+        let mut r = FakeRegs::new(0x2000);
+        let m = DisplayMode::fhd_vp0();
+        // 4 GiB, 4-byte aligned but unrepresentable in the 32-bit YRGB_MST.
+        assert_eq!(
+            repoint(&mut r, Window::esmart0(), 0x1_0000_0000, &m),
+            Err(Vop2Error::FramebufferAbove4Gib)
+        );
+        // and it must not have written a truncated address.
+        assert_eq!(r.read32(Window::esmart0().yrgb_mst), 0);
     }
 }

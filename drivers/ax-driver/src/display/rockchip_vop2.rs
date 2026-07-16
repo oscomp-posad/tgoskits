@@ -10,7 +10,7 @@
 //! not as a bare `RockchipPM` device; a real cold-init power-on (VOP domain id
 //! 24) belongs to Stage 2 and must go through that interface.
 
-use dma_api::{ContiguousArray, DeviceDma, DmaDirection};
+use dma_api::{CoherentArray, DeviceDma};
 use log::{info, warn};
 use rdif_display::{DisplayError, DisplayInfo, FrameBuffer, PixelFormat};
 use rdrive::{DriverGeneric, probe::OnProbeError, register::ProbeFdt};
@@ -35,10 +35,13 @@ crate::model_register!(
 );
 
 /// The registered display device: owns the mapped DMA framebuffer + resolved
-/// geometry. `ContiguousArray<u8>` and `DisplayInfo` are both `Send`, so this
-/// derives `Send` automatically (no manual unsafe impl needed).
+/// geometry. The framebuffer is a **coherent (uncached)** DMA allocation:
+/// VOP2 scans it continuously from DRAM and userspace mmaps `/dev/fb0` uncached,
+/// so a cached/streaming buffer would show stale RAM (CPU writes stuck in cache)
+/// and create a mismatched-cacheability alias on ARMv8. `CoherentArray<u8>` and
+/// `DisplayInfo` are both `Send`, so this derives `Send` automatically.
 struct Vop2Display {
-    fb: ContiguousArray<u8>,
+    fb: CoherentArray<u8>,
     info: DisplayInfo,
 }
 
@@ -81,7 +84,12 @@ fn probe(probe: ProbeFdt<'_>) -> Result<(), OnProbeError> {
     let offset = start_raw - start;
     let end = (start_raw + size_raw + page - 1) & !(page - 1);
     let mapped = unsafe { iomap(start, end - start)?.add(offset) };
-    let mut mmio = unsafe { MmioRegs::new(mapped.as_ptr(), size_raw) };
+    // Bound the accessor by the bytes actually mapped from `mapped` (page-aligned
+    // region minus the intra-page offset), which is always >= size_raw. Using
+    // size_raw directly would let a malformed/undersized FDT `reg` size make the
+    // dump/repoint reads trip MmioRegs' bounds assert and panic the boot probe.
+    let mapped_len = (end - start) - offset;
+    let mut mmio = unsafe { MmioRegs::new(mapped.as_ptr(), mapped_len) };
 
     // NOTE: Stage 1 relies on U-Boot having powered the VOP domain (see module
     // docs). We do not enable it here; if a future dump shows the block is
@@ -105,11 +113,15 @@ fn probe(probe: ProbeFdt<'_>) -> Result<(), OnProbeError> {
         ),
     }
 
-    // Allocate our framebuffer (contiguous, low-4GiB, zeroed).
+    // Allocate our framebuffer: COHERENT (uncached), contiguous, low-4GiB,
+    // zeroed. Coherent — not streaming/contiguous — because VOP2 scans it in
+    // place with no per-frame flush and userspace mmaps it uncached; a cached
+    // buffer would leave CPU writes in cache and the panel scanning stale RAM.
+    // `device_with_mask(u32::MAX)` keeps it in the low 4 GiB YRGB_MST can reach.
     let mode = DisplayMode::fhd_vp0();
     let dma: DeviceDma = axklib::dma::device_with_mask(u32::MAX as u64);
     let fb = dma
-        .contiguous_array_zero_with_align::<u8>(mode.fb_size(), 0x1000, DmaDirection::Bidirectional)
+        .coherent_array_zero_with_align::<u8>(mode.fb_size(), 0x1000)
         .map_err(|_| OnProbeError::other("vop2: framebuffer DMA alloc failed"))?;
     let fb_phys = fb.dma_addr().as_u64();
     info!("vop2: fb {} bytes @ phys {:#x}", mode.fb_size(), fb_phys);

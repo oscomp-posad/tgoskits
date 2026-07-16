@@ -50,14 +50,16 @@ impl DisplayMode {
         self.width * self.format.bytes_per_pixel()
     }
 
-    /// VIR register value: stride expressed in 32-bit words.
+    /// VIR register value: stride expressed in 32-bit words, rounded up (mainline
+    /// uses DIV_ROUND_UP so a non-word-multiple stride still covers the line).
     pub const fn vir_words(&self) -> u32 {
-        self.stride_bytes() / 4
+        self.stride_bytes().div_ceil(4)
     }
 
-    /// Total framebuffer byte size.
+    /// Total framebuffer byte size. Computed in `usize` to avoid the u32
+    /// overflow a very large mode would hit (stride*height for 4K+ exceeds u32).
     pub const fn fb_size(&self) -> usize {
-        (self.stride_bytes() * self.height) as usize
+        self.stride_bytes() as usize * self.height as usize
     }
 
     /// ACT_INFO register value: ((height-1) << 16) | (width-1).
