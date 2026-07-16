@@ -17,7 +17,8 @@ use rdrive::{DriverGeneric, probe::OnProbeError, register::ProbeFdt};
 use rockchip_vop2::{
     mmio::MmioRegs,
     mode::DisplayMode,
-    window::{detect_live_window, repoint},
+    modeset::modeset_vp0,
+    window::detect_live_window,
 };
 
 use crate::{display::PlatformDeviceDisplay, mmio::iomap};
@@ -126,13 +127,16 @@ fn probe(probe: ProbeFdt<'_>) -> Result<(), OnProbeError> {
     let fb_phys = fb.dma_addr().as_u64();
     info!("vop2: fb {} bytes @ phys {:#x}", mode.fb_size(), fb_phys);
 
-    // Repoint the live window (if any) at our framebuffer. If U-Boot lit no
-    // window we still register the fb; modeset is Stage 2.
-    if let Some(win) = live {
-        match repoint(&mut mmio, win, fb_phys, &mode) {
-            Ok(()) => info!("vop2: repointed {:?} -> our fb {:#x}", win.kind, fb_phys),
-            Err(e) => warn!("vop2: repoint failed: {e:?} (registering fb anyway)"),
-        }
+    // Full VP0 modeset for our framebuffer (Stage 2): reprogram the VP timing,
+    // DSP control, Esmart0 window, overlay routing and VP0->HDMI0 output enable,
+    // adopting U-Boot's already-running dclk/GRF/HDMI-TX/PHY. `live` (from the
+    // dump) is informational: if U-Boot lit no window this modeset is the first
+    // thing to drive the panel; if it did, we take over its VP. On the guard
+    // errors we still register the fb so /dev/fb0 + card0 exist.
+    let _ = live;
+    match modeset_vp0(&mut mmio, fb_phys, &mode) {
+        Ok(()) => info!("vop2: VP{} modeset -> our fb {:#x}", mode.vp, fb_phys),
+        Err(e) => warn!("vop2: modeset failed: {e:?} (registering fb anyway)"),
     }
 
     let info = DisplayInfo {

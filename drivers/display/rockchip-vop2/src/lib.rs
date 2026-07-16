@@ -8,11 +8,13 @@
 
 pub mod mmio;
 pub mod mode;
+pub mod modeset;
 pub mod regs;
 pub mod timing;
 pub mod window;
 
 pub use mode::{DisplayMode, PixelFormat};
+pub use modeset::modeset_vp0;
 pub use timing::VideoTiming;
 pub use window::{Window, WindowKind};
 

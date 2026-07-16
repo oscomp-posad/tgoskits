@@ -50,12 +50,30 @@ pub mod cluster {
 /// Esmart/Smart-window internal register offsets (added to the window base).
 pub mod esmart {
     pub const CTRL0: usize = 0x00;
+    /// SMART_CTRL1: carries the RK3588 per-window AXI read-IDs.
+    pub const CTRL1: usize = 0x04;
+    /// SMART_AXI_CTRL (RK3588): AXI bus-id select (bit 1).
+    pub const AXI_CTRL: usize = 0x08;
     pub const REGION0_CTRL: usize = 0x10;
     pub const REGION0_YRGB_MST: usize = 0x14;
     pub const REGION0_VIR: usize = 0x1C;
     pub const REGION0_ACT_INFO: usize = 0x20;
     pub const REGION0_DSP_INFO: usize = 0x24;
     pub const REGION0_DSP_ST: usize = 0x28;
+
+    // REGION0_CTRL fields (mainline rk3568_vop_smart_regs):
+    /// Window enable (bit 0).
+    pub const REGION0_CTRL_WIN_EN: u32 = 1 << 0;
+    /// Data-format field bits [5:1]. XRGB8888/ARGB8888 == 0.
+    pub const REGION0_CTRL_FORMAT_SHIFT: u32 = 1;
+    pub const FORMAT_ARGB8888: u32 = 0;
+
+    // CTRL1 AXI read-id fields (RK3588): yrgb [8:4], uv [16:12].
+    pub const CTRL1_YRGB_R_ID_SHIFT: u32 = 4;
+    pub const CTRL1_UV_R_ID_SHIFT: u32 = 12;
+    /// Esmart0 default read-ids from mainline rk3588_vop_win_data.
+    pub const ESMART0_YRGB_R_ID: u32 = 0x0a;
+    pub const ESMART0_UV_R_ID: u32 = 0x0b;
 }
 
 /// System interrupt enable; frame-start interrupt bit (Stage 2 use).
@@ -74,6 +92,8 @@ pub mod vp {
 
     // Offsets within a VP block (add to `base(vp)`):
     pub const DSP_CTRL: usize = 0x00;
+    pub const MIPI_CTRL: usize = 0x04;
+    pub const DSP_BG: usize = 0x2C;
     pub const POST_DSP_HACT_INFO: usize = 0x34;
     pub const POST_DSP_VACT_INFO: usize = 0x38;
     pub const DSP_HTOTAL_HS_END: usize = 0x48;
@@ -84,6 +104,54 @@ pub mod vp {
     /// Standby bit in `DSP_CTRL` (`RK3568_VP_DSP_CTRL__STANDBY`, BIT 31): set =
     /// VP blanked. Clearing it (once timing is programmed) starts scanout.
     pub const DSP_CTRL_STANDBY: u32 = 1 << 31;
+    /// `OUT_MODE` field [3:0] of `DSP_CTRL`. RGB/AAAA (used for HDMI on a VP with
+    /// the 10-bit output feature, which RK3588 VP0 has) == 0xF.
+    pub const DSP_CTRL_OUT_MODE_AAAA: u32 = 0xF;
+}
+
+/// Global overlay/mixer block (absolute VOP2-base offsets). Binds windows to
+/// video ports and configures the per-VP layer mux.
+pub mod ovl {
+    pub const CTRL: usize = 0x600;
+    pub const LAYER_SEL: usize = 0x604;
+    pub const PORT_SEL: usize = 0x608;
+    /// Per-VP background-mix control: `0x6E0 + vp*4`.
+    pub const fn vp_bg_mix_ctrl(vp: u8) -> usize {
+        0x6E0 + (vp as usize) * 4
+    }
+    /// Esmart-window delay-number register (holds ESMART0..3 delays).
+    pub const SMART_DLY_NUM: usize = 0x6F8;
+
+    /// One `LAYER_SEL` nibble is 4 bits at `layer*4`; it holds the window's
+    /// `layer_sel_id` occupying mixer `layer`.
+    pub const fn layer_sel_shift(layer: u8) -> u32 {
+        (layer as u32) * 4
+    }
+    /// Esmart0's `layer_sel_id` on RK3588 (mainline win data) == 2.
+    pub const ESMART0_LAYER_SEL_ID: u32 = 2;
+
+    /// `PORT_SEL` window→VP field for Esmart0: bits [25:24].
+    pub const PORT_SEL_ESMART0_SHIFT: u32 = 24;
+    pub const PORT_SEL_ESMART0_MASK: u32 = 0b11 << 24;
+
+    /// `SMART_DLY_NUM` Esmart0 field: bits [7:0]. Esmart0 default delay == 23.
+    pub const SMART_DLY_ESMART0_MASK: u32 = 0xFF;
+    pub const ESMART0_DLY: u32 = 23;
+}
+
+/// System display-output-interface routing/enable (absolute offsets).
+pub mod dsp_if {
+    pub const EN: usize = 0x028;
+    pub const CTRL: usize = 0x02C;
+    pub const POL: usize = 0x030;
+
+    /// RK3588: HDMI0 output enable (`RK3588_SYS_DSP_INFACE_EN_HDMI0`, BIT 3).
+    pub const EN_HDMI0: u32 = 1 << 3;
+    /// RK3588: EDP0/HDMI0 shared VP-source mux, bits [17:16] (0=VP0..3=VP3).
+    pub const EN_EDP_HDMI0_MUX_SHIFT: u32 = 16;
+    pub const EN_EDP_HDMI0_MUX_MASK: u32 = 0b11 << 16;
+    /// `CFG_DONE_IMD` (BIT 28) of `POL`: make the DSP_IF bank latch immediately.
+    pub const POL_CFG_DONE_IMD: u32 = 1 << 28;
 }
 
 /// Interrupt registers (Stage 2 vsync). Per-VP block at `0xA0 + vp*0x10`.
