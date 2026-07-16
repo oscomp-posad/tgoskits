@@ -1,0 +1,14 @@
+board_type = "OrangePi-5-Plus"
+shell_prefix = "root@starry:/root #"
+# Stage 1: run the framebuffer smoke test (no Qt) to validate the native VOP2
+# driver lights /dev/fb0 on real HDMI. Swap to /usr/bin/qt-demo-test.sh for the
+# Stage-5 Qt-on-board run once the display path is confirmed.
+shell_init_cmd = "/usr/bin/fb-smoke.sh"
+success_regex = [
+  "(?m)^FB_SMOKE_PASSED\\s*$",
+]
+fail_regex = [
+  "(?i)\\bpanic(?:ked)?\\b",
+  "(?m)^FB_SMOKE_FAILED(?:[: ].*)?$",
+]
+timeout = 600

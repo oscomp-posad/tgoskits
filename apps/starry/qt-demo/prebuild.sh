@@ -164,6 +164,8 @@ populate_overlay() {
     # container prebuild did not produce a binary.
     install -Dm0644 "$app_dir/clock.cpp" "$overlay_dir/usr/local/qt-demo/clock.cpp"
     install -Dm0755 "$app_dir/qt-demo-test.sh" "$overlay_dir/usr/bin/qt-demo-test.sh"
+    # Stage-1 board framebuffer smoke test (no Qt); harmless in QEMU overlays too.
+    install -Dm0755 "$app_dir/fb-smoke.sh" "$overlay_dir/usr/bin/fb-smoke.sh"
 
     copy_base_text_file_to_overlay /etc/apk/repositories
     copy_base_text_file_to_overlay /etc/resolv.conf
