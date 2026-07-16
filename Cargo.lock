@@ -712,6 +712,7 @@ dependencies = [
  "rockchip-pwm",
  "rockchip-rga",
  "rockchip-soc",
+ "rockchip-vop2",
  "sdhci-cv1800",
  "sdhci-host",
  "sdio-host-cv1800",
