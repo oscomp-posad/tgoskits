@@ -69,6 +69,15 @@ serial = [
 ]
 rknpu = ["rockchip-pm", "rockchip-soc", "dep:rockchip-npu"]
 rockchip-vop2 = ["display", "dep:rockchip-vop2"]
+# Full HDMI cold-init (own the HDPTX PHY + DW-HDMI-QP TX + CRU dclk, no U-Boot
+# reuse). Opt-in + board-validation-pending; pulls the PHY/TX driver cores.
+rockchip-vop2-coldinit = [
+    "rockchip-vop2",
+    "rockchip-pm",
+    "rockchip-soc",
+    "dep:dw-hdmi-qp",
+    "dep:rockchip-hdptx-phy",
+]
 rga = ["dep:rockchip-rga"]
 jpeg = ["rockchip-pm", "rockchip-soc", "dep:rockchip-jpeg"]
 jpu-selftest = ["jpeg"]
@@ -191,6 +200,8 @@ rockchip-jpeg = { workspace = true, optional = true }
 rockchip-pm = { workspace = true, optional = true }
 rockchip-soc = { workspace = true, optional = true }
 rockchip-vop2 = { path = "../display/rockchip-vop2", optional = true }
+dw-hdmi-qp = { path = "../display/dw-hdmi-qp", optional = true }
+rockchip-hdptx-phy = { path = "../phy/rockchip-hdptx-phy", optional = true }
 phytium-mci-host = { workspace = true, optional = true }
 sdhci-host = { workspace = true, optional = true }
 sdhci-cv1800 = { workspace = true, optional = true }

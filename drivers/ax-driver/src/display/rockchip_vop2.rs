@@ -14,12 +14,7 @@ use dma_api::{CoherentArray, DeviceDma};
 use log::{info, warn};
 use rdif_display::{DisplayError, DisplayInfo, FrameBuffer, PixelFormat};
 use rdrive::{DriverGeneric, probe::OnProbeError, register::ProbeFdt};
-use rockchip_vop2::{
-    mmio::MmioRegs,
-    mode::DisplayMode,
-    modeset::modeset_vp0,
-    window::detect_live_window,
-};
+use rockchip_vop2::{mmio::MmioRegs, mode::DisplayMode};
 
 use crate::{display::PlatformDeviceDisplay, mmio::iomap};
 
@@ -97,23 +92,6 @@ fn probe(probe: ProbeFdt<'_>) -> Result<(), OnProbeError> {
     // unpowered (garbage/zero registers), that is the trigger to add a real
     // `rdif_power` power-on in the Stage-2 cold-init path.
 
-    // --- DUMP: golden reference. Read-only; safe on first bring-up. ---
-    dump_state(&mmio);
-
-    let live = detect_live_window(&mmio);
-    match live {
-        Some(w) => info!(
-            "vop2: live window {:?} base={:#x} mst={:#x}",
-            w.kind,
-            w.base,
-            w.current_mst(&mmio)
-        ),
-        None => warn!(
-            "vop2: NO live window (all candidate YRGB_MST == 0). U-Boot did not light the \
-             display; registering fb anyway, full modeset is Stage 2+."
-        ),
-    }
-
     // Allocate our framebuffer: COHERENT (uncached), contiguous, low-4GiB,
     // zeroed. Coherent — not streaming/contiguous — because VOP2 scans it in
     // place with no per-frame flush and userspace mmaps it uncached; a cached
@@ -127,16 +105,31 @@ fn probe(probe: ProbeFdt<'_>) -> Result<(), OnProbeError> {
     let fb_phys = fb.dma_addr().as_u64();
     info!("vop2: fb {} bytes @ phys {:#x}", mode.fb_size(), fb_phys);
 
-    // Full VP0 modeset for our framebuffer (Stage 2): reprogram the VP timing,
-    // DSP control, Esmart0 window, overlay routing and VP0->HDMI0 output enable,
-    // adopting U-Boot's already-running dclk/GRF/HDMI-TX/PHY. `live` (from the
-    // dump) is informational: if U-Boot lit no window this modeset is the first
-    // thing to drive the panel; if it did, we take over its VP. On the guard
-    // errors we still register the fb so /dev/fb0 + card0 exist.
-    let _ = live;
-    match modeset_vp0(&mut mmio, fb_phys, &mode) {
-        Ok(()) => info!("vop2: VP{} modeset -> our fb {:#x}", mode.vp, fb_phys),
-        Err(e) => warn!("vop2: modeset failed: {e:?} (registering fb anyway)"),
+    // Program the display for our framebuffer. Two mutually-exclusive paths:
+    //  - cold-init (feature on): own the PHY/TX/CRU/GRF too (no U-Boot reuse).
+    //  - adopt (default): reuse U-Boot's clock/TX/PHY, dump the golden state, and
+    //    own only the VP + window via a full modeset.
+    #[cfg(feature = "rockchip-vop2-coldinit")]
+    match crate::display::hdmi_coldinit::cold_init_hdmi0_1080p60(&mut mmio, fb_phys) {
+        Ok(()) => info!("vop2: HDMI0 cold-init complete -> fb {fb_phys:#x}"),
+        Err(e) => warn!("vop2: HDMI0 cold-init failed: {e} (registering fb anyway)"),
+    }
+    #[cfg(not(feature = "rockchip-vop2-coldinit"))]
+    {
+        dump_state(&mmio);
+        match rockchip_vop2::window::detect_live_window(&mmio) {
+            Some(w) => info!(
+                "vop2: live window {:?} base={:#x} mst={:#x}",
+                w.kind,
+                w.base,
+                w.current_mst(&mmio)
+            ),
+            None => warn!("vop2: NO live window; the full modeset will drive the panel"),
+        }
+        match rockchip_vop2::modeset::modeset_vp0(&mut mmio, fb_phys, &mode) {
+            Ok(()) => info!("vop2: VP{} modeset -> fb {fb_phys:#x}", mode.vp),
+            Err(e) => warn!("vop2: modeset failed: {e:?} (registering fb anyway)"),
+        }
     }
 
     let info = DisplayInfo {
@@ -155,6 +148,8 @@ fn probe(probe: ProbeFdt<'_>) -> Result<(), OnProbeError> {
 }
 
 /// Dump the registers we care about at `Info` level for the golden reference.
+/// Adopt-path only; the cold-init path powers the VOP itself and skips it.
+#[cfg(not(feature = "rockchip-vop2-coldinit"))]
 fn dump_state(mmio: &MmioRegs) {
     use rockchip_vop2::regs::{REG_CFG_DONE, cluster, esmart, win_base};
     let rd = |off: usize| rockchip_vop2::mmio::Regs::read32(mmio, off);
