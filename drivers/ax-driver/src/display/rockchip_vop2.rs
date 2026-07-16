@@ -1,12 +1,19 @@
-//! RK3588 VOP2 OS glue: FDT probe, MMIO map, power-domain enable, DMA
-//! framebuffer, and rdif-display registration. Driver-core logic lives in the
-//! `rockchip-vop2` crate; this file is the OS boundary only.
+//! RK3588 VOP2 OS glue: FDT probe, MMIO map, DMA framebuffer, and rdif-display
+//! registration. Driver-core logic lives in the `rockchip-vop2` crate; this
+//! file is the OS boundary only.
+//!
+//! Stage 1 (adopt-and-repoint) assumes U-Boot already powered and lit the VOP
+//! (it drew the boot logo), so this driver does not enable the VOP power domain
+//! itself — matching the current `rknpu` driver, which likewise relies on the
+//! bootloader for its power domain. On `upstream/dev` the RK3588 power provider
+//! is exposed only through `rdif_power::Interface` (`power_on(PowerDomainId)`),
+//! not as a bare `RockchipPM` device; a real cold-init power-on (VOP domain id
+//! 24) belongs to Stage 2 and must go through that interface.
 
 use dma_api::{ContiguousArray, DeviceDma, DmaDirection};
 use log::{info, warn};
 use rdif_display::{DisplayError, DisplayInfo, FrameBuffer, PixelFormat};
 use rdrive::{DriverGeneric, probe::OnProbeError, register::ProbeFdt};
-use rockchip_pm::{PowerDomain, RockchipPM};
 use rockchip_vop2::{
     mmio::MmioRegs,
     mode::DisplayMode,
@@ -14,10 +21,6 @@ use rockchip_vop2::{
 };
 
 use crate::{display::PlatformDeviceDisplay, mmio::iomap};
-
-// RK3588 VOP power domain id (0x18 = 24), matches the DTB `power-domains`
-// phandle arg and `rockchip-pm` rk3588 variant "VOP".
-const PD_VOP: u32 = 24;
 
 crate::model_register!(
     name: "Rockchip VOP2",
@@ -80,15 +83,10 @@ fn probe(probe: ProbeFdt<'_>) -> Result<(), OnProbeError> {
     let mapped = unsafe { iomap(start, end - start)?.add(offset) };
     let mut mmio = unsafe { MmioRegs::new(mapped.as_ptr(), size_raw) };
 
-    // Ensure the VOP power domain is on (safe if U-Boot already enabled it).
-    if let Some(pm) = rdrive::get_one::<RockchipPM>() {
-        if let Ok(mut pm) = pm.lock() {
-            let _ = pm.power_domain_on(PowerDomain(PD_VOP as _));
-            info!("vop2: VOP power domain ({PD_VOP}) on");
-        }
-    } else {
-        warn!("vop2: RockchipPM not found; assuming U-Boot left VOP powered");
-    }
+    // NOTE: Stage 1 relies on U-Boot having powered the VOP domain (see module
+    // docs). We do not enable it here; if a future dump shows the block is
+    // unpowered (garbage/zero registers), that is the trigger to add a real
+    // `rdif_power` power-on in the Stage-2 cold-init path.
 
     // --- DUMP: golden reference. Read-only; safe on first bring-up. ---
     dump_state(&mmio);
