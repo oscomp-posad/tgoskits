@@ -39,6 +39,13 @@ rockchip-vop2 = [
   "starry-kernel/rockchip-vop2",
   "ax-runtime/display",
 ]
+# Full HDMI cold-init (own PHY+TX+CRU+GRF, no U-Boot reuse). Opt-in for a watched
+# display bring-up; board-validation pending. Implies the display runtime path.
+rockchip-vop2-coldinit = [
+  "ax-driver/rockchip-vop2-coldinit",
+  "starry-kernel/rockchip-vop2-coldinit",
+  "ax-runtime/display",
+]
 jpeg = ["ax-driver/jpeg", "starry-kernel/jpeg"]
 rk3588-pwm = ["starry-kernel/rk3588-pwm"]
 stack-protector = ["ax-std/stack-protector", "starry-kernel/stack-protector"]
