@@ -32,16 +32,20 @@ pub struct DisplayMode {
     pub format: PixelFormat,
     /// Which VP drives the active connector (0..=3). Confirmed by dump in glue.
     pub vp: u8,
+    /// Full display timing (blanking/sync) for the from-scratch VP modeset in
+    /// Stage 2. Stage 1 (adopt-and-repoint) does not use it.
+    pub timing: crate::timing::VideoTiming,
 }
 
 impl DisplayMode {
-    /// Canonical Stage-1 fallback: 1080p, XRGB8888, VP0.
+    /// Canonical Stage-1 fallback: 1080p60, XRGB8888, VP0.
     pub const fn fhd_vp0() -> Self {
         Self {
             width: 1920,
             height: 1080,
             format: PixelFormat::Xrgb8888,
             vp: 0,
+            timing: crate::timing::VideoTiming::fhd60(),
         }
     }
 

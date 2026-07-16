@@ -61,3 +61,84 @@ pub mod esmart {
 /// System interrupt enable; frame-start interrupt bit (Stage 2 use).
 pub const SYS0_INT_EN: usize = 0x80;
 pub const FS_NEW_INTR: u32 = 1 << 4;
+
+/// Video Port (VP) control blocks (Stage 2 modeset). Base per VP, stride 0x100.
+pub mod vp {
+    pub const VP0_BASE: usize = 0x0C00;
+    pub const STRIDE: usize = 0x100;
+
+    /// Byte offset of video port `vp`'s control block (0..=3).
+    pub const fn base(vp: u8) -> usize {
+        VP0_BASE + (vp as usize) * STRIDE
+    }
+
+    // Offsets within a VP block (add to `base(vp)`):
+    pub const DSP_CTRL: usize = 0x00;
+    pub const POST_DSP_HACT_INFO: usize = 0x34;
+    pub const POST_DSP_VACT_INFO: usize = 0x38;
+    pub const DSP_HTOTAL_HS_END: usize = 0x48;
+    pub const DSP_HACT_ST_END: usize = 0x4C;
+    pub const DSP_VTOTAL_VS_END: usize = 0x50;
+    pub const DSP_VACT_ST_END: usize = 0x54;
+
+    /// Standby bit in `DSP_CTRL` (`RK3568_VP_DSP_CTRL__STANDBY`, BIT 31): set =
+    /// VP blanked. Clearing it (once timing is programmed) starts scanout.
+    pub const DSP_CTRL_STANDBY: u32 = 1 << 31;
+}
+
+/// Interrupt registers (Stage 2 vsync). Per-VP block at `0xA0 + vp*0x10`.
+pub mod intr {
+    /// Per-VP interrupt-enable register.
+    pub const fn vp_int_en(vp: u8) -> usize {
+        0xA0 + (vp as usize) * 0x10
+    }
+    /// Per-VP interrupt-clear register.
+    pub const fn vp_int_clr(vp: u8) -> usize {
+        0xA4 + (vp as usize) * 0x10
+    }
+    /// Per-VP interrupt-status register.
+    pub const fn vp_int_status(vp: u8) -> usize {
+        0xA8 + (vp as usize) * 0x10
+    }
+    /// Per-VP raw (unmasked) interrupt-status register.
+    pub const fn vp_int_raw_status(vp: u8) -> usize {
+        0xAC + (vp as usize) * 0x10
+    }
+
+    /// Frame-start interrupt bit (shared position across the INT registers).
+    pub const FS_NEW_INTR: u32 = 1 << 4;
+    /// Line-flag 1 interrupt bit.
+    pub const LINE_FLAG1_INTR: u32 = 1 << 6;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cfg_done_includes_global_enable() {
+        // GLB_CFG_DONE_EN (BIT 15) must always be present, plus VP0's commit bit
+        // (BIT 0) and its write-enable mask (BIT 16).
+        assert_eq!(cfg_done_value(0), (1 << 15) | (1 << 0) | (1 << 16));
+        assert_eq!(cfg_done_value(1), (1 << 15) | (1 << 1) | (1 << 17));
+    }
+
+    #[test]
+    fn vp_offsets() {
+        assert_eq!(vp::base(0), 0x0C00);
+        assert_eq!(vp::base(1), 0x0D00);
+        assert_eq!(vp::base(3), 0x0F00);
+        assert_eq!(vp::base(0) + vp::DSP_HTOTAL_HS_END, 0x0C48);
+        assert_eq!(vp::base(0) + vp::DSP_VACT_ST_END, 0x0C54);
+    }
+
+    #[test]
+    fn intr_offsets() {
+        assert_eq!(intr::vp_int_en(0), 0xA0);
+        assert_eq!(intr::vp_int_clr(0), 0xA4);
+        assert_eq!(intr::vp_int_status(0), 0xA8);
+        assert_eq!(intr::vp_int_raw_status(0), 0xAC);
+        assert_eq!(intr::vp_int_en(1), 0xB0);
+        assert_eq!(intr::FS_NEW_INTR, 0x10);
+    }
+}

@@ -9,9 +9,11 @@
 pub mod mmio;
 pub mod mode;
 pub mod regs;
+pub mod timing;
 pub mod window;
 
 pub use mode::{DisplayMode, PixelFormat};
+pub use timing::VideoTiming;
 pub use window::{Window, WindowKind};
 
 /// Errors from VOP2 core operations.
