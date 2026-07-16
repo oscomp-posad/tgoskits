@@ -1,5 +1,31 @@
 <!-- from workflow w013b9pqt; verify tree-state claims below -->
 
+> **AMENDMENT (2026-07-16 — supersedes the deferral in §0/Design below):**
+> Verified on THIS tree, two facts change the phasing:
+> 1. The `#1495` deferred-wake machinery (`wake_handoff` / `REMOTE_RESCHEDULE_PENDING` /
+>    `clear_prev_task_on_cpu`) **IS present** — the plan wrongly assumed it absent. The safety
+>    objection that pushed wake-redirect to a gated Phase 3 no longer holds.
+> 2. Per project direction, **wake-redirect is NOT deferred** — it moves into Phase 2, because it
+>    is the mechanism that captures the wake-heavy / latency workloads (mutex, threads, and the
+>    RKNN inference pipeline) that idle-pull structurally cannot.
+>
+> **Revised phasing:**
+> - **Phase 1 — idle-pull balancer** (unchanged): throughput base 159→~2046, zero wake-path risk
+>   (moves only *Ready* tasks). Cherry-pick `.claude/sched-loadbalance.patch` (~90% done, tested).
+> - **Phase 2 — enqueue-time placement (spawn AND wake)**: on spawn or wake, pick the best CPU
+>   (prefer an idle big/A76 core) instead of the last/waker core. Subsumes the plan's (d)
+>   spawn-placement + (d′) wake-redirect; captures the placement lever (2.2×) AND the wake-heavy
+>   paths. Built on the present deferred-wake cross-core enqueue+kick.
+>   **Correctness gates (mandatory — this is the live wake path):**
+>   (a) use the deferred-wake enqueue+kick, NEVER the old `on_cpu` busy-spin cross-core;
+>   (b) target is ALWAYS within the task cpumask (affinity authoritative);
+>   (c) never redirect a task still `on_cpu` on its old core — let deferred-wake sequence it;
+>   (d) wake-affinity bias + hysteresis to avoid ping-pong / IPI storms (à la Linux
+>       `select_idle_sibling`: keep the cache-hot waker core unless a clearly-better idle big
+>       core is free);
+>   (e) consistent src/dst run-queue + task lock ordering.
+> A focused adversarial correctness pass on Phase 2 runs before any code.
+
 # big.LITTLE-aware load-balancing scheduler for axtask — phased implementation plan
 
 ## 0. Ground-truth corrections (verified against `feat/rknn-profiling-harness`, not upstream)

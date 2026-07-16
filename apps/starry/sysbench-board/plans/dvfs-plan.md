@@ -152,3 +152,76 @@ Each rung = a harness snapshot (cpuprobe freq + sysbench single-thread). Advance
 **Acceptance:** on-board harness shows A55 core ips ×1.235 (→ sysbench ~196) and all four A76 cores ×1.47 (→ sysbench ~510), `sched_getcpu` correct, board stable through a full sysbench pass and reboot. That snapshot is rung **R1** and the safe foundation the voltage work builds on.
 
 **Verified anchors:** `scmi.rs:137` (set) / `:83` (get) / `:29` (probe); proven caller `block/rockchip/clock.rs:129`; SCMI ids in `orangepi5plus.dts:1767` (`assigned-clocks <0x0e 0 / 2 / 3>`) + `cpu@0/400/600` `clocks`; A55/A76 OPP µV at `dts:785-835` / `dts:~1000-1090`; `PLL_RATE_TABLE` 1008/1200 at `pll.rs:112/109`; boot seam `axruntime/src/lib.rs:301` / `:324`; no voltage/cpufreq code anywhere (grep clean).
+
+
+---
+
+# SAFETY REVIEW (adversarial pass)
+
+I now have all the ground truth I need. All four safety-critical facts are verified against the live tree. Here is the adversarial review.
+
+---
+
+# Adversarial Review — RK3588 DVFS Phase 1 (SCMI voltage-free rung)
+
+## Verification summary (what I confirmed against the live tree)
+
+| Claim in plan | Verified? | Evidence |
+|---|---|---|
+| SCMI is frequency-only; no voltage/perf domain | **TRUE** | `scmi.rs:121` = `clock_rate_set_direct` only; DTS `scmi` node (`orangepi5plus.dts:1759`) exposes only `protocol@14` (clock) + `protocol@16` (reset). No `perf@13`, no `voltage@17`. The "SCMI raises voltage atomically" claim is **confirmed false**. |
+| SCMI id→cluster mapping (id0=A55, id2=big0, id3=big1) | **TRUE — exact** | `cpu@0/100/200/300 clocks=<0x0e 0>`; `cpu@400/500 clocks=<0x0e 2>`; `cpu@600/700 clocks=<0x0e 3>`; `assigned-clocks=<0x0e 0 0x0e 2 0x0e 3>` (line 1770). There is **no CPU clock id 1**. |
+| A55 1008 = 0.675V = boot | **TRUE** | cluster0 `opp-1008000000` core µV = `0xa4cb8` = 675000, identical to `opp-816000000`. |
+| A76 1200 = 0.675V = boot | **TRUE** | cluster1 `opp-1200000000` core µV = `0xa4cb8` = 675000, flat from 408→1200; steps up only at 1416 (`0xb1008`=725000). |
+| A55 1200 needs 0.7125V (> boot) — correctly excluded from 1a | **TRUE** | cluster0 `opp-1200000000` base = `0xadf34` = 712500. Plan correctly sends A55 only to 1008, not 1200. |
+| PLL table has 1008/1200 but not 1800/2256; raw path capped ~1.5GHz | **TRUE** | `pll.rs:107-125`; header comment "支持的频率范围: 100MHz - 1.5GHz"; `find_pll_params` VCO guard 2250–4500 MHz (`pll.rs:565`). |
+| No voltage lever exists anywhere | **TRUE** | grep `set_voltage\|rk806\|rk860x\|spmi` across `drivers/`+`components/` → only the DTS. |
+| Probe ordering: cpufreq at DEFAULT runs after SCMI at CLK | **TRUE** | `manager.rs:29` `sort_by_key(|a| a.priority)` ascending; `CLK=6 < DEFAULT=256`, so SCMI(6) probes first. |
+
+The plan's **central safety thesis is sound and verified**: within whichever SKU variant applies to this chip, the 816 boot OPP and the 1008(A55)/1200(A76) targets sit on the **same voltage row**, so "stable at boot ⟹ stable at target" holds *without knowing the absolute boot voltage*. That reasoning is airtight — see Risk 1 for the one nuance to correct.
+
+---
+
+## Risks, severity, and mitigation status
+
+**R1 — Airtight-safety reasoning is right but stated imprecisely (SKU/bin nuance).** *Severity: LOW (safety preserved).*
+The plan says "1200 needs 0.675V." That is true only for the **standard `opp-*` SKU** (`opp-supported-hw` = 0xf9/0xff). This board's DTS *also* carries an `opp-j-m-*` industrial variant (RK3588J/M) where every OPP incl. 408 MHz is `0xb71b0` = **0.75V**, selected at runtime by the `specification_serial_number` nvmem cell. **The invariant still holds under either SKU** (816 and the target share a row: 0.675 vs 0.675 standard, or 0.75 vs 0.75 j-m), so no hang either way. *Change required:* reframe the safety argument as "target OPP shares the boot OPP's voltage row in the applicable variant" rather than "target needs 0.675V" — otherwise a future edit that trusts the literal 0.675 number could undervolt on a j-m part.
+
+**R2 — Undervolt hang (the primary hazard).** *Severity: CRITICAL in general; MITIGATED for Phase 1a by construction.*
+Confirmed impossible for R1: A55→1008 and A76→1200 both stay on the boot voltage row. No mitigation gap for Phase 1a. (R2–R4 rungs remain correctly gated on measured V_boot / a real regulator; do not relax those.)
+
+**R3 — cpufreq driver node binding collides with the SCMI driver.** *Severity: MEDIUM (silent no-op, not a hang).*
+The plan proposes binding the new driver to compatible `arm,scmi-smc` — **already consumed** by the SCMI driver's own `model_register` (`scmi.rs:21`). A second driver on the same node will not get a second `on_probe`, so `set_clock_rate` never runs and PR1 becomes a silent no-op. *Change required:* do **not** bind to `arm,scmi-smc`. Use the plan's stated fallback — a board-feature-gated hook in `axruntime/src/lib.rs` immediately after `devices::probe_all_devices()` (:301) and before `start_secondary_cpus()` (:324) — or bind to an unclaimed node (`operating-points-v2` / the `cpu@0` node). The hook is cleanest and keeps ordering explicit.
+
+**R4 — SCMI rejects CPU-cluster rate_set (BL31 doesn't expose them).** *Severity: LOW (fail-safe).* `set_clock_rate` returns `None`, nothing changes — no hang. Plan's `describe_rates` preflight + "treat None as hard stop" is correct. Keep it, and **assert on the read-back** (see R7).
+
+**R5 — Raw-CRU fallback reprograms LPLL under the live primary core.** *Severity: MEDIUM.*
+`pll_set_rate` (`pll.rs:304`) does switch to SLOW mode (24 MHz) → powerdown → write → powerup → **lock-wait (1 ms timeout)** → NORMAL. That is the glitch-managed sequence U-Boot uses, so it won't glitch-hang. But for the A55/LPLL(id3) fallback the running cpu0 executes at 24 MHz for up to ~1 ms with the scheduler tick live, and — more importantly — it **races BL31's cached PLL state** if BL31 ever touches LPLL/B0/B1. *Changes required:* (a) run the fallback with **interrupts masked** around the reprogram (mirror U-Boot's single-threaded assumption); (b) only ever enter the fallback when the SCMI preflight *rejected* the rate (evidence BL31 isn't the live owner), never concurrently; (c) keep the fallback strictly ≤ the 1008/1200 already-safe rates. Note the raw path also leaves the cluster DBG/ATCLK/GIC/PCLK divisors at 816-sized values — harmless at 1008/1200, but this is a hard reason never to use the raw path above R1.
+
+**R6 — Reclocking A76 before `start_secondary_cpus` vs. the known smp8 boot hang.** *Severity: LOW–MEDIUM.*
+Applying at :301 means A76 clusters carry no running core — good. But your notes record an existing smp8 boot-hang / cross-core wake bug; changing cluster frequency shifts secondary-bring-up timing and could mask or expose it. *Change required:* validate PR1 first on the **same bounded SMP config that already boots cleanly**, then widen. Don't debut DVFS and a new SMP topology together.
+
+**R7 — "Wrote the rate" ≠ "rate applied."** *Severity: MEDIUM (wrong results, not a hang).*
+BL31 may clamp or round a requested rate. *Change required:* after each set, call `scmi::clock_rate(phandle, id)` and **assert the applied rate is within tolerance of the request**; if it isn't, log and stop (don't advance rungs on a phantom win). Cross-check against cpuprobe's CNTVCT-timed ips ratio (×1.235 A55, ×1.47 A76) before declaring R1.
+
+**R8 — Thermal.** *Severity: NEGLIGIBLE for Phase 1a.* Voltage constant, frequency +23–47% ⟹ power scales ~linearly from a low idle base; nowhere near the TSADC ~120 °C trip. No StarryOS thermal governor exists, so this only becomes real at R4 (voltage-up + all-core max) — the plan already flags it there. Fine.
+
+**R9 — Companion (mem/vdd_log) rail.** *Severity: NEGLIGIBLE for Phase 1a; note for Phase 2.* The mem column is **flat** across all A76 OPPs (`0xf4240`=1.0V) and all A55 OPPs (`0xe7ef0`=0.95V), so raising frequency never raises the mem requirement. Phase-1a is unaffected; Phase-2's "co-raise mem" caution is conservative and can stay.
+
+**R10 — Recovery has no software watchdog.** *Severity: process, not code.* A wrong step = physical power-cycle. *Change required:* one rung per boot, **serial capture on**, confirm a full sysbench pass + clean reboot before advancing. Already implied by the ladder; make it a hard gate.
+
+---
+
+## Verdict: **GO-WITH-CHANGES on Phase 1a**
+
+The frequency-only Phase 1a (A55→1008, A76(id2+id3)→1200, all on the boot voltage row) is **safe to attempt on hardware**. Every load-bearing fact — SCMI is clock-only, the id→cluster mapping, the equal-voltage rows, probe ordering, absence of any voltage lever — is verified against the tree. There is no undervolt path in R1.
+
+**Required changes before running on the board (all non-negotiable):**
+1. **Do not bind the driver to `arm,scmi-smc`** (already owned) → use the board-feature-gated hook between `probe_all_devices()` (:301) and `start_secondary_cpus()` (:324), or an unclaimed node. Otherwise PR1 is a silent no-op (R3).
+2. **Read-back assert**: verify `clock_rate(id)` ≈ requested and cross-check cpuprobe ips ratios; stop on mismatch (R7).
+3. **Reframe the safety comment** to "target shares the boot OPP's voltage row (per the nvmem-selected SKU variant)," not the literal 0.675 V, so a j-m part or a future edit can't silently undervolt (R1).
+4. **Fallback path hardening**: raw-CRU only on SCMI-reject, interrupts masked during `pll_set_rate`, never concurrent with SCMI, capped at 1008/1200 (R5).
+5. **Bring-up discipline**: same-as-known-good SMP config first; one rung per boot with serial capture; confirm full sysbench pass + clean reboot before advancing (R6, R10).
+
+**Phase 1b / Phase 2: NO-GO until** Phase 0 measures the three rail voltages (RK806 `vdd_cpu_lit_s0`, RK8602/03 `vdd_cpu_big0/1_s0`) — read-only VSEL probe preferred — and, for Phase 2, a verified RK806/RK860x write driver with strict raise-V→settle→raise-f ordering and DT clamps. Those phases are correctly gated in the plan; keep them gated.
+
+Relevant files: `/Users/jsph273/Desktop/Code/tgoskits/drivers/ax-driver/src/soc/scmi.rs`, `/Users/jsph273/Desktop/Code/tgoskits/drivers/soc/rockchip/rockchip-soc/src/variants/rk3588/cru/pll.rs`, `/Users/jsph273/Desktop/Code/tgoskits/drivers/rdrive/src/{manager.rs,register/mod.rs}`, `/Users/jsph273/Desktop/Code/tgoskits/drivers/npu/rockchip-npu/fireware/orangepi5plus.dts` (scmi node @1759, cpu clocks @481-633, cluster0/1/2 opp-tables @740/934/1183), boot seam `/Users/jsph273/Desktop/Code/tgoskits/os/arceos/modules/axruntime/src/lib.rs` (:301/:324).
