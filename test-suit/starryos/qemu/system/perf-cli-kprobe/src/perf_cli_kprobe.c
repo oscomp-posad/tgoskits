@@ -48,7 +48,7 @@
 #define PERF_SAMPLE_IP (1ull << 0)
 #define PERF_SAMPLE_TID (1ull << 1)
 #define PERF_SAMPLE_TIME (1ull << 2)
-#define PERF_SAMPLE_RAW (1ull << 11)
+#define PERF_SAMPLE_RAW (1ull << 10)
 
 #define PERF_ATTR_FLAG_DISABLED (1ull << 0)
 

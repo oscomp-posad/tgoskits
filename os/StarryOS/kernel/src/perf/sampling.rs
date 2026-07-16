@@ -183,13 +183,13 @@ const PERF_SAMPLE_CALLCHAIN: u64 = 1 << 5;
 /// the event id. Group-leader sampling (`read_format & PERF_FORMAT_GROUP`) and
 /// the `TOTAL_TIME_*` fields need per-event/per-group accounting reachable from
 /// the IRQ handler and are rejected at open (see `perf_event_open_hw`).
-pub const PERF_SAMPLE_READ: u64 = 1 << 10;
+pub const PERF_SAMPLE_READ: u64 = 1 << 4;
 /// `PERF_SAMPLE_RAW`: the raw tracepoint event record — a `u32 size` (padded to a
 /// `u64` boundary) then `size` bytes matching the event's `format` file. `perf
 /// record` sets this by default for a tracepoint event (`-e <tp>` /
 /// `-e probe:<kprobe>`); a probe hit emits the minimal kprobe record (the four
 /// `common_*` header fields + `__probe_ip`).
-pub const PERF_SAMPLE_RAW: u64 = 1 << 11;
+pub const PERF_SAMPLE_RAW: u64 = 1 << 10;
 /// `PERF_SAMPLE_REGS_USER`: the interrupted user register file — a `u64 abi`
 /// followed by the registers selected by `attr.sample_regs_user` (aarch64
 /// `PERF_REG_ARM64` order) — so a host `perf report --call-graph dwarf` can seed

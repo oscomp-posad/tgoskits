@@ -332,13 +332,14 @@ impl CallBackFunc for ProbeSampleCallback {
     }
 }
 
-/// Whether a probe `sample_type` is supported. Probe samples carry only the
-/// scalar fields + an optional callchain, so `PERF_SAMPLE_READ` / `REGS_USER` /
-/// `STACK_USER` (which need a counter / interrupted user context a probe hit does
-/// not have) are rejected — this also keeps the record within the buffer the
-/// callback sizes. Must set `PERF_SAMPLE_IP`.
+/// Whether a probe `sample_type` is supported. Probe samples carry the scalar
+/// fields, an optional callchain, and the optional `PERF_SAMPLE_RAW` tracepoint
+/// record; `PERF_SAMPLE_READ` (`1<<4`) / `REGS_USER` (`1<<12`) / `STACK_USER`
+/// (`1<<13`) — which need a counter / interrupted user context a probe hit does
+/// not have — are rejected (this also keeps the record within the callback's
+/// buffer). IP is not required: `perf record` on a tracepoint may omit it.
 pub fn probe_sample_type_supported(sample_type: u64) -> bool {
-    const PERF_SAMPLE_IP: u64 = 1 << 0;
-    const PROBE_MASK: u64 = sampling::SUPPORTED_SAMPLE_TYPE & !((1 << 10) | (1 << 12) | (1 << 13));
-    sample_type & PERF_SAMPLE_IP != 0 && sample_type & !PROBE_MASK == 0
+    const PROBE_MASK: u64 =
+        sampling::SUPPORTED_SAMPLE_TYPE & !((1 << 4) | (1 << 12) | (1 << 13));
+    sample_type & !PROBE_MASK == 0
 }
