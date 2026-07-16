@@ -656,11 +656,34 @@ pub fn perf_event_open(
         // in the `repr(C)` POD.
         let sample_period = unsafe { attr.__bindgen_anon_1.sample_period };
         let sample_type = attr.sample_type;
+        // A kprobe is armed at open unless it is opened `disabled` and does not
+        // ask to `enable_on_exec`. `perf record -- cmd` opens the probe
+        // `disabled` + `enable_on_exec` and never issues `ioctl(ENABLE)`; since a
+        // kprobe is a global probe, arming it at open captures the recorded
+        // command's syscalls. The hand-rolled / group-member paths (disabled,
+        // no enable_on_exec) stay off until `ioctl(ENABLE)`.
+        let enable_at_open = attr.disabled() == 0 || attr.enable_on_exec() != 0;
+        // Per-task filter for a probe sample ring: `pid > 0` scopes samples to
+        // that process, `pid == 0` to the opener, `pid < 0` (`-1`) is system-wide.
+        // Scoping to the target is what keeps an armed hot global probe from
+        // storming on perf's own ring-drain syscalls (see `perf_event_open_kprobe`).
+        let target_pid: Option<u32> = match pid {
+            p if p < 0 => None,
+            0 => {
+                use crate::task::AsThread;
+                ax_task::current()
+                    .try_as_thread()
+                    .map(|thr| thr.proc_data.proc.pid())
+            }
+            p => Some(p as u32),
+        };
         match args.type_ {
             PerfTypeId::PERF_TYPE_KPROBE => Box::new(kprobe::perf_event_open_kprobe(
                 args,
                 sample_period,
                 sample_type,
+                enable_at_open,
+                target_pid,
             )?),
             // The five counting software events (`perf stat`'s default rows) become
             // real per-task counters; every other software config (e.g.
@@ -700,6 +723,8 @@ pub fn perf_event_open(
                         kp_args,
                         sample_period,
                         sample_type,
+                        enable_at_open,
+                        target_pid,
                     )?)
                 } else {
                     Box::new(tracepoint::perf_event_open_tracepoint(

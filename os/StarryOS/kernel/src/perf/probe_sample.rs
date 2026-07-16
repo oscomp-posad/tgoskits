@@ -77,6 +77,13 @@ pub struct ProbeSampling {
     probe_addr: u64,
     /// Event id for `PERF_SAMPLE_ID` / `IDENTIFIER` (set via `set_id`).
     id: AtomicU64,
+    /// Per-task filter (`perf_event_open` `pid`): the target process pid, or
+    /// [`NO_TARGET`] for a system-wide probe (`pid == -1`). A kprobe fires for
+    /// every task; when a target is set, [`emit`](Self::emit) drops hits from
+    /// other processes so `perf record -- cmd` samples only `cmd` — and, crucially,
+    /// not perf's own ring-drain syscalls, which would otherwise storm a hot
+    /// global probe (e.g. the syscall dispatcher).
+    target_pid: AtomicU64,
     /// Hit counter, for the `period` divisor.
     hits: AtomicU64,
     /// The ring `(Weak<GlobalPage>, ring_vaddr, ring_len)`, set at `device_mmap`.
@@ -92,6 +99,10 @@ pub struct ProbeSampling {
     worker_started: AtomicBool,
 }
 
+/// [`ProbeSampling::target_pid`] sentinel for a system-wide probe (no per-task
+/// filter). No real process uses this pid, so it can never alias a target.
+pub const NO_TARGET: u64 = u64::MAX;
+
 impl ProbeSampling {
     /// Build sampling state for a probe opened with `sample_period > 0`.
     pub fn new(sample_type: u64, sample_period: u64, is_user: bool, probe_addr: u64) -> Arc<Self> {
@@ -101,6 +112,7 @@ impl ProbeSampling {
             is_user,
             probe_addr,
             id: AtomicU64::new(0),
+            target_pid: AtomicU64::new(NO_TARGET),
             hits: AtomicU64::new(0),
             ring: SpinNoIrq::new(None),
             notify: Arc::new(IrqNotify::new()),
@@ -113,6 +125,14 @@ impl ProbeSampling {
     /// Record the event id (`set_sample_id`).
     pub fn set_id(&self, id: u64) {
         self.id.store(id, Ordering::Relaxed);
+    }
+
+    /// Set the per-task filter from the open `pid`: `Some(p)` samples only
+    /// process `p`; `None` (system-wide) samples every hit. Called once at open
+    /// before the probe is armed, so a plain `store` needs no ordering dance.
+    pub fn set_target_pid(&self, target: Option<u32>) {
+        self.target_pid
+            .store(target.map_or(NO_TARGET, u64::from), Ordering::Relaxed);
     }
 
     /// `mmap(perf_fd)`: allocate the ring, store the `Weak`, spawn the deferred
@@ -173,6 +193,25 @@ impl ProbeSampling {
     /// context: the ring write is a bounded copy under masked local IRQs, and the
     /// ring pages are pinned via `Weak::upgrade` for the whole write (UAF-safe).
     pub fn emit(&self, callchain: &[u64]) {
+        // Attribute to the task that hit the probe. `try_as_thread` is a lock-free
+        // downcast; a kernel task with no `Thread` falls back to the scheduler id.
+        let curr = ax_task::current();
+        let (pid, tid) = match curr.try_as_thread() {
+            Some(thr) => (thr.proc_data.proc.pid() as u32, thr.tid()),
+            None => {
+                let id = curr.id().as_u64() as u32;
+                (id, id)
+            }
+        };
+        // Per-task filter: a probe opened for a specific process (`perf record`'s
+        // target `cmd`) drops every other process's hits — including perf's own
+        // ring-drain/`perf.data`-write syscalls, which would otherwise feed a hot
+        // global probe (the syscall dispatcher) back into itself and storm. Done
+        // before the period divisor so the period counts only in-target hits.
+        let target = self.target_pid.load(Ordering::Relaxed);
+        if target != NO_TARGET && u64::from(pid) != target {
+            return;
+        }
         // Emit one sample per `period` hits.
         let n = self.hits.fetch_add(1, Ordering::Relaxed) + 1;
         if self.period > 1 && !n.is_multiple_of(self.period) {
@@ -193,16 +232,6 @@ impl ProbeSampling {
             return;
         }
 
-        // Attribute to the task that hit the probe. `try_as_thread` is a lock-free
-        // downcast; a kernel task with no `Thread` falls back to the scheduler id.
-        let curr = ax_task::current();
-        let (pid, tid) = match curr.try_as_thread() {
-            Some(thr) => (thr.proc_data.proc.pid() as u32, thr.tid()),
-            None => {
-                let id = curr.id().as_u64() as u32;
-                (id, id)
-            }
-        };
         let misc = if self.is_user {
             PERF_RECORD_MISC_USER
         } else {

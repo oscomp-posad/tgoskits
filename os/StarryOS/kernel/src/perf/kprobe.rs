@@ -302,10 +302,26 @@ fn perf_probe_arg_to_kretprobe_builder(
 /// When `sample_period > 0` (`perf record -e kprobe:`), a sample-emitting callback
 /// is attached so each hit writes a `PERF_RECORD_SAMPLE` into the event's ring
 /// (aarch64 only); otherwise the probe stays BPF-attach-only.
+///
+/// `target_pid` is the per-task filter (`Some(p)` samples only process `p`;
+/// `None` is system-wide) — see [`probe_sample::ProbeSampling::set_target_pid`].
+/// It is what lets `enable_at_open` be safe on a hot global probe: the kprobe
+/// still fires for every task, but only in-target hits emit, so perf's own
+/// ring-drain syscalls do not feed the probe back into itself.
+///
+/// `enable_at_open` arms the probe before returning. `perf record` opens the
+/// event `disabled` with `enable_on_exec` set and never issues `ioctl(ENABLE)`
+/// for a recorded command — it relies on the exec to start counting. Because the
+/// per-task filter already scopes samples to the target, arming at open (rather
+/// than via a per-task exec hook) only adds the target's brief pre-exec window. A
+/// `disabled` event with no `enable_on_exec` (the group-member or explicit
+/// ioctl-driven path) is left armed-but-off until `ioctl(ENABLE)`.
 pub fn perf_event_open_kprobe(
     args: PerfProbeArgs,
     sample_period: u64,
     sample_type: u64,
+    enable_at_open: bool,
+    target_pid: Option<u32>,
 ) -> AxResult<ProbePerfEvent> {
     let probe = match args.config {
         PerfProbeConfig::Raw(PROBE_CONFIG_ENTRY) => {
@@ -324,11 +340,23 @@ pub fn perf_event_open_kprobe(
         .map(|a| a as u64 + args.offset)
         .unwrap_or(0);
     // Kprobe/kretprobe hits are kernel context (`is_user = false`).
-    finish_probe_open(
+    let mut ev = finish_probe_open(
         ProbePerfEvent::new(args, probe),
         sample_period,
         sample_type,
         false,
         probe_addr,
-    )
+    )?;
+    // Apply the per-task filter before arming, so no unfiltered hit can slip
+    // through between enable and the store.
+    #[cfg(target_arch = "aarch64")]
+    if let Some(s) = &ev.sampling {
+        s.set_target_pid(target_pid);
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    let _ = target_pid;
+    if enable_at_open {
+        ev.enable()?;
+    }
+    Ok(ev)
 }
