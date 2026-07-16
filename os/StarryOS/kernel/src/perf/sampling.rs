@@ -140,6 +140,10 @@ pub(crate) const SAMPLE_RECORD_MAX_LEN: usize = 8
     + 9 * 8
     + MAX_GROUP_READ_WORDS * 8
     + (1 + 2 + 2 * MAX_STACK_DEPTH) * 8
+    // PERF_SAMPLE_RAW: `u32 size` + the (u64-padded) raw record; the probe path
+    // emits the fixed PROBE_RAW_LEN-byte kprobe record.
+    + 8
+    + PROBE_RAW_LEN
     // PERF_SAMPLE_REGS_USER: `u64 abi` + up to REGS_USER_MAX selected registers.
     + (1 + REGS_USER_MAX) * 8
     // PERF_SAMPLE_STACK_USER: `u64 size` + the bounded dump + `u64 dyn_size`.
@@ -180,6 +184,12 @@ const PERF_SAMPLE_CALLCHAIN: u64 = 1 << 5;
 /// the `TOTAL_TIME_*` fields need per-event/per-group accounting reachable from
 /// the IRQ handler and are rejected at open (see `perf_event_open_hw`).
 pub const PERF_SAMPLE_READ: u64 = 1 << 10;
+/// `PERF_SAMPLE_RAW`: the raw tracepoint event record — a `u32 size` (padded to a
+/// `u64` boundary) then `size` bytes matching the event's `format` file. `perf
+/// record` sets this by default for a tracepoint event (`-e <tp>` /
+/// `-e probe:<kprobe>`); a probe hit emits the minimal kprobe record (the four
+/// `common_*` header fields + `__probe_ip`).
+pub const PERF_SAMPLE_RAW: u64 = 1 << 11;
 /// `PERF_SAMPLE_REGS_USER`: the interrupted user register file — a `u64 abi`
 /// followed by the registers selected by `attr.sample_regs_user` (aarch64
 /// `PERF_REG_ARM64` order) — so a host `perf report --call-graph dwarf` can seed
@@ -226,6 +236,13 @@ const MAX_STACK_USER_DUMP: usize = 8192;
 const REGS_USER_MAX: usize = 33;
 const _: () = assert!(REGS_USER_MAX == ax_cpu::pmu::INTERRUPTED_REGS_COUNT);
 
+/// Bytes in the `PERF_SAMPLE_RAW` payload a probe hit emits: the four `common_*`
+/// header fields (`u16 type`, `u8 flags`, `u8 preempt_count`, `i32 pid` = 8 bytes)
+/// followed by `unsigned long __probe_ip` (8 bytes), matching the `format` file
+/// the dynamic kprobe event exposes. Kept in lock-step with
+/// [`super::probe_sample`]'s raw-record builder and the `kprobe_events` format.
+pub(crate) const PROBE_RAW_LEN: usize = 16;
+
 /// `PERF_SAMPLE_REGS_ABI_64`: the `PERF_SAMPLE_REGS_USER` block that follows holds
 /// 64-bit registers. Emitted for a user (EL0) sample; a kernel sample uses the
 /// implicit `PERF_SAMPLE_REGS_ABI_NONE` (`0`) with no register words.
@@ -247,6 +264,7 @@ pub const SUPPORTED_SAMPLE_TYPE: u64 = PERF_SAMPLE_IP
     | PERF_SAMPLE_IDENTIFIER
     | PERF_SAMPLE_CALLCHAIN
     | PERF_SAMPLE_READ
+    | PERF_SAMPLE_RAW
     | PERF_SAMPLE_REGS_USER
     | PERF_SAMPLE_STACK_USER;
 
@@ -786,6 +804,8 @@ pub fn pmu_overflow_handler(_ctx: IrqContext) -> IrqReturn {
             period: cur_period as u64,
             callchain: &chain[..nchain],
             read: &read_blk[..nread],
+            // A hardware-PMU sample never carries a raw tracepoint payload.
+            raw: &[],
             regs_abi,
             regs_user: &regs_buf[..n_regs],
             stack_user: &stack_scratch[..stack_size],
@@ -1025,6 +1045,10 @@ struct SampleData<'a> {
     /// The `PERF_SAMPLE_READ` block (`value`, optionally `id`), or an empty slice
     /// when the event did not request `PERF_SAMPLE_READ`. Emitted verbatim.
     read: &'a [u64],
+    /// The `PERF_SAMPLE_RAW` payload (the tracepoint event record matching the
+    /// `format` file), or empty when not requested. Emitted as a `u32 size` (the
+    /// payload rounded up to a `u64` boundary) followed by the payload + zero pad.
+    raw: &'a [u8],
     /// `PERF_SAMPLE_REGS_USER` abi word: [`PERF_SAMPLE_REGS_ABI_64`] for a user
     /// sample, `0` (`PERF_SAMPLE_REGS_ABI_NONE`) for a kernel sample — in which case
     /// [`regs_user`](Self::regs_user) is empty and no register words follow.
@@ -1177,6 +1201,21 @@ fn build_sample(buf: &mut [u8], sample_type: u64, misc: u16, d: &SampleData<'_>)
             put!(entry);
         }
     }
+    if sample_type & PERF_SAMPLE_RAW != 0 {
+        // `{ u32 size; char data[size]; }`. Linux pads the raw payload so the
+        // whole block (the `u32 size` word + `size` bytes) ends on a `u64`
+        // boundary: `size = round_up(raw_len + 4, 8) - 4`, and the `size - raw_len`
+        // trailing bytes are zero. `perf` parses `data` via the event's `format`.
+        let raw_len = d.raw.len();
+        let size = (raw_len + 4).next_multiple_of(8) - 4;
+        put!(size as u32);
+        buf[off..off + raw_len].copy_from_slice(d.raw);
+        off += raw_len;
+        for _ in raw_len..size {
+            buf[off] = 0;
+            off += 1;
+        }
+    }
     if sample_type & PERF_SAMPLE_REGS_USER != 0 {
         // `{ u64 abi; u64 regs[weight(mask)]; }` — the register words are present
         // only when `abi != 0` (a user sample); `regs_user` is empty otherwise.
@@ -1223,6 +1262,9 @@ pub(crate) struct ProbeSampleData<'a> {
     pub period: u64,
     /// `PERF_SAMPLE_CALLCHAIN` entries (`PERF_CONTEXT_*` markers + IPs), or empty.
     pub callchain: &'a [u64],
+    /// `PERF_SAMPLE_RAW` payload (the tracepoint record matching the event's
+    /// `format`), or empty when the event did not request `PERF_SAMPLE_RAW`.
+    pub raw: &'a [u8],
 }
 
 /// Assemble one `PERF_RECORD_SAMPLE` for a probe hit into `buf`, returning its
@@ -1249,6 +1291,7 @@ pub(crate) fn build_probe_sample(
         period: d.period,
         callchain: d.callchain,
         read: &[],
+        raw: d.raw,
         regs_abi: 0,
         regs_user: &[],
         stack_user: &[],

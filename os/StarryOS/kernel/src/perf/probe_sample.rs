@@ -209,6 +209,22 @@ impl ProbeSampling {
             PERF_RECORD_MISC_KERNEL
         };
 
+        // `PERF_SAMPLE_RAW` payload — `perf record` sets it by default for a
+        // tracepoint event (`-e probe:<kprobe>`). Emit the minimal kprobe record
+        // matching the `kprobe_events` `format` file: the four `common_*` header
+        // fields then `__probe_ip`. `perf` parses this via the event's own format
+        // (loaded from `events/.../format` at open), so `common_type` need not
+        // carry the tracepoint id — only `__probe_ip` is referenced by the print
+        // fmt. See `sampling::PROBE_RAW_LEN` for the byte layout.
+        let mut raw = [0u8; sampling::PROBE_RAW_LEN];
+        let raw = if self.sample_type & sampling::PERF_SAMPLE_RAW != 0 {
+            raw[4..8].copy_from_slice(&tid.to_ne_bytes()); // common_pid (i32)
+            raw[8..16].copy_from_slice(&self.probe_addr.to_ne_bytes()); // __probe_ip
+            &raw[..]
+        } else {
+            &raw[..0]
+        };
+
         let data = ProbeSampleData {
             // The stable probe location (kallsyms-symbolizable), not the single-step
             // trampoline pc; `0` for a tracepoint (a hit has no code-address IP).
@@ -220,6 +236,7 @@ impl ProbeSampling {
             id: self.id.load(Ordering::Relaxed),
             period: self.period,
             callchain,
+            raw,
         };
 
         // Assemble in this CPU's scratch (not the exception stack) and publish.

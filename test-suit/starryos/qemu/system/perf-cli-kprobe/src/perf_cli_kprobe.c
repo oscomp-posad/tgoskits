@@ -48,6 +48,7 @@
 #define PERF_SAMPLE_IP (1ull << 0)
 #define PERF_SAMPLE_TID (1ull << 1)
 #define PERF_SAMPLE_TIME (1ull << 2)
+#define PERF_SAMPLE_RAW (1ull << 11)
 
 #define PERF_ATTR_FLAG_DISABLED (1ull << 0)
 
@@ -265,7 +266,11 @@ int main(void) {
     attr.size = (uint32_t)sizeof(attr);
     attr.config = (uint64_t)id;
     attr.sample_period = 1;
-    attr.sample_type = PERF_SAMPLE_IP | PERF_SAMPLE_TID | PERF_SAMPLE_TIME;
+    /* PERF_SAMPLE_RAW is what `perf record -e probe:` sets by default for a
+     * tracepoint; each sample then carries the raw kprobe record (common fields +
+     * __probe_ip). Requesting it here also proves the open no longer ENOSYSes. */
+    attr.sample_type =
+        PERF_SAMPLE_IP | PERF_SAMPLE_TID | PERF_SAMPLE_TIME | PERF_SAMPLE_RAW;
     attr.flags = PERF_ATTR_FLAG_DISABLED;
 
     long fd = perf_event_open(&attr, 0, -1, -1, 0ul);
@@ -301,7 +306,7 @@ int main(void) {
     uint64_t data_size = meta->data_size;
     const uint8_t *data_base = (const uint8_t *)base + data_offset;
 
-    uint64_t samples = 0;
+    uint64_t samples = 0, raw_ok = 0;
     uint64_t off = data_tail;
     while (off < data_head && data_size != 0) {
         uint64_t rel = off % data_size;
@@ -312,6 +317,18 @@ int main(void) {
         }
         if (hdr.type == PERF_RECORD_SAMPLE) {
             samples++;
+            /* body (IP|TID|TIME|RAW): u64 ip; u32 pid; u32 tid; u64 time;
+             * u32 raw_size; then the raw record (common fields + __probe_ip at
+             * raw offset 8). Validate the RAW block is present + well-formed. */
+            uint64_t body = (rel + sizeof(hdr)) % data_size;
+            uint32_t raw_size = 0;
+            uint64_t probe_ip = 0;
+            ring_copy(data_base, data_size, (body + 24) % data_size, &raw_size, 4);
+            ring_copy(data_base, data_size, (body + 28 + 8) % data_size, &probe_ip,
+                      8);
+            if (raw_size >= 16 && probe_ip != 0) {
+                raw_ok++;
+            }
         }
         off += hdr.size;
     }
@@ -319,7 +336,8 @@ int main(void) {
     (void)munmap(base, PERF_MMAP_TOTAL_BYTES);
     close(efd);
 
-    printf("STARRY_PERF_CLI_KPROBE samples=%llu\n", (unsigned long long)samples);
+    printf("STARRY_PERF_CLI_KPROBE samples=%llu raw_ok=%llu\n",
+           (unsigned long long)samples, (unsigned long long)raw_ok);
 
     /* 4. remove the event; assert it is gone. */
     if (write_file(KPROBE_EVENTS, "-:probe/hsc\n") != 0) {
@@ -332,6 +350,9 @@ int main(void) {
 
     if (samples == 0) {
         return fail("no PERF_RECORD_SAMPLE from the dynamic kprobe tracepoint");
+    }
+    if (raw_ok == 0) {
+        return fail("no sample carried a well-formed PERF_SAMPLE_RAW block");
     }
 
     printf("STARRY_PERF_CLI_KPROBE_OK\n");
