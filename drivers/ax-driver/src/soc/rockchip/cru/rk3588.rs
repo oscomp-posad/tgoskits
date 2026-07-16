@@ -71,6 +71,8 @@ fn probe(probe: ProbeFdt<'_>) -> Result<(), OnProbeError> {
     let grf_base = iomap(RK3588_CRU_GRF_BASE, RK3588_CRU_GRF_SIZE)?;
 
     let cru = alloc::sync::Arc::new(Mutex::new(Cru::new(SocType::Rk3588, mmio_base, grf_base)));
+    // Stash a handle for non-rdif callers (display cold-init).
+    super::set_shared_cru(cru.clone());
     plat_dev.register(rdif_reset::Reset::new(ResetDrv::new(
         "rk3588-cru-reset",
         cru.clone(),

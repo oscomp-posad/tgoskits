@@ -107,6 +107,15 @@ impl Cru {
             SocType::Rk3588 => Cru::Rk3588(crate::variants::rk3588::cru::Cru::new(base, sys_grf)),
         }
     }
+
+    /// RK3588 VOP2→HDMI0 display-clock cold-init: mux DCLK_VOP0 to the HDPTX PHY
+    /// pixel clock + ungate the VOP gates. No-op on other SoCs.
+    pub fn vop_hdmi0_clocks_setup(&mut self) {
+        match self {
+            Self::Rk3588(cru) => cru.vop_hdmi0_clocks_setup(),
+            Self::Rk3568(_) => {}
+        }
+    }
 }
 
 impl ResetOp for Cru {

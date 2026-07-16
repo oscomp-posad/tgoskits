@@ -9,6 +9,32 @@ mod rk3588;
 
 type SharedCru = Arc<Mutex<Cru>>;
 
+/// A process-wide handle to the registered CRU, stashed at probe time so
+/// non-rdif callers (e.g. the display cold-init) can reach CRU operations that
+/// aren't exposed through the `rdif_clk`/`rdif_reset` wrappers (like the VOP
+/// display-clock setup and the HDPTX PHY resets).
+static SHARED_CRU: Mutex<Option<SharedCru>> = Mutex::new(None);
+
+pub(crate) fn set_shared_cru(cru: SharedCru) {
+    *SHARED_CRU.lock() = Some(cru);
+}
+
+/// Run `f` with the registered CRU, if one has been probed.
+pub fn with_cru<R>(f: impl FnOnce(&mut Cru) -> R) -> Option<R> {
+    let guard = SHARED_CRU.lock();
+    let cru = guard.as_ref()?;
+    Some(f(&mut cru.lock()))
+}
+
+/// Assert a CRU reset line by its DT reset id. Returns `false` if no CRU exists.
+pub fn reset_assert(id: usize) -> bool {
+    with_cru(|c| c.reset_assert(RstId::from(id))).is_some()
+}
+/// Deassert a CRU reset line by its DT reset id.
+pub fn reset_deassert(id: usize) -> bool {
+    with_cru(|c| c.reset_deassert(RstId::from(id))).is_some()
+}
+
 pub struct ClkDrv {
     name: &'static str,
     inner: SharedCru,
