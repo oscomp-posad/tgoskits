@@ -56,12 +56,21 @@ pub fn setup_esmart0<R: Regs>(regs: &mut R, fb_phys: u32, mode: &DisplayMode) {
 /// output. Read-modify-write throughout, to preserve U-Boot's routing of any
 /// other windows/ports.
 pub fn route_esmart0_to_vp<R: Regs>(regs: &mut R, vp_id: u8) {
-    // LAYER_SEL: place Esmart0's layer_sel_id (2) into mixer layer 0.
+    // LAYER_SEL: place Esmart0's layer_sel_id (2) into mixer layer 0. Clear only
+    // the low 3 bits of the nibble (mainline `LAYER(id, 0x7)`) — layer_sel_ids
+    // are 0..=7, so the 4th bit is reserved and preserved.
     let mut layer_sel = regs.read32(ovl::LAYER_SEL);
     let shift = ovl::layer_sel_shift(0);
-    layer_sel &= !(0xF << shift);
+    layer_sel &= !(0x7 << shift);
     layer_sel |= ovl::ESMART0_LAYER_SEL_ID << shift;
     regs.write32(ovl::LAYER_SEL, layer_sel);
+
+    // NOTE: PORT_SEL's PORT0_MUX field (bits[3:0] = VP0's mixer layer count - 1)
+    // is intentionally left as U-Boot programmed it. The adopt strategy assumes
+    // U-Boot lit VP0->HDMI0 (so PORT0_MUX, dclk, TX and PHY are all up); if the
+    // board shows no output despite a correct-looking modeset, an unset
+    // PORT0_MUX is the first thing to program (value is DT/VP-count dependent:
+    // win_size(8)/nvps - 1).
 
     // PORT_SEL: window→VP field for Esmart0 = vp_id.
     let mut port_sel = regs.read32(ovl::PORT_SEL);
