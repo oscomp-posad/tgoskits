@@ -1,5 +1,6 @@
 //! See Linux Documentation for details: <https://docs.kernel.org/trace/ftrace.html>
 mod control;
+pub mod kprobe_events;
 mod sched;
 mod trace;
 mod trace_pipe;
@@ -22,7 +23,7 @@ use axpoll::{IoEvents, PollSet};
 use ktracepoint::*;
 
 use crate::{
-    pseudofs::{DirMaker, DirMapping, SeqObject, SimpleDir, SimpleFs, SpecialFsFile},
+    pseudofs::{DirMaker, DirMapping, SeqObject, SimpleDir, SimpleDirOps, SimpleFs, SpecialFsFile},
     task::AsThread,
 };
 
@@ -371,13 +372,30 @@ fn init_events(fs: Arc<SimpleFs>) -> DirMaker {
             SimpleDir::new_maker(fs.clone(), Arc::new(subsystem_root)),
         );
     }
-    SimpleDir::new_maker(fs, Arc::new(events_root))
+    // Chain a live, runtime-mutable slice after the static subsystems so
+    // `perf probe`'s dynamic `events/<group>/` groups appear alongside the
+    // compile-time tracepoints (the chained ops report non-cacheable, so the VFS
+    // re-queries and picks up events added after boot).
+    let dynamic = kprobe_events::DynamicEventsDir::new(fs.clone());
+    SimpleDir::new_maker(fs, Arc::new(events_root.chain(dynamic)))
 }
 
 /// Initialize tracing directory in debugfs
 pub fn init_tracing_dir(fs: Arc<SimpleFs>) -> DirMaker {
     let mut tracing_root = DirMapping::new();
     tracing_root.set_cacheable(false);
+
+    // `perf probe -a func` writes `p:GROUP/EVENT SYMBOL` here to create a dynamic
+    // kprobe event; the resulting `events/GROUP/EVENT/` is served by the chained
+    // dynamic dir in `init_events`.
+    tracing_root.add(
+        "kprobe_events",
+        SpecialFsFile::new_regular_with_perm(
+            fs.clone(),
+            kprobe_events::KprobeEventsFile,
+            NodePermission::from_bits_truncate(0o644),
+        ),
+    );
 
     tracing_root.add(
         "saved_cmdlines_size",
