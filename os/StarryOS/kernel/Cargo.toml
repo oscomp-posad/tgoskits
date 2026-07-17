@@ -182,3 +182,8 @@ riscv.workspace = true
 
 [target.'cfg(not(any(target_arch = "aarch64", target_arch = "loongarch64")))'.dependencies]
 ax-page-table-multiarch = { workspace = true, features = ["copy-from"] }
+
+[lints.rust]
+# `function_tracer` is set only in the opt-in STARRY_FUNCTION_TRACER build
+# (see scripts/axbuild/.../qemu_run.rs); declare it so normal builds don't warn.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(function_tracer)'] }

@@ -169,6 +169,11 @@ impl KernelTraceOps for KernelTraceAux {
     }
 
     fn dynamic_event(id: u32, payload: &[u8]) -> Option<(String, String)> {
+        // Function-tracer records render `funcname(<-parent)`.
+        #[cfg(function_tracer)]
+        if id == crate::ftrace::FUNCTION_EVENT_ID {
+            return crate::ftrace::render_record(payload);
+        }
         // A dynamic-kprobe-events record: resolve the event name from the runtime
         // registry and render the `__probe_ip` (the payload u64) as the body. The
         // parser wraps the body in `()`, so the trace line reads `hsc(0x<ip>)`.
@@ -344,14 +349,14 @@ const TRACE_HEADER_EVENT: &str = "# compressed entry header\n\ttype_len    :    
 /// (`copy_event_system("events/ftrace")`); a missing directory makes perf drop
 /// the whole `TRACING_DATA` feature, so `perf report` then fails with "broken or
 /// missing trace data". Providing this one standard event satisfies the packer.
-const FTRACE_PRINT_FORMAT: &str = "name: print\nID: 5\nformat:\n\tfield:unsigned short \
-                                   common_type;\toffset:0;\tsize:2;\tsigned:0;\n\tfield:unsigned \
-                                   char common_flags;\toffset:2;\tsize:1;\tsigned:0;\n\tfield:\
-                                   unsigned char common_preempt_count;\toffset:3;\tsize:1;\t\
-                                   signed:0;\n\tfield:int common_pid;\toffset:4;\tsize:4;\t\
-                                   signed:1;\n\n\tfield:unsigned long ip;\toffset:8;\tsize:8;\t\
-                                   signed:0;\n\tfield:char buf[];\toffset:16;\tsize:0;\tsigned:0;\
-                                   \n\nprint fmt: \"%ps: %s\", (void *)REC->ip, REC->buf\n";
+const FTRACE_PRINT_FORMAT: &str =
+    "name: print\nID: 5\nformat:\n\tfield:unsigned short \
+     common_type;\toffset:0;\tsize:2;\tsigned:0;\n\tfield:unsigned char \
+     common_flags;\toffset:2;\tsize:1;\tsigned:0;\n\tfield:unsigned char \
+     common_preempt_count;\toffset:3;\tsize:1;\tsigned:0;\n\tfield:int \
+     common_pid;\toffset:4;\tsize:4;\tsigned:1;\n\n\tfield:unsigned long \
+     ip;\toffset:8;\tsize:8;\tsigned:0;\n\tfield:char \
+     buf[];\toffset:16;\tsize:0;\tsigned:0;\n\nprint fmt: \"%ps: %s\", (void *)REC->ip, REC->buf\n";
 
 /// Build a read-only tracefs file serving fixed `content` (for `DirMapping::add`).
 fn static_text_file(fs: &Arc<SimpleFs>, content: &'static str) -> NodeOpsMux {
@@ -516,6 +521,35 @@ pub fn init_tracing_dir(fs: Arc<SimpleFs>) -> DirMaker {
             .into()
         }
     });
+    // ftrace function tracer (opt-in `function_tracer` build): available_tracers /
+    // current_tracer / set_ftrace_filter drive the patchable-entry self-patching.
+    #[cfg(function_tracer)]
+    {
+        tracing_root.add(
+            "available_tracers",
+            SpecialFsFile::new_regular_with_perm(
+                fs.clone(),
+                crate::ftrace::AvailableTracersFile,
+                NodePermission::from_bits_truncate(0o440),
+            ),
+        );
+        tracing_root.add(
+            "current_tracer",
+            SpecialFsFile::new_regular_with_perm(
+                fs.clone(),
+                crate::ftrace::CurrentTracerFile,
+                NodePermission::from_bits_truncate(0o644),
+            ),
+        );
+        tracing_root.add(
+            "set_ftrace_filter",
+            SpecialFsFile::new_regular_with_perm(
+                fs.clone(),
+                crate::ftrace::SetFtraceFilterFile,
+                NodePermission::from_bits_truncate(0o644),
+            ),
+        );
+    }
     tracing_root.add("events", init_events(fs.clone()));
     SimpleDir::new_maker(fs, Arc::new(tracing_root))
 }

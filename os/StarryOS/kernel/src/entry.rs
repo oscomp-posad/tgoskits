@@ -25,6 +25,8 @@ pub fn init(args: &[String], envs: &[String]) {
 
     crate::ebpf::init_ebpf();
     crate::perf::perf_event_init();
+    #[cfg(function_tracer)]
+    crate::ftrace::init();
     crate::kmod::init_kmod();
 
     pseudofs::mount_all().expect("Failed to mount pseudofs");

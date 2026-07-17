@@ -387,7 +387,6 @@ impl CallBackFunc for ProbeSampleCallback {
 /// not have — are rejected (this also keeps the record within the callback's
 /// buffer). IP is not required: `perf record` on a tracepoint may omit it.
 pub fn probe_sample_type_supported(sample_type: u64) -> bool {
-    const PROBE_MASK: u64 =
-        sampling::SUPPORTED_SAMPLE_TYPE & !((1 << 4) | (1 << 12) | (1 << 13));
+    const PROBE_MASK: u64 = sampling::SUPPORTED_SAMPLE_TYPE & !((1 << 4) | (1 << 12) | (1 << 13));
     sample_type & !PROBE_MASK == 0
 }
