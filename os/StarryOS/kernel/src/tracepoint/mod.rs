@@ -23,7 +23,10 @@ use axpoll::{IoEvents, PollSet};
 use ktracepoint::*;
 
 use crate::{
-    pseudofs::{DirMaker, DirMapping, SeqObject, SimpleDir, SimpleDirOps, SimpleFs, SpecialFsFile},
+    pseudofs::{
+        DirMaker, DirMapping, NodeOpsMux, SeqObject, SimpleDir, SimpleDirOps, SimpleFs,
+        SpecialFsFile,
+    },
     task::AsThread,
 };
 
@@ -304,6 +307,48 @@ pub fn tracepoint_init() -> AxResult<()> {
 }
 
 /// Initialize events directory in debugfs
+/// `events/header_page` — the trace ring-buffer page header layout. `perf record`
+/// on a tracepoint/probe event embeds this (with `header_event` and each event's
+/// `format`) into perf.data's `HEADER_TRACING_DATA`; libtraceevent then uses it to
+/// decode every sample's `PERF_SAMPLE_RAW` payload. Without it `perf report` aborts
+/// with "broken or missing trace data". Standard Linux content; 4 KiB page →
+/// 4096 − 16 = 4080 data bytes.
+const TRACE_HEADER_PAGE: &str = "\tfield: u64 timestamp;\toffset:0;\tsize:8;\tsigned:0;\n\tfield: \
+                                 local_t commit;\toffset:8;\tsize:8;\tsigned:1;\n\tfield: int \
+                                 overwrite;\toffset:8;\tsize:1;\tsigned:1;\n\tfield: char \
+                                 data;\toffset:16;\tsize:4080;\tsigned:1;\n";
+
+/// `events/header_event` — the compressed ring-buffer record header
+/// libtraceevent expects alongside `header_page`. Standard Linux content.
+const TRACE_HEADER_EVENT: &str = "# compressed entry header\n\ttype_len    :    5 \
+                                  bits\n\ttime_delta  :   27 bits\n\tarray       :   32 \
+                                  bits\n\n\tpadding     : type == 29\n\ttime_extend : type == \
+                                  30\n\ttime_stamp  : type == 31\n\tdata max type_len  == 28\n";
+
+/// `events/ftrace/print/format` — the standard `ftrace:print` event. `perf
+/// record`'s tracing-data packer *unconditionally* reads the `ftrace` subsystem
+/// (`copy_event_system("events/ftrace")`); a missing directory makes perf drop
+/// the whole `TRACING_DATA` feature, so `perf report` then fails with "broken or
+/// missing trace data". Providing this one standard event satisfies the packer.
+const FTRACE_PRINT_FORMAT: &str = "name: print\nID: 5\nformat:\n\tfield:unsigned short \
+                                   common_type;\toffset:0;\tsize:2;\tsigned:0;\n\tfield:unsigned \
+                                   char common_flags;\toffset:2;\tsize:1;\tsigned:0;\n\tfield:\
+                                   unsigned char common_preempt_count;\toffset:3;\tsize:1;\t\
+                                   signed:0;\n\tfield:int common_pid;\toffset:4;\tsize:4;\t\
+                                   signed:1;\n\n\tfield:unsigned long ip;\toffset:8;\tsize:8;\t\
+                                   signed:0;\n\tfield:char buf[];\toffset:16;\tsize:0;\tsigned:0;\
+                                   \n\nprint fmt: \"%ps: %s\", (void *)REC->ip, REC->buf\n";
+
+/// Build a read-only tracefs file serving fixed `content` (for `DirMapping::add`).
+fn static_text_file(fs: &Arc<SimpleFs>, content: &'static str) -> NodeOpsMux {
+    SpecialFsFile::new_regular_with_perm(
+        fs.clone(),
+        SeqObject::new(move || Ok(content.to_string())),
+        NodePermission::from_bits_truncate(0o440),
+    )
+    .into()
+}
+
 fn init_events(fs: Arc<SimpleFs>) -> DirMaker {
     let mut events_root = DirMapping::new();
     let mut subsystem = BTreeMap::new();
@@ -370,6 +415,28 @@ fn init_events(fs: Arc<SimpleFs>) -> DirMaker {
         events_root.add(
             &subsystem_name,
             SimpleDir::new_maker(fs.clone(), Arc::new(subsystem_root)),
+        );
+    }
+    // `perf record` reads these two files (plus each event's `format`) to build
+    // perf.data's tracing-data section; without them `perf report` fails with
+    // "broken or missing trace data".
+    events_root.add("header_page", static_text_file(&fs, TRACE_HEADER_PAGE));
+    events_root.add("header_event", static_text_file(&fs, TRACE_HEADER_EVENT));
+    // perf's tracing-data packer always reads the `ftrace` subsystem; a missing
+    // dir drops the whole TRACING_DATA feature. Provide the standard `print` event.
+    {
+        let mut ftrace_sys = DirMapping::new();
+        let mut print_evt = DirMapping::new();
+        print_evt.add("format", static_text_file(&fs, FTRACE_PRINT_FORMAT));
+        print_evt.add("id", static_text_file(&fs, "5\n"));
+        print_evt.add("enable", static_text_file(&fs, "0\n"));
+        ftrace_sys.add(
+            "print",
+            SimpleDir::new_maker(fs.clone(), Arc::new(print_evt)),
+        );
+        events_root.add(
+            "ftrace",
+            SimpleDir::new_maker(fs.clone(), Arc::new(ftrace_sys)),
         );
     }
     // Chain a live, runtime-mutable slice after the static subsystems so
