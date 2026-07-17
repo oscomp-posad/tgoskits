@@ -21,7 +21,7 @@
 use alloc::sync::{Arc, Weak};
 use core::{
     any::Any,
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
 };
 
 use ax_alloc::GlobalPage;
@@ -77,6 +77,13 @@ pub struct ProbeSampling {
     probe_addr: u64,
     /// Event id for `PERF_SAMPLE_ID` / `IDENTIFIER` (set via `set_id`).
     id: AtomicU64,
+    /// The tracepoint `common_type` written into each `PERF_SAMPLE_RAW` record's
+    /// first two bytes. `perf`/libtraceevent resolves a raw record to its event
+    /// format by this field (`tep_find_event_by_record`), so it must equal the
+    /// dynamic event's id; `0` (the default, for a direct `PERF_TYPE_KPROBE` open
+    /// with no tracefs event) leaves the record unresolvable, which is fine for the
+    /// BPF/hand-rolled paths that never run `perf report`.
+    common_type: AtomicU32,
     /// Per-task filter (`perf_event_open` `pid`): the target process pid, or
     /// [`NO_TARGET`] for a system-wide probe (`pid == -1`). A kprobe fires for
     /// every task; when a target is set, [`emit`](Self::emit) drops hits from
@@ -112,6 +119,7 @@ impl ProbeSampling {
             is_user,
             probe_addr,
             id: AtomicU64::new(0),
+            common_type: AtomicU32::new(0),
             target_pid: AtomicU64::new(NO_TARGET),
             hits: AtomicU64::new(0),
             ring: SpinNoIrq::new(None),
@@ -133,6 +141,13 @@ impl ProbeSampling {
     pub fn set_target_pid(&self, target: Option<u32>) {
         self.target_pid
             .store(target.map_or(NO_TARGET, u64::from), Ordering::Relaxed);
+    }
+
+    /// Set the `common_type` id stamped into each raw record so `perf report` can
+    /// resolve the event's format. `id` is the dynamic tracepoint event id
+    /// (`≤ u16::MAX`); the low 16 bits are what fit the on-wire field.
+    pub fn set_common_type(&self, id: u32) {
+        self.common_type.store(id, Ordering::Relaxed);
     }
 
     /// `mmap(perf_fd)`: allocate the ring, store the `Weak`, spawn the deferred
@@ -247,6 +262,10 @@ impl ProbeSampling {
         // fmt. See `sampling::PROBE_RAW_LEN` for the byte layout.
         let mut raw = [0u8; sampling::PROBE_RAW_LEN];
         let raw = if self.sample_type & sampling::PERF_SAMPLE_RAW != 0 {
+            // common_type (offset 0, size 2): the event id perf/libtraceevent
+            // resolves the record's format by. Must match the tracefs event ID.
+            let common_type = self.common_type.load(Ordering::Relaxed) as u16;
+            raw[0..2].copy_from_slice(&common_type.to_ne_bytes());
             raw[4..8].copy_from_slice(&tid.to_ne_bytes()); // common_pid (i32)
             raw[8..16].copy_from_slice(&self.probe_addr.to_ne_bytes()); // __probe_ip
             &raw[..]

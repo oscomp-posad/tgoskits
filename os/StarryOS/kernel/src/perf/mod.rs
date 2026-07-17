@@ -684,6 +684,9 @@ pub fn perf_event_open(
                 sample_type,
                 enable_at_open,
                 target_pid,
+                // A direct PERF_TYPE_KPROBE open has no tracefs event id, so its
+                // raw records carry common_type 0 (BPF/hand-rolled paths only).
+                None,
             )?),
             // The five counting software events (`perf stat`'s default rows) become
             // real per-task counters; every other software config (e.g.
@@ -725,6 +728,9 @@ pub fn perf_event_open(
                         sample_type,
                         enable_at_open,
                         target_pid,
+                        // The dynamic tracepoint event id — stamped into each raw
+                        // record's common_type so `perf report` resolves the format.
+                        Some(raw_id as u32),
                     )?)
                 } else {
                     Box::new(tracepoint::perf_event_open_tracepoint(

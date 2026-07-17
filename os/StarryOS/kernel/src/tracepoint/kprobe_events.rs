@@ -38,10 +38,16 @@ use crate::pseudofs::{
 };
 
 /// Base of the dynamic-kprobe-events id space. Static tracepoints are numbered
-/// `0..N` by `global_init_events`; dynamic ids start well above that so a
-/// `PERF_TYPE_TRACEPOINT` open can tell the two apart by id and route a dynamic
-/// id to the kprobe path.
-pub const KPROBE_EVENT_ID_BASE: u32 = 0x1000_0000;
+/// `0..N` by `global_init_events` (N is the compile-time tracepoint count, at most
+/// a few hundred); dynamic ids start well above that so a `PERF_TYPE_TRACEPOINT`
+/// open can tell the two apart by id and route a dynamic id to the kprobe path.
+///
+/// The base **must fit `u16`**: a tracepoint record's `common_type` field is two
+/// bytes, and `perf`/libtraceevent resolves a `PERF_SAMPLE_RAW` record to its
+/// event by that field (`tep_find_event_by_record`). An id above `0xffff` would
+/// truncate to a `common_type` that resolves to no event → a NULL deref in `perf
+/// report`. `0x8000` clears any real static count while leaving 32 K dynamic ids.
+pub const KPROBE_EVENT_ID_BASE: u32 = 0x8000;
 
 /// Default group when `perf`/userspace omits one in `p:NAME sym` (Linux uses
 /// `kprobes`). `perf probe` supplies its own group (`probe`).

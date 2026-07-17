@@ -303,6 +303,10 @@ fn perf_probe_arg_to_kretprobe_builder(
 /// is attached so each hit writes a `PERF_RECORD_SAMPLE` into the event's ring
 /// (aarch64 only); otherwise the probe stays BPF-attach-only.
 ///
+/// `tp_event_id` is the dynamic tracefs event id stamped into each raw record's
+/// `common_type` so `perf report` can resolve the format (`None` for a direct
+/// `PERF_TYPE_KPROBE` open with no tracefs event).
+///
 /// `target_pid` is the per-task filter (`Some(p)` samples only process `p`;
 /// `None` is system-wide) — see [`probe_sample::ProbeSampling::set_target_pid`].
 /// It is what lets `enable_at_open` be safe on a hot global probe: the kprobe
@@ -322,6 +326,7 @@ pub fn perf_event_open_kprobe(
     sample_type: u64,
     enable_at_open: bool,
     target_pid: Option<u32>,
+    tp_event_id: Option<u32>,
 ) -> AxResult<ProbePerfEvent> {
     let probe = match args.config {
         PerfProbeConfig::Raw(PROBE_CONFIG_ENTRY) => {
@@ -347,14 +352,17 @@ pub fn perf_event_open_kprobe(
         false,
         probe_addr,
     )?;
-    // Apply the per-task filter before arming, so no unfiltered hit can slip
-    // through between enable and the store.
+    // Apply the per-task filter + the raw-record `common_type` before arming, so
+    // no hit can slip through with the wrong metadata between enable and the store.
     #[cfg(target_arch = "aarch64")]
     if let Some(s) = &ev.sampling {
         s.set_target_pid(target_pid);
+        if let Some(id) = tp_event_id {
+            s.set_common_type(id);
+        }
     }
     #[cfg(not(target_arch = "aarch64"))]
-    let _ = target_pid;
+    let _ = (target_pid, tp_event_id);
     if enable_at_open {
         ev.enable()?;
     }
