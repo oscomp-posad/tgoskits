@@ -14,6 +14,10 @@ repository = "https://github.com/Godones/ext_ktrace"
 license-file = "LICENSE"
 keywords = ["tracepoint", "kernel", "tracing", "no-std"]
 
+# Stand apart from the outer workspace: this is a vendored patch dep, built via
+# the root `[patch.crates-io]`, not a workspace member.
+[workspace]
+
 [lib]
 name = "ktracepoint"
 path = "src/lib.rs"

@@ -32,9 +32,15 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use ax_kspin::SpinNoPreempt;
 use axfs_ng_vfs::{NodePermission, VfsError, VfsResult};
+use kprobe::{CallBackFunc, ProbeBuilder, PtRegs};
+use ktracepoint::KernelTraceOps;
 
-use crate::pseudofs::{
-    DirMaker, DirectRwFsFileOps, NodeOpsMux, SimpleDir, SimpleDirOps, SimpleFs, SpecialFsFile,
+use super::KernelTraceAux;
+use crate::{
+    kprobe::{KernelKprobe, KprobeAuxiliary, register_kprobe, unregister_kprobe},
+    pseudofs::{
+        DirMaker, DirectRwFsFileOps, NodeOpsMux, SimpleDir, SimpleDirOps, SimpleFs, SpecialFsFile,
+    },
 };
 
 /// Base of the dynamic-kprobe-events id space. Static tracepoints are numbered
@@ -177,8 +183,12 @@ fn split_group_name(spec: &str) -> (String, String) {
 }
 
 fn add_event(group: String, name: String, symbol: String, offset: u64, is_ret: bool) {
+    // Disarm + drop any existing (group,name) rather than duplicating it (its id
+    // is retired, so an armed ftrace probe under it must be torn down first).
+    for id in ids_for(&group, &name) {
+        disable_event(id);
+    }
     let mut map = KPROBE_EVENTS.lock();
-    // Replace an existing (group,name) rather than duplicating it.
     map.retain(|_, e| !(e.group == group && e.name == name));
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     map.insert(
@@ -194,7 +204,21 @@ fn add_event(group: String, name: String, symbol: String, offset: u64, is_ret: b
     );
 }
 
+/// Ids currently registered for `(group, name)` (usually 0 or 1).
+fn ids_for(group: &str, name: &str) -> Vec<u32> {
+    KPROBE_EVENTS
+        .lock()
+        .values()
+        .filter(|e| e.group == group && e.name == name)
+        .map(|e| e.id)
+        .collect()
+}
+
 fn remove_event(group: &str, name: &str) -> bool {
+    // Disarm any live ftrace probe on this event before dropping its metadata.
+    for id in ids_for(group, name) {
+        disable_event(id);
+    }
     let mut map = KPROBE_EVENTS.lock();
     let before = map.len();
     map.retain(|_, e| !(e.group == group && e.name == name));
@@ -243,6 +267,128 @@ fn find(group: &str, name: &str) -> Option<DynKprobeEvent> {
         .values()
         .find(|e| e.group == group && e.name == name)
         .cloned()
+}
+
+fn event_by_id(id: u32) -> Option<DynKprobeEvent> {
+    KPROBE_EVENTS.lock().get(&id).cloned()
+}
+
+/// Event name for a dynamic id — used by [`super::KernelTraceAux::dynamic_event`]
+/// to render a `trace`/`trace_pipe` line for a kprobe hit.
+pub fn event_name_by_id(id: u32) -> Option<String> {
+    KPROBE_EVENTS.lock().get(&id).map(|e| e.name.clone())
+}
+
+// ---------------------------------------------------------------------------
+// ftrace `enable`-file path: `echo 1 > events/<grp>/<evt>/enable` arms the kprobe
+// so hits land in the trace ring (`cat trace` / `trace_pipe`), independent of
+// `perf_event_open`. Mirrors Linux's classic kprobe-events flow.
+// ---------------------------------------------------------------------------
+
+/// Bytes of one ftrace kprobe record: the 8-byte common header
+/// (`common_type`,`common_flags`,`common_preempt_count`,`common_pid`) + the
+/// 8-byte `__probe_ip`. Matches [`EventFormatFile`] and `ktracepoint`'s
+/// `TraceEntry` layout.
+const TRACE_RECORD_LEN: usize = 16;
+
+/// An armed ftrace kprobe: the registration + the callback id, so `echo 0`
+/// (or a re-add) can detach it.
+struct EnabledProbe {
+    kprobe: alloc::sync::Arc<KernelKprobe>,
+    callback_id: u32,
+}
+
+impl core::fmt::Debug for EnabledProbe {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("EnabledProbe")
+            .field("callback_id", &self.callback_id)
+            .finish()
+    }
+}
+
+/// Event id → its armed ftrace probe. Present iff the event's `enable` is `1`.
+static ENABLED: SpinNoPreempt<BTreeMap<u32, EnabledProbe>> = SpinNoPreempt::new(BTreeMap::new());
+static NEXT_CB_ID: AtomicU32 = AtomicU32::new(1);
+
+/// The per-hit callback: writes one ftrace record (common header + `__probe_ip`)
+/// into the trace ring. Runs in the kprobe's synchronous break-exception context
+/// on the interrupted thread — non-sleeping, like the static tracepoint fire path.
+struct TraceKprobeCallback {
+    common_type: u16,
+    probe_addr: u64,
+}
+
+impl CallBackFunc for TraceKprobeCallback {
+    fn call(&self, _pt_regs: &mut PtRegs) {
+        let pid = KernelTraceAux::current_pid();
+        let mut buf = [0u8; TRACE_RECORD_LEN];
+        buf[0..2].copy_from_slice(&self.common_type.to_ne_bytes()); // common_type
+        // common_flags (2) + common_preempt_count (3) stay 0.
+        buf[4..8].copy_from_slice(&(pid as i32).to_ne_bytes()); // common_pid
+        buf[8..16].copy_from_slice(&self.probe_addr.to_ne_bytes()); // __probe_ip
+        // Cache the process name first so the reader can label the record, then
+        // push (the reader renders the event via `KernelTraceAux::dynamic_event`).
+        KernelTraceAux::trace_cmdline_push(pid);
+        KernelTraceAux::trace_pipe_push_raw_record(&buf);
+    }
+}
+
+/// Resolve `symbol` to its kallsyms address (same table `perf/kprobe.rs` uses).
+fn symbol_addr(symbol: &str) -> Option<usize> {
+    crate::pseudofs::proc::KALLSYMS
+        .get()
+        .and_then(|t| t.lookup_name(symbol))
+        .map(|a| a as usize)
+}
+
+/// Arm the event's kprobe so hits write into the trace ring. Idempotent.
+fn enable_event(id: u32) -> Result<(), &'static str> {
+    if ENABLED.lock().contains_key(&id) {
+        return Ok(());
+    }
+    let ev = event_by_id(id).ok_or("no such event")?;
+    // v1: entry probes only in the ftrace path (return probes still work via
+    // perf_event_open); a return probe's `enable` is a no-op success.
+    if ev.is_ret {
+        return Ok(());
+    }
+    let addr = symbol_addr(&ev.symbol).ok_or("symbol not found")?;
+    let probe_addr = addr as u64 + ev.offset;
+    let builder = ProbeBuilder::<KprobeAuxiliary>::new()
+        .with_symbol(ev.symbol.clone())
+        .with_symbol_addr(addr)
+        .with_offset(ev.offset as usize)
+        .with_enable(true);
+    let kprobe = register_kprobe(builder);
+    let callback_id = NEXT_CB_ID.fetch_add(1, Ordering::Relaxed);
+    kprobe.register_event_callback(
+        callback_id,
+        alloc::sync::Arc::new(TraceKprobeCallback {
+            common_type: id as u16,
+            probe_addr,
+        }),
+    );
+    ENABLED.lock().insert(
+        id,
+        EnabledProbe {
+            kprobe,
+            callback_id,
+        },
+    );
+    Ok(())
+}
+
+/// Disarm the event's ftrace kprobe (detach the callback + unregister). Idempotent.
+fn disable_event(id: u32) {
+    let Some(entry) = ENABLED.lock().remove(&id) else {
+        return;
+    };
+    entry.kprobe.unregister_event_callback(entry.callback_id);
+    unregister_kprobe(entry.kprobe);
+}
+
+fn is_enabled(id: u32) -> bool {
+    ENABLED.lock().contains_key(&id)
 }
 
 // ---------------------------------------------------------------------------
@@ -311,18 +457,29 @@ impl DirectRwFsFileOps for EventFormatFile {
     }
 }
 
-/// `events/<group>/<event>/enable`. For `perf record` this is not the trigger
-/// (perf uses `perf_event_open` + `ioctl(ENABLE)`); it exists so the tracefs
-/// layout is complete and readable. v1 accepts `0`/`1` writes without arming a
-/// standalone trace_pipe kprobe (that ftrace-style path is a later enhancement).
-struct EventEnableFile;
+/// `events/<group>/<event>/enable`. `echo 1` arms the event's kprobe so hits are
+/// written into the trace ring (`cat trace` / `trace_pipe`) — the classic ftrace
+/// kprobe flow, independent of `perf record` (which drives the probe through
+/// `perf_event_open` + `ioctl(ENABLE)` instead). `echo 0` disarms it; the read
+/// reflects the live armed state.
+struct EventEnableFile {
+    id: u32,
+}
 impl DirectRwFsFileOps for EventEnableFile {
     fn read_at(&self, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
-        read_from(b"0\n", buf, offset)
+        let content: &[u8] = if is_enabled(self.id) { b"1\n" } else { b"0\n" };
+        read_from(content, buf, offset)
     }
     fn write_at(&self, buf: &[u8], _offset: u64) -> VfsResult<usize> {
         match core::str::from_utf8(buf).map(str::trim) {
-            Ok("0") | Ok("1") => Ok(buf.len()),
+            Ok("1") => {
+                enable_event(self.id).map_err(|_| VfsError::InvalidInput)?;
+                Ok(buf.len())
+            }
+            Ok("0") => {
+                disable_event(self.id);
+                Ok(buf.len())
+            }
             _ => Err(VfsError::InvalidInput),
         }
     }
@@ -363,10 +520,12 @@ impl SimpleDirOps for EventDir {
                 FILE_PERM,
             )
             .into(),
-            "enable" => {
-                SpecialFsFile::new_regular_with_perm(self.fs.clone(), EventEnableFile, FILE_PERM)
-                    .into()
-            }
+            "enable" => SpecialFsFile::new_regular_with_perm(
+                self.fs.clone(),
+                EventEnableFile { id: ev.id },
+                FILE_PERM,
+            )
+            .into(),
             _ => return Err(VfsError::NotFound),
         };
         Ok(file)

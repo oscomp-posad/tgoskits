@@ -5,7 +5,12 @@ mod sched;
 mod trace;
 mod trace_pipe;
 
-use alloc::{collections::BTreeMap, string::ToString, sync::Arc, vec::Vec};
+use alloc::{
+    collections::BTreeMap,
+    string::{String, ToString},
+    sync::Arc,
+    vec::Vec,
+};
 use core::{
     num::NonZero,
     ops::Deref,
@@ -161,6 +166,15 @@ impl KernelTraceOps for KernelTraceAux {
             .expect("Tracepoint not found");
         let mut ext_tp = ext_tp.lock();
         f(&mut ext_tp)
+    }
+
+    fn dynamic_event(id: u32, payload: &[u8]) -> Option<(String, String)> {
+        // A dynamic-kprobe-events record: resolve the event name from the runtime
+        // registry and render the `__probe_ip` (the payload u64) as the body. The
+        // parser wraps the body in `()`, so the trace line reads `hsc(0x<ip>)`.
+        let name = kprobe_events::event_name_by_id(id)?;
+        let probe_ip = u64::from_ne_bytes(payload.get(0..8)?.try_into().ok()?);
+        Some((name, alloc::format!("0x{probe_ip:x}")))
     }
 }
 
