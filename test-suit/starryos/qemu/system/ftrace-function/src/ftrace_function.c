@@ -194,6 +194,13 @@ int main(void) {
         return fail("no handle_syscall records in tracefs trace");
     }
 
+    /* Trace-all (empty `set_ftrace_filter` + current_tracer=function) is
+     * implemented (batch-patched, alloc-free ring, try_lock push) but is NOT
+     * exercised here: instrumenting every kernel function is a ~100x global
+     * slowdown that, compounded with QEMU-TCG emulation, cannot complete a
+     * workload in the harness timeout. Filtered tracing above is the practical,
+     * validated mode (as it is on Linux). */
+
     printf("STARRY_FTRACE_FUNCTION_OK\n");
     return 0;
 }

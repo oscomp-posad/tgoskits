@@ -117,16 +117,19 @@ impl KernelTraceOps for KernelTraceAux {
     }
 
     fn trace_pipe_push_raw_record(buf: &[u8]) {
-        // Build the owned record BEFORE taking the ring lock so the heap copy is
-        // not done inside the (preempt-disabled) critical section — keep the lock
-        // hold to the bounded ring append. See `TraceState::raw_pipe`.
+        // Allocation-free: copy `buf` straight into the preallocated ring slot.
+        // `try_lock`, not `lock`: under the function tracer this can fire from
+        // inside code that already holds `raw_pipe` on this core — the `trace`
+        // reader snapshots under the lock, and its clone allocates, which is a
+        // traced call. Blocking there would self-deadlock; dropping the record on
+        // contention is the standard ftrace behavior (a lost event).
+        let Some(mut ring) = TRACE_STATE.raw_pipe.try_lock() else {
+            return;
+        };
         let timestamp = monotonic_time_nanos();
         let cpu_id = this_cpu_id() as _;
-        let event = buf.to_vec();
-        TRACE_STATE
-            .raw_pipe
-            .lock()
-            .push_record(timestamp, cpu_id, event);
+        ring.push_record_bytes(timestamp, cpu_id, buf);
+        drop(ring);
         TRACE_STATE.pipe_notify.notify_irq();
     }
 
@@ -321,6 +324,10 @@ pub fn tracepoint_init() -> AxResult<()> {
         .init_once(SpinNoPreempt::new(TraceCmdLineCache::new(
             NonZero::new(TRACE_CMDLINE_CACHE_SIZE).unwrap(),
         )));
+    // Preallocate the trace ring's slots so the push path is allocation-free
+    // (required by the function tracer; benefits every producer). 128-byte slots
+    // cover a function-tracer record (24 B) and typical tracepoint records.
+    TRACE_STATE.raw_pipe.lock().prealloc(128);
     start_trace_pipe_notify_worker();
     Ok(())
 }

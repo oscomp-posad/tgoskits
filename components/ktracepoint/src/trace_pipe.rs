@@ -27,6 +27,15 @@ impl TracePipeRecord {
         }
     }
 
+    /// Overwrite this record in place, reusing the payload buffer's capacity (no
+    /// allocation when `data` fits). Used by the alloc-free circular push.
+    pub fn set(&mut self, timestamp: u64, cpu_id: u32, data: &[u8]) {
+        self.timestamp = timestamp;
+        self.cpu_id = cpu_id;
+        self.event.clear();
+        self.event.extend_from_slice(data);
+    }
+
     /// The event timestamp in nanoseconds.
     pub fn timestamp(&self) -> u64 {
         self.timestamp
@@ -55,10 +64,19 @@ pub trait TracePipeOps {
     fn is_empty(&self) -> bool;
 }
 
-/// A raw trace pipe buffer that stores trace events as byte vectors.
+/// A raw trace pipe buffer: a fixed-capacity **circular buffer** of records.
+///
+/// Once [`Self::prealloc`]'d, [`Self::push_record_bytes`] is **allocation-free**
+/// (it overwrites the oldest slot's payload buffer in place) and O(1) — required
+/// for the function tracer, whose handler runs on every kernel function call and
+/// must not allocate (a traced allocator internal holding the alloc lock would
+/// otherwise deadlock the push). `slots` is the backing store, used circularly
+/// via `head` (oldest live record) and `count` (number of live records).
 pub struct TracePipeRaw {
     max_record: usize,
-    event_buf: Vec<TracePipeRecord>,
+    slots: Vec<TracePipeRecord>,
+    head: usize,
+    count: usize,
 }
 
 impl TracePipeRaw {
@@ -66,53 +84,82 @@ impl TracePipeRaw {
     pub const fn new(max_record: usize) -> Self {
         Self {
             max_record,
-            event_buf: Vec::new(),
+            slots: Vec::new(),
+            head: 0,
+            count: 0,
         }
     }
 
-    /// Set the maximum number of records to keep in the trace pipe buffer.
-    ///
-    /// If the current number of records exceeds this limit, the oldest records will be removed.
+    /// Pre-allocate all `max_record` slots (each with a `slot_capacity`-byte
+    /// payload buffer) so the hot push path never allocates. Call once from a
+    /// process context (e.g. at init) before high-rate tracing. Idempotent.
+    pub fn prealloc(&mut self, slot_capacity: usize) {
+        if self.slots.is_empty() && self.max_record > 0 {
+            self.slots = (0..self.max_record)
+                .map(|_| TracePipeRecord::new(0, 0, Vec::with_capacity(slot_capacity)))
+                .collect();
+            self.head = 0;
+            self.count = 0;
+        }
+    }
+
+    /// Resize the ring, discarding its contents (kept simple — resizing is rare).
     pub fn set_max_record(&mut self, max_record: usize) {
         self.max_record = max_record;
-        if self.event_buf.len() > max_record {
-            let remove_count = self.event_buf.len() - max_record;
-            self.event_buf.drain(0..remove_count);
-        }
+        self.slots = Vec::new();
+        self.head = 0;
+        self.count = 0;
     }
 
     /// Push a new event into the trace pipe buffer without metadata.
-    ///
-    /// Prefer [`Self::push_record`] when the host can provide event-time metadata.
     pub fn push_event(&mut self, event: Vec<u8>) {
-        self.push_record(0, 0, event);
+        self.push_record_bytes(0, 0, &event);
     }
 
-    /// Push a new event record into the trace pipe buffer.
+    /// Push a new event record (owned buffer). Kept for API compatibility; copies
+    /// into the reused slot, so callers with a `&[u8]` should prefer
+    /// [`Self::push_record_bytes`] to avoid the caller-side allocation.
     pub fn push_record(&mut self, timestamp: u64, cpu_id: u32, event: Vec<u8>) {
+        self.push_record_bytes(timestamp, cpu_id, &event);
+    }
+
+    /// Allocation-free push: overwrite the next circular slot in place. If the
+    /// ring was not [`Self::prealloc`]'d, it is grown once here (only safe in a
+    /// context that may allocate — the function tracer preallocs beforehand).
+    pub fn push_record_bytes(&mut self, timestamp: u64, cpu_id: u32, data: &[u8]) {
         if self.max_record == 0 {
             return;
         }
-        if self.event_buf.len() >= self.max_record {
-            self.event_buf.remove(0); // Remove the oldest record
+        if self.slots.is_empty() {
+            self.prealloc(data.len().max(64));
         }
-        self.event_buf
-            .push(TracePipeRecord::new(timestamp, cpu_id, event));
+        let slot = (self.head + self.count) % self.max_record;
+        self.slots[slot].set(timestamp, cpu_id, data);
+        if self.count == self.max_record {
+            self.head = (self.head + 1) % self.max_record; // overwrote the oldest
+        } else {
+            self.count += 1;
+        }
     }
 
-    /// The number of events currently in the trace pipe buffer.
+    /// The number of live records currently in the trace pipe buffer.
     pub fn event_count(&self) -> usize {
-        self.event_buf.len()
+        self.count
     }
 
-    /// Clear the trace pipe buffer.
+    /// Clear the trace pipe buffer (keeps the preallocated slots for reuse).
     pub fn clear(&mut self) {
-        self.event_buf.clear();
+        self.head = 0;
+        self.count = 0;
     }
 
     /// Create a snapshot of the current state of the trace pipe buffer.
     pub fn snapshot(&self) -> TracePipeSnapshot {
-        TracePipeSnapshot::new(self.event_buf.clone())
+        let mut out = Vec::with_capacity(self.count);
+        for i in 0..self.count {
+            out.push(self.slots[(self.head + i) % self.max_record].clone());
+        }
+        TracePipeSnapshot::new(out)
     }
 
     /// Get the maximum number of records allowed in the trace pipe buffer.
@@ -123,19 +170,23 @@ impl TracePipeRaw {
 
 impl TracePipeOps for TracePipeRaw {
     fn peek(&self) -> Option<&TracePipeRecord> {
-        self.event_buf.first()
+        (self.count > 0).then(|| &self.slots[self.head])
     }
 
     fn pop(&mut self) -> Option<TracePipeRecord> {
-        if self.event_buf.is_empty() {
-            None
-        } else {
-            Some(self.event_buf.remove(0))
+        if self.count == 0 {
+            return None;
         }
+        // The reader discards this value; return a clone and keep the slot's
+        // buffer for reuse. Advancing is O(1).
+        let rec = self.slots[self.head].clone();
+        self.head = (self.head + 1) % self.max_record;
+        self.count -= 1;
+        Some(rec)
     }
 
     fn is_empty(&self) -> bool {
-        self.event_buf.is_empty()
+        self.count == 0
     }
 }
 

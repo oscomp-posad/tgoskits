@@ -8,10 +8,12 @@
 //! ftrace_caller`; the trampoline calls [`ftrace_handler`], which writes a record
 //! into the trace ring (`cat trace`).
 //!
-//! v1 scope: **filtered** tracing (`set_ftrace_filter` names the functions to
-//! patch), which keeps the traced set bounded and away from the allocator and the
-//! tracer's own callees. Tracing *every* function (empty filter) would need an
-//! alloc-free ring and broader `notrace` exclusion, left as future work.
+//! An empty `set_ftrace_filter` traces **every** function; a non-empty filter
+//! traces only the named ones. Trace-all batch-patches all sleds in one
+//! `stop_machine` (per-site patching would run one each — unusably slow). The
+//! handler is allocation-free (it copies into the preallocated trace ring) and
+//! holds a per-CPU guard, so every function is safe to trace — only the tracer's
+//! own trampoline/handler are excluded (they would recurse before the guard).
 //!
 //! Reentrancy: the trampoline is deliberately simple (no guard); the Rust
 //! [`ftrace_handler`] holds a global busy flag so a traced callee of the handler
@@ -214,6 +216,48 @@ fn patch_entry(entry: usize, on: bool) {
     }
 }
 
+/// Arm (`on`) or disarm **every** eligible patchable entry in one `stop_machine`
+/// (via [`crate::mm::patch_kernel_text_batch`]) — `current_tracer=function` with
+/// an empty filter. Per-site patching would run one `stop_machine` each (parking
+/// every core), which is unusably slow for the ~11 k entries. Only the tracer's
+/// own trampoline/handler are skipped: the handler is allocation-free and holds a
+/// per-CPU guard, so every other function (allocator included) is safe to trace.
+fn set_all(on: bool) {
+    let mut sleds: Vec<usize> = Vec::new();
+    for &entry in sled_addrs() {
+        if in_ftrace_module(entry) {
+            continue;
+        }
+        // When arming, only touch a genuine, unarmed NOP sled.
+        if on && !is_nop_sled(entry) {
+            continue;
+        }
+        sleds.push(entry);
+    }
+    let (Some(&min), Some(&max)) = (sleds.iter().min(), sleds.iter().max()) else {
+        return;
+    };
+    let range_len = (max - min) + 8;
+    let caller = ftrace_caller as usize;
+    // All cores are parked for the whole closure, so intermediate two-word states
+    // are never executed — no per-site ordering needed.
+    let _ = crate::mm::patch_kernel_text_batch(VirtAddr::from_usize(min), range_len, || {
+        for &e in &sleds {
+            let (i0, i1) = if on {
+                (MOV_X9_X30, bl_insn(e + 4, caller))
+            } else {
+                (NOP, NOP)
+            };
+            // SAFETY: the range [min, max+8) is writable for this closure and each
+            // `e` is a 4-byte-aligned instruction slot within it.
+            unsafe {
+                core::ptr::write(e as *mut u32, i0);
+                core::ptr::write((e + 4) as *mut u32, i1);
+            }
+        }
+    });
+}
+
 /// Guard: the trampoline and handler must never be instrumented targets (they'd
 /// recurse before the Rust guard runs). Compares the containing symbol's start.
 fn in_ftrace_module(entry: usize) -> bool {
@@ -271,18 +315,31 @@ pub fn filter_text() -> String {
     out
 }
 
-/// `current_tracer` state: `true` while `function` is selected.
+/// `current_tracer` state: `true` while `function` is selected. An empty filter
+/// traces **every** function (batch-patched); a non-empty filter traces only the
+/// named functions. The `TRACING_ON` gate is set after arming / cleared before
+/// disarming so the handler is inert while the text is inconsistent.
 fn set_function_tracer(on: bool) {
-    let filter = FILTER.lock();
+    let empty = FILTER.lock().is_empty();
     if on {
-        for &entry in filter.iter() {
-            patch_entry(entry, true);
+        if empty {
+            set_all(true);
+        } else {
+            let filter = FILTER.lock();
+            for &entry in filter.iter() {
+                patch_entry(entry, true);
+            }
         }
         TRACING_ON.store(true, Ordering::Release);
     } else {
         TRACING_ON.store(false, Ordering::Release);
-        for &entry in filter.iter() {
-            patch_entry(entry, false);
+        if empty {
+            set_all(false);
+        } else {
+            let filter = FILTER.lock();
+            for &entry in filter.iter() {
+                patch_entry(entry, false);
+            }
         }
     }
 }
