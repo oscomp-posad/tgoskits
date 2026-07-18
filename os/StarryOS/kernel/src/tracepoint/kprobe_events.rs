@@ -359,7 +359,9 @@ fn enable_event(id: u32) -> Result<(), &'static str> {
         .with_symbol_addr(addr)
         .with_offset(ev.offset as usize)
         .with_enable(true);
-    let kprobe = register_kprobe(builder);
+    // An un-probeable target (e.g. a -Zpatchable-function-entry NOP sled) fails to
+    // install; report it rather than panicking.
+    let kprobe = register_kprobe(builder).map_err(|_| "kprobe install rejected (unsafe target)")?;
     let callback_id = NEXT_CB_ID.fetch_add(1, Ordering::Relaxed);
     kprobe.register_event_callback(
         callback_id,

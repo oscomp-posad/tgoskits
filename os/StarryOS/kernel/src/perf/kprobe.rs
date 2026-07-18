@@ -331,11 +331,14 @@ pub fn perf_event_open_kprobe(
     let probe = match args.config {
         PerfProbeConfig::Raw(PROBE_CONFIG_ENTRY) => {
             let builder = perf_probe_arg_to_kprobe_builder(&args)?;
-            ProbeTy::Kprobe(register_kprobe(builder))
+            // An un-probeable target (branch / PC-relative / system instruction,
+            // e.g. a -Zpatchable-function-entry NOP sled) fails to install; return
+            // -EINVAL to userspace rather than panicking the kernel.
+            ProbeTy::Kprobe(register_kprobe(builder).map_err(|_| AxError::InvalidInput)?)
         }
         PerfProbeConfig::Raw(PROBE_CONFIG_RETURN) => {
             let builder = perf_probe_arg_to_kretprobe_builder(&args)?;
-            ProbeTy::Kretprobe(register_kretprobe(builder))
+            ProbeTy::Kretprobe(register_kretprobe(builder).map_err(|_| AxError::InvalidInput)?)
         }
         _ => return Err(AxError::InvalidInput),
     };
