@@ -21,6 +21,7 @@
 use alloc::{format, string::String, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use ax_kernel_guard::NoPreemptIrqSave;
 use ax_kspin::SpinNoPreempt;
 use ax_memory_addr::VirtAddr;
 use axfs_ng_vfs::{VfsError, VfsResult};
@@ -107,11 +108,13 @@ unsafe extern "C" {
 
 /// Set while `current_tracer=function`. Gates the handler cheaply.
 static TRACING_ON: AtomicBool = AtomicBool::new(false);
-/// Global reentrancy/concurrency guard: a traced callee of the handler (or a
-/// second core) sees this set and drops its record instead of recursing. v1 is
-/// intentionally global (one core traces at a time); a per-CPU flag would keep
-/// concurrent traces but needs per-CPU access from the trampoline.
-static IN_HANDLER: AtomicBool = AtomicBool::new(false);
+/// Per-CPU reentrancy guard: a traced callee of the handler (the handler's own
+/// callees are instrumented too) sees this CPU's flag set and drops its record
+/// rather than recursing. Per-CPU (not global), so every core traces
+/// independently; the handler holds [`NoPreemptIrqSave`] so the current-CPU slot
+/// can't migrate and no IRQ-context trace nests during the guarded region.
+#[ax_percpu::def_percpu]
+static IN_HANDLER: bool = false;
 
 /// Called by [`ftrace_caller`] on every hit of a patched function.
 ///
@@ -123,10 +126,16 @@ extern "C" fn ftrace_handler(ip: usize, parent: usize) {
     if !TRACING_ON.load(Ordering::Relaxed) {
         return;
     }
-    // Recursion/concurrency guard: bail if already inside the handler.
-    if IN_HANDLER.swap(true, Ordering::Acquire) {
+    // Pin to this CPU (safe per-CPU access) and keep IRQs off across the guarded
+    // region so nothing nests or migrates while the flag is held.
+    let _guard = NoPreemptIrqSave::new();
+    // Per-CPU recursion guard. SAFETY: preemption + IRQs are off, so this CPU's
+    // slot is stable for the whole handler.
+    let busy = unsafe { IN_HANDLER.current_ref_mut_raw() };
+    if *busy {
         return;
     }
+    *busy = true;
     // Attribute to the running thread; a kernel task without a `Thread` uses pid 0
     // (no `as_thread()` panic, unlike the tracepoint fire path).
     let pid = ax_task::current()
@@ -139,7 +148,7 @@ extern "C" fn ftrace_handler(ip: usize, parent: usize) {
     buf[8..16].copy_from_slice(&(ip as u64).to_ne_bytes());
     buf[16..24].copy_from_slice(&(parent as u64).to_ne_bytes());
     KernelTraceAux::trace_pipe_push_raw_record(&buf);
-    IN_HANDLER.store(false, Ordering::Release);
+    *busy = false;
 }
 
 /// Symbolize a kernel address to its function name (for `trace` rendering).
