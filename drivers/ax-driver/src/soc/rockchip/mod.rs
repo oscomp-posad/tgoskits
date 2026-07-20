@@ -13,7 +13,13 @@
 // limitations under the License.
 
 #[cfg(feature = "rk3588-cpufreq")]
-mod cpufreq;
+pub(crate) mod cpufreq;
+
+#[cfg(feature = "rk3588-cpufreq")]
+mod pmic_i2c;
+
+#[cfg(feature = "rk3588-cpufreq")]
+mod pmic_spi;
 
 #[cfg(feature = "rockchip-soc")]
 mod cru;

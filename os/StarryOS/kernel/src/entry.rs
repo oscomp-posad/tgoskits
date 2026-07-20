@@ -29,6 +29,7 @@ pub fn init(args: &[String], envs: &[String]) {
 
     pseudofs::mount_all().expect("Failed to mount pseudofs");
     spawn_alarm_task();
+    spawn_cpufreq_governor();
     pseudofs::usbfs::start_event_pump();
 
     ax_alloc::register_page_reclaim_fn(ax_fs_ng::vfs::page_cache_reclaim);
@@ -112,4 +113,47 @@ pub fn init(args: &[String], envs: &[String]) {
         .filesystem()
         .flush()
         .expect("Failed to flush rootfs");
+}
+
+/// Start the CPU DVFS ondemand governor.
+///
+/// The frequency/voltage policy and the SCMI+PMIC apply live in the cpufreq
+/// driver (`ax_driver::cpufreq`); this kernel task is only the driver's periodic
+/// *loop*. The loop must live here, not in the driver, because ax-driver sits
+/// below ax-task/ax-hal in the dependency graph (they pull ax-driver back in via
+/// axplat-dyn), so spawning a task inside the driver would be a cyclic dep. Each
+/// period we snapshot the per-CPU busy counters the scheduler tick maintains and
+/// hand them to `governor_poll`, which decides and applies any OPP change.
+///
+/// No-op unless the driver armed the governor (feature on and both CPU-rail PMIC
+/// buses up); otherwise every cluster stays on its boot OPP.
+fn spawn_cpufreq_governor() {
+    if !ax_driver::cpufreq::governor_wanted() {
+        return;
+    }
+    info!("Initialize cpufreq ondemand governor...");
+    ax_task::spawn_raw(
+        cpufreq_governor_loop,
+        String::from("cpufreq-gov"),
+        ax_task::default_task_stack_size(),
+    );
+}
+
+/// Periodic body of the DVFS governor task: sleep, sample every CPU's cumulative
+/// busy-tick counter, and let the driver scale each cluster to match load. The
+/// slow work (SCMI SMC + PMIC I2C/SPI voltage ramp) happens inside
+/// `governor_poll`, which is why this runs in a sleepable task rather than the
+/// scheduler tick.
+fn cpufreq_governor_loop() {
+    let period = core::time::Duration::from_millis(ax_driver::cpufreq::governor_period_ms());
+    loop {
+        ax_task::sleep(period);
+        // RK3588 has 8 CPUs; an offline core's counter never advances, so it
+        // simply reads as idle (conservative — never over-scales).
+        let mut busy = [0u64; 8];
+        for (cpu, slot) in busy.iter_mut().enumerate() {
+            *slot = ax_task::cpu_busy_ticks(cpu);
+        }
+        ax_driver::cpufreq::governor_poll(&busy);
+    }
 }
