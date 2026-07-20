@@ -14,10 +14,15 @@
  *   3. issue syscalls (getpid) to hit the patched entry.
  *   4. read `trace` and count `handle_syscall(...)` records.
  *   5. echo nop > current_tracer (unpatch).
+ *   6. trace-all: clear the filter (empty == every function), re-arm
+ *      current_tracer=function (batch-patch all sleds), read it back == function
+ *      (proves arming does not recurse/hang in the handler prologue), run a tiny
+ *      workload, disarm, and assert `trace` has >=1 record.
  *
  * SUCCESS ==
  *     the tracer files are absent (normal build) — no-op OK
- *   OR filter + current_tracer arm AND `trace` has >=1 handle_syscall record.
+ *   OR filtered arm AND `trace` has >=1 handle_syscall record
+ *      AND trace-all arms (readback) AND `trace` has >=1 record.
  * Prints STARRY_FTRACE_FUNCTION_OK.
  */
 #ifndef _GNU_SOURCE
@@ -194,12 +199,47 @@ int main(void) {
         return fail("no handle_syscall records in tracefs trace");
     }
 
-    /* Trace-all (empty `set_ftrace_filter` + current_tracer=function) is
-     * implemented (batch-patched, alloc-free ring, try_lock push) but is NOT
-     * exercised here: instrumenting every kernel function is a ~100x global
-     * slowdown that, compounded with QEMU-TCG emulation, cannot complete a
-     * workload in the harness timeout. Filtered tracing above is the practical,
-     * validated mode (as it is on Linux). */
+    /* 6. trace-all: an empty set_ftrace_filter instruments EVERY kernel function
+     * (batch-patched in one stop_machine). This exercises the path that once
+     * recursed in the tracer's own handler prologue and wedged all cores; the
+     * readback == "function" below proves arming now completes without a hang.
+     * Keep the armed window tiny (a few getpids, disarm before reading trace):
+     * under QEMU-TCG, tracing every function is ~100x slower, so a large workload
+     * (fork/exec) would not finish within the harness timeout. */
+    mark("FTRACE_STEP all-clear");
+    if (write_file(FILTER_PATH, "\n") != 0) {
+        return fail("could not clear set_ftrace_filter for trace-all");
+    }
+    mark("FTRACE_STEP all-arm");
+    if (write_file(CURRENT_PATH, "function") != 0) {
+        return fail("could not arm trace-all current_tracer=function");
+    }
+    if (read_file(CURRENT_PATH, cbuf, sizeof(cbuf)) <= 0 ||
+        strncmp(cbuf, "function", 8) != 0) {
+        (void)write_file(CURRENT_PATH, "nop");
+        return fail("trace-all current_tracer did not read back (arming hung/failed)");
+    }
+    mark("FTRACE_STEP all-armed");
+    for (int i = 0; i < 4; i++) {
+        (void)syscall(SYS_getpid);
+    }
+    (void)write_file(CURRENT_PATH, "nop"); /* disarm before reading the snapshot */
+    mark("FTRACE_STEP all-disarmed");
+
+    /* Each function-tracer record renders as `funcname(<-parent)`, so the "(<-"
+     * arrow uniquely marks a function record (kprobe records render differently). */
+    ssize_t all_total = read_file(TRACE_PATH, tbuf, sizeof(tbuf));
+    unsigned long all_records = 0;
+    if (all_total > 0) {
+        for (const char *p = tbuf; (p = strstr(p, "(<-")) != NULL; p++) {
+            all_records++;
+        }
+    }
+    printf("STARRY_FTRACE_TRACEALL trace_bytes=%zd records=%lu\n", all_total,
+           all_records);
+    if (all_records == 0) {
+        return fail("trace-all produced no records");
+    }
 
     printf("STARRY_FTRACE_FUNCTION_OK\n");
     return 0;

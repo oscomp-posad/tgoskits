@@ -11,19 +11,23 @@
 //! An empty `set_ftrace_filter` traces **every** function; a non-empty filter
 //! traces only the named ones. Trace-all batch-patches all sleds in one
 //! `stop_machine` (per-site patching would run one each — unusably slow). The
-//! handler is allocation-free (it copies into the preallocated trace ring) and
-//! holds a per-CPU guard, so every function is safe to trace — only the tracer's
-//! own trampoline/handler are excluded (they would recurse before the guard).
+//! handler is allocation-free (it copies into the preallocated trace ring).
 //!
-//! Reentrancy: the trampoline is deliberately simple (no guard); the Rust
-//! [`ftrace_handler`] holds a global busy flag so a traced callee of the handler
-//! (or a concurrent core) is dropped rather than recursing. `ftrace_handler` /
+//! Reentrancy (critical under trace-all): the trampoline is deliberately simple
+//! (no guard); [`ftrace_handler`] arms a per-CPU busy flag so a traced callee of
+//! the handler — its own callees are instrumented too — is dropped rather than
+//! recursing. The flag MUST be armed using **only sled-free** operations (a raw
+//! `DAIF` IRQ mask + the `#[inline]` per-CPU accessor): calling any *out-of-line*
+//! function before the flag is set would, under trace-all, re-enter the handler
+//! before it can guard and recurse unboundedly into a stack overflow (observed as
+//! all cores wedged in the sync-exception vector). That is why the prologue uses
+//! raw IRQ masking rather than `NoPreemptIrqSave`, whose
+//! `new`/`acquire`/`disable_preempt` carry patchable sleds. `ftrace_handler` /
 //! `ftrace_caller` are themselves never patched (guarded in [`patch_entry`]).
 
 use alloc::{format, string::String, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use ax_kernel_guard::NoPreemptIrqSave;
 use ax_kspin::SpinNoPreempt;
 use ax_memory_addr::VirtAddr;
 use axfs_ng_vfs::{VfsError, VfsResult};
@@ -113,28 +117,67 @@ static TRACING_ON: AtomicBool = AtomicBool::new(false);
 /// Per-CPU reentrancy guard: a traced callee of the handler (the handler's own
 /// callees are instrumented too) sees this CPU's flag set and drops its record
 /// rather than recursing. Per-CPU (not global), so every core traces
-/// independently; the handler holds [`NoPreemptIrqSave`] so the current-CPU slot
-/// can't migrate and no IRQ-context trace nests during the guarded region.
+/// independently; the handler masks IRQs (raw `DAIF`) across the guarded region
+/// so the current-CPU slot can't migrate and no IRQ-context trace nests.
 #[ax_percpu::def_percpu]
 static IN_HANDLER: bool = false;
+
+/// Raw local-IRQ save+disable — the exact `DAIF` idiom from `kernel_guard`'s
+/// aarch64 arch module, replicated here as an always-inlined leaf so it carries
+/// **no** patchable sled. The crate's out-of-line `NoPreemptIrqSave`/`IrqSave`
+/// would re-enter [`ftrace_handler`] under trace-all before the reentrancy guard
+/// is armed (see the module docs).
+#[inline(always)]
+fn local_irq_save_raw() -> usize {
+    let flags: usize;
+    // SAFETY: reads `DAIF` and masks the `I` bit; no memory/stack effects.
+    unsafe {
+        core::arch::asm!(
+            "mrs {}, daif; msr daifset, #2",
+            out(reg) flags,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    flags
+}
+
+/// Restore `DAIF` saved by [`local_irq_save_raw`]. Always-inlined (sled-free).
+#[inline(always)]
+fn local_irq_restore_raw(flags: usize) {
+    // SAFETY: writes back the previously saved `DAIF` flags.
+    unsafe {
+        core::arch::asm!(
+            "msr daif, {}",
+            in(reg) flags,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+}
 
 /// Called by [`ftrace_caller`] on every hit of a patched function.
 ///
 /// `ip` is the traced function's entry; `parent` is its caller's return address.
 /// Writes a `{common header, ip, parent}` record into the trace ring. Must not
 /// panic or block: it runs in the traced function's context with the guard held.
+///
+/// The reentrancy guard is armed with **sled-free** ops only (a raw IRQ mask +
+/// the inlined per-CPU accessor) *before* any out-of-line call. Under trace-all
+/// every function is patched, so calling e.g. `NoPreemptIrqSave::new` here —
+/// before the guard — would re-enter this handler unbounded and overflow the
+/// stack. Raw IRQ masking also pins us to this CPU (no timer ⇒ no preemption), so
+/// the per-CPU slot is stable for the guarded region.
 #[unsafe(no_mangle)]
 extern "C" fn ftrace_handler(ip: usize, parent: usize) {
     if !TRACING_ON.load(Ordering::Relaxed) {
         return;
     }
-    // Pin to this CPU (safe per-CPU access) and keep IRQs off across the guarded
-    // region so nothing nests or migrates while the flag is held.
-    let _guard = NoPreemptIrqSave::new();
-    // Per-CPU recursion guard. SAFETY: preemption + IRQs are off, so this CPU's
-    // slot is stable for the whole handler.
+    // Mask IRQs with a raw, sled-free op, then arm the per-CPU guard, BEFORE any
+    // out-of-line (patchable) call — otherwise trace-all recurses here.
+    let flags = local_irq_save_raw();
+    // SAFETY: IRQs are off, so this CPU's slot is stable for the whole handler.
     let busy = unsafe { IN_HANDLER.current_ref_mut_raw() };
     if *busy {
+        local_irq_restore_raw(flags);
         return;
     }
     *busy = true;
@@ -151,6 +194,7 @@ extern "C" fn ftrace_handler(ip: usize, parent: usize) {
     buf[16..24].copy_from_slice(&(parent as u64).to_ne_bytes());
     KernelTraceAux::trace_pipe_push_raw_record(&buf);
     *busy = false;
+    local_irq_restore_raw(flags);
 }
 
 /// Symbolize a kernel address to its function name (for `trace` rendering).
