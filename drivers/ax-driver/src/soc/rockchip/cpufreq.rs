@@ -361,9 +361,9 @@ struct Opp {
 /// staying over-volted (each rung's voltage exceeds the delivered freq's DT
 /// nominal, so never an undervolt). Scaling the ring instead (e.g. ring 1608 @
 /// 762.5 mV) over-delivers ~1733 MHz = ~125 mV of undervolt (measured), so it is
-/// avoided. Capped at 1592 MHz @ 850 mV: a little above the 1490 MHz @ 800 mV the
-/// board already ran all-core, well below the >1700 MHz @ 925 mV that risks PSU
-/// brownout under an 8-core load.
+/// avoided. Top rung 1725 MHz @ 925 mV is the calibration sweep's safe maximum
+/// (over-volted ~110 mV vs the delivered freq's DT nominal); board-validated
+/// all-core (threads=8) with no PSU brownout.
 const A76_OPPS: &[Opp] = &[
     Opp { ring_khz: 408_000, uv: 675_000, mhz: 408 },
     Opp { ring_khz: 816_000, uv: 675_000, mhz: 816 },
@@ -371,10 +371,12 @@ const A76_OPPS: &[Opp] = &[
     Opp { ring_khz: 1_200_000, uv: 725_000, mhz: 1318 },
     Opp { ring_khz: 1_200_000, uv: 800_000, mhz: 1491 },
     Opp { ring_khz: 1_200_000, uv: 850_000, mhz: 1592 },
+    Opp { ring_khz: 1_200_000, uv: 925_000, mhz: 1725 },
 ];
 
 /// A55 (little) OPP ladder, low→high, same hybrid rationale: ring-scaled below the
-/// 675 mV point, then ring 1008 with rising voltage. Capped at 1372 MHz @ 850 mV.
+/// 675 mV point, then ring 1008 with rising voltage. Top rung 1523 MHz @ 950 mV
+/// (the RK806 force-write ceiling), the sweep's safe maximum for the little cluster.
 const A55_OPPS: &[Opp] = &[
     Opp { ring_khz: 408_000, uv: 675_000, mhz: 408 },
     Opp { ring_khz: 816_000, uv: 675_000, mhz: 816 },
@@ -382,6 +384,7 @@ const A55_OPPS: &[Opp] = &[
     Opp { ring_khz: 1_008_000, uv: 762_500, mhz: 1212 },
     Opp { ring_khz: 1_008_000, uv: 800_000, mhz: 1285 },
     Opp { ring_khz: 1_008_000, uv: 850_000, mhz: 1372 },
+    Opp { ring_khz: 1_008_000, uv: 950_000, mhz: 1523 },
 ];
 
 /// Index into each ladder of the boot OPP the voltage lever leaves the cluster on:
