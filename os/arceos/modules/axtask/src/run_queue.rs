@@ -428,11 +428,18 @@ mod rr_tests {
         let mut run_queue = AxRunQueue {
             cpu_id: 1,
             scheduler: SpinRaw::new(Scheduler::new()),
+            // Fresh scheduler is empty here; matches `scheduler.len() == 0`.
+            #[cfg(all(feature = "smp", feature = "sched-loadbalance"))]
+            nr_running: core::sync::atomic::AtomicUsize::new(0),
         };
         let queued = new_test_task("queued", TaskState::Ready);
         let blocked = new_test_task("blocked", TaskState::Blocked);
 
-        run_queue.scheduler.lock().add_task(queued.clone());
+        // Route the seed through the helper so `nr_running` stays consistent
+        // with `scheduler.len()`; a raw `add_task` here would leave the counter
+        // at 0 while `len() == 1`, tripping the `sched_put_prev` debug_assert
+        // under an smp + sched-loadbalance + debug_assertions build.
+        run_queue.sched_add_new(queued.clone());
         {
             let mut run_queue_ref = AxRunQueueRef::<ax_kernel_guard::NoOp> {
                 inner: &mut run_queue,
@@ -559,6 +566,14 @@ pub(crate) struct AxRunQueue {
     /// Since irq and preempt are preserved by the kernel guard hold by `AxRunQueueRef`,
     /// we just use a simple raw spin lock here.
     scheduler: SpinRaw<Scheduler>,
+    /// Lock-free mirror of `scheduler.lock().len()`, maintained under the
+    /// scheduler lock on every membership change (see `sched_add_new` /
+    /// `sched_put_prev` / `sched_pick`). Lets an idle CPU's load balancer scan
+    /// every run queue's length without taking every hot scheduler lock. Only
+    /// meaningful for the big.LITTLE load balancer, which needs a per-CPU
+    /// signal to compare across cores.
+    #[cfg(all(feature = "smp", feature = "sched-loadbalance"))]
+    nr_running: core::sync::atomic::AtomicUsize,
 }
 
 /// A reference to the run queue with specific guard.
@@ -609,7 +624,7 @@ impl<G: BaseGuard> AxRunQueueRef<'_, G> {
         assert!(task.is_ready());
         #[cfg(feature = "smp")]
         task.set_cpu_id(cpu_id as _);
-        self.inner.scheduler.lock().add_task(task);
+        self.inner.sched_add_new(task);
         #[cfg(all(feature = "smp", feature = "ipi"))]
         kick_remote_cpu(cpu_id);
     }
@@ -969,7 +984,87 @@ impl AxRunQueue {
         Self {
             cpu_id,
             scheduler: SpinRaw::new(scheduler),
+            // The gc task above was added directly to `scheduler` before this
+            // `AxRunQueue` (and its `nr_running` counter) existed, so seed the
+            // counter at 1 here to match `scheduler.len()`, rather than
+            // calling `sched_add_new` (which would need the queue to exist
+            // first).
+            #[cfg(all(feature = "smp", feature = "sched-loadbalance"))]
+            nr_running: core::sync::atomic::AtomicUsize::new(1),
         }
+    }
+
+    #[cfg(all(feature = "smp", feature = "sched-loadbalance"))]
+    #[inline]
+    fn nr_inc(&self) {
+        self.nr_running
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+    #[cfg(not(all(feature = "smp", feature = "sched-loadbalance")))]
+    #[inline]
+    fn nr_inc(&self) {}
+
+    #[cfg(all(feature = "smp", feature = "sched-loadbalance"))]
+    #[inline]
+    fn nr_dec(&self) {
+        self.nr_running
+            .fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
+    }
+    #[cfg(not(all(feature = "smp", feature = "sched-loadbalance")))]
+    #[inline]
+    fn nr_dec(&self) {}
+
+    /// Lock-free runnable count (heuristic; transiently stale but never
+    /// wrong-signed). Consumed by the load balancer (later tasks).
+    #[cfg(all(feature = "smp", feature = "sched-loadbalance"))]
+    #[inline]
+    #[allow(dead_code)]
+    fn load(&self) -> usize {
+        self.nr_running.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Adds a brand-new (never-scheduled) task to this run queue's scheduler
+    /// and bumps the runnable counter, both under the same scheduler lock so
+    /// a lock-free reader of `nr_running` never observes it out of step with
+    /// `scheduler.len()`.
+    #[inline]
+    fn sched_add_new(&self, task: AxTaskRef) {
+        let mut s = self.scheduler.lock();
+        s.add_task(task);
+        self.nr_inc();
+        #[cfg(all(feature = "smp", feature = "sched-loadbalance", debug_assertions))]
+        debug_assert_eq!(
+            self.nr_running.load(core::sync::atomic::Ordering::Relaxed),
+            s.len()
+        );
+    }
+
+    /// Puts a previously-running/blocked task back into this run queue's
+    /// scheduler and bumps the runnable counter under the same scheduler
+    /// lock (see `sched_add_new`).
+    #[inline]
+    fn sched_put_prev(&self, task: AxTaskRef, preempt: bool) {
+        let mut s = self.scheduler.lock();
+        s.put_prev_task(task, preempt);
+        self.nr_inc();
+        #[cfg(all(feature = "smp", feature = "sched-loadbalance", debug_assertions))]
+        debug_assert_eq!(
+            self.nr_running.load(core::sync::atomic::Ordering::Relaxed),
+            s.len()
+        );
+    }
+
+    /// Picks the next runnable task from this run queue's scheduler,
+    /// decrementing the runnable counter under the same scheduler lock if a
+    /// task was actually removed (see `sched_add_new`).
+    #[inline]
+    fn sched_pick(&self) -> Option<AxTaskRef> {
+        let mut s = self.scheduler.lock();
+        let next = s.pick_next_task();
+        if next.is_some() {
+            self.nr_dec();
+        }
+        next
     }
 
     /// Puts target task into current run queue with `Ready` state
@@ -1030,7 +1125,7 @@ impl AxRunQueue {
             // TODO: priority
             #[cfg(feature = "smp")]
             task.set_cpu_id(self.cpu_id as _);
-            self.scheduler.lock().put_prev_task(task, preempt);
+            self.sched_put_prev(task, preempt);
             true
         } else {
             false
@@ -1040,14 +1135,10 @@ impl AxRunQueue {
     /// Core reschedule subroutine.
     /// Pick the next task to run and switch to it.
     fn resched(&mut self) {
-        let next = self
-            .scheduler
-            .lock()
-            .pick_next_task()
-            .unwrap_or_else(|| unsafe {
-                // Safety: IRQs must be disabled at this time.
-                IDLE_TASK.current_ref_raw().get_unchecked().clone()
-            });
+        let next = self.sched_pick().unwrap_or_else(|| unsafe {
+            // Safety: IRQs must be disabled at this time.
+            IDLE_TASK.current_ref_raw().get_unchecked().clone()
+        });
         assert!(
             next.is_ready(),
             "next {} is not ready: {:?}",
@@ -1183,10 +1274,7 @@ pub(crate) fn migrate_entry(migrated_task: AxTaskRef) {
     let rq = select_run_queue::<ax_kernel_guard::NoPreemptIrqSave>(&migrated_task);
     let cpu_id = rq.inner.cpu_id;
     migrated_task.set_cpu_id(cpu_id as _);
-    rq.inner
-        .scheduler
-        .lock()
-        .put_prev_task(migrated_task, false);
+    rq.inner.sched_put_prev(migrated_task, false);
     #[cfg(all(feature = "smp", feature = "ipi"))]
     // Current-task migration cannot make progress until the target CPU runs
     // the migrated task, so do not let a stale coalescing bit suppress this IPI.
@@ -1213,10 +1301,7 @@ pub(crate) unsafe fn clear_prev_task_on_cpu() {
         let target = task.cpu_id() as usize;
         // Leaf lock: `resched()` already dropped this CPU's scheduler lock before
         // `switch_to`, so this takes only the target run queue's lock.
-        get_run_queue(target)
-            .scheduler
-            .lock()
-            .put_prev_task(task, false);
+        get_run_queue(target).sched_put_prev(task, false);
         if target != this_cpu_id() {
             // Remote target: ask that CPU to reschedule so it picks the task up
             // (and wakes if it is idle in `wait_for_irqs`).
