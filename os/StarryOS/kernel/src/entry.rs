@@ -29,7 +29,14 @@ pub fn init(args: &[String], envs: &[String]) {
 
     pseudofs::mount_all().expect("Failed to mount pseudofs");
     spawn_alarm_task();
-    spawn_cpufreq_governor();
+    // DVFS: a one-shot OPP-calibration boot runs the sweep and skips the governor;
+    // otherwise start the ondemand governor. Both run here (early init, before the
+    // console tty handoff) so their kernel logs reach the serial console.
+    if ax_driver::cpufreq::calibrate_wanted() {
+        run_opp_calibration();
+    } else {
+        spawn_cpufreq_governor();
+    }
     pseudofs::usbfs::start_event_pump();
 
     ax_alloc::register_page_reclaim_fn(ax_fs_ng::vfs::page_cache_reclaim);
@@ -113,6 +120,28 @@ pub fn init(args: &[String], envs: &[String]) {
         .filesystem()
         .flush()
         .expect("Failed to flush rootfs");
+}
+
+/// Run the one-shot DVFS OPP calibration sweep (gated by the driver's `CALIBRATE`
+/// const). Each cluster's (voltage x ring) sweep must execute ON a core of that
+/// cluster to read that core's own PMU cycle counter, so we pin a task per cluster
+/// (cpu0=A55, cpu4=A76 big0, cpu6=A76 big1) via `set_current_affinity` and run
+/// them sequentially (the two A76 rails share one I2C bus). Synchronous: it blocks
+/// init briefly so the `CAL` log lines land before the console tty handoff.
+fn run_opp_calibration() {
+    info!("cpufreq: running OPP calibration sweep (governor disabled this boot)");
+    for &(cluster_idx, cpu) in &[(0usize, 0usize), (1, 4), (2, 6)] {
+        let task = ax_task::spawn_raw(
+            move || {
+                ax_task::set_current_affinity(ax_task::AxCpuMask::one_shot(cpu));
+                ax_driver::cpufreq::calibrate_cluster(cluster_idx, cpu);
+            },
+            String::from("cpufreq-cal"),
+            ax_task::default_task_stack_size(),
+        );
+        task.join();
+    }
+    info!("cpufreq: OPP calibration sweep complete");
 }
 
 /// Start the CPU DVFS ondemand governor.

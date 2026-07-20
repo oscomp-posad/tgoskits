@@ -106,7 +106,9 @@ pub mod virtio;
 /// tick. When the DVFS feature is off these are no-ops so callers stay generic.
 pub mod cpufreq {
     #[cfg(feature = "rk3588-cpufreq")]
-    pub use crate::soc::rockchip::cpufreq::{governor_period_ms, governor_poll, governor_wanted};
+    pub use crate::soc::rockchip::cpufreq::{
+        calibrate_cluster, calibrate_wanted, governor_period_ms, governor_poll, governor_wanted,
+    };
 
     /// Feature-off stub: no governor, so the kernel never spawns its task.
     #[cfg(not(feature = "rk3588-cpufreq"))]
@@ -121,6 +123,14 @@ pub mod cpufreq {
     /// Feature-off stub.
     #[cfg(not(feature = "rk3588-cpufreq"))]
     pub fn governor_poll(_busy: &[u64]) {}
+    /// Feature-off stub: no calibration.
+    #[cfg(not(feature = "rk3588-cpufreq"))]
+    pub fn calibrate_wanted() -> bool {
+        false
+    }
+    /// Feature-off stub.
+    #[cfg(not(feature = "rk3588-cpufreq"))]
+    pub fn calibrate_cluster(_cluster_idx: usize, _intended_cpu: usize) {}
 }
 
 #[cfg(feature = "pci")]

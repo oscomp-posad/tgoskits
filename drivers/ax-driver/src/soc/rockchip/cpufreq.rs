@@ -342,43 +342,52 @@ fn align_rail_voltages_to_opp() {
 /// on the fixed boot OPP the voltage alignment left it on.
 const GOVERNOR_ENABLE: bool = true;
 
-/// An operating performance point: an SCMI target frequency paired with the
-/// OPP-nominal rail voltage the voltage-coupled clock needs to land on it. Both
-/// columns are the board's standard-SKU `cluster*-opp-table` rows.
+/// An operating performance point: the SCMI ring target to program, the rail
+/// voltage to pair with it, and the frequency that combination actually delivers
+/// (`mhz`, board-measured — see the calibration section). Because the PVTPLL is
+/// voltage-coupled, the delivered `mhz` is generally NOT the `ring_khz`; the
+/// governor reports `mhz`.
 #[derive(Clone, Copy)]
 struct Opp {
-    khz: u32,
+    ring_khz: u32,
     uv: u32,
+    mhz: u32,
 }
 
-/// A76 (big) OPP ladder, low→high. Every rung sits on the **675 mV** rail, the
-/// only voltage board-proven to make the PVTPLL deliver its SCMI target *exactly*
-/// (675 mV → exactly 1200 MHz; lower rings are voltage-ample and land on target
-/// too). The higher OPPs (1416/1608...) pair the ring with a lower-than-needed
-/// voltage, and the same PVTPLL coupling that caused the boot overshoot makes
-/// ring=1608 @ 762.5 mV *over*-deliver to ~1733 MHz — i.e. run ~125 MHz above what
-/// 762.5 mV is rated for (an undervolt, the unsafe direction, measured on-board).
-/// So the governor scales the clock only, on this fixed exact-and-safe rail; using
-/// the >1200 OPPs needs a per-OPP delivered-frequency voltage calibration first.
+/// A76 (big) OPP ladder, low→high, from the on-board calibration sweep. The clock
+/// is voltage-coupled, so this ladder is a HYBRID: below the 675 mV exact point it
+/// scales the SCMI ring (408/816/1200 @ 675 mV land on target); above it, it holds
+/// the ring at 1200 and raises the *voltage* — the delivered freq climbs while
+/// staying over-volted (each rung's voltage exceeds the delivered freq's DT
+/// nominal, so never an undervolt). Scaling the ring instead (e.g. ring 1608 @
+/// 762.5 mV) over-delivers ~1733 MHz = ~125 mV of undervolt (measured), so it is
+/// avoided. Capped at 1592 MHz @ 850 mV: a little above the 1490 MHz @ 800 mV the
+/// board already ran all-core, well below the >1700 MHz @ 925 mV that risks PSU
+/// brownout under an 8-core load.
 const A76_OPPS: &[Opp] = &[
-    Opp { khz: 408_000, uv: 675_000 },
-    Opp { khz: 816_000, uv: 675_000 },
-    Opp { khz: 1_200_000, uv: 675_000 },
+    Opp { ring_khz: 408_000, uv: 675_000, mhz: 408 },
+    Opp { ring_khz: 816_000, uv: 675_000, mhz: 816 },
+    Opp { ring_khz: 1_200_000, uv: 675_000, mhz: 1189 },
+    Opp { ring_khz: 1_200_000, uv: 725_000, mhz: 1318 },
+    Opp { ring_khz: 1_200_000, uv: 800_000, mhz: 1491 },
+    Opp { ring_khz: 1_200_000, uv: 850_000, mhz: 1592 },
 ];
 
-/// A55 (little) OPP ladder, low→high. Same fixed-675 mV rationale as A76; 675 mV
-/// delivers exactly 1008 MHz on the little cluster.
+/// A55 (little) OPP ladder, low→high, same hybrid rationale: ring-scaled below the
+/// 675 mV point, then ring 1008 with rising voltage. Capped at 1372 MHz @ 850 mV.
 const A55_OPPS: &[Opp] = &[
-    Opp { khz: 408_000, uv: 675_000 },
-    Opp { khz: 816_000, uv: 675_000 },
-    Opp { khz: 1_008_000, uv: 675_000 },
+    Opp { ring_khz: 408_000, uv: 675_000, mhz: 408 },
+    Opp { ring_khz: 816_000, uv: 675_000, mhz: 816 },
+    Opp { ring_khz: 1_008_000, uv: 675_000, mhz: 1021 },
+    Opp { ring_khz: 1_008_000, uv: 762_500, mhz: 1212 },
+    Opp { ring_khz: 1_008_000, uv: 800_000, mhz: 1285 },
+    Opp { ring_khz: 1_008_000, uv: 850_000, mhz: 1372 },
 ];
 
-/// Index into each ladder of the boot OPP the voltage lever leaves the cluster
-/// on: A55 1008 MHz and A76 1200 MHz are both element 2 — now the top rung, since
-/// the ladders cap at the 675 mV exact-delivery point. The governor starts its
-/// per-cluster tracking here (at the top) so its first move is relative to the
-/// known boot state; from idle it decays downward and snaps back up under load.
+/// Index into each ladder of the boot OPP the voltage lever leaves the cluster on:
+/// A55 1008 MHz and A76 1200 MHz are both element 2 (the 675 mV rung). The governor
+/// starts tracking here so its first move is relative to the known boot state; from
+/// idle it decays down the ring-scaled rungs and under load climbs the voltage ones.
 const BOOT_OPP_IDX: usize = 2;
 
 /// The three DVFS domains (one little cluster, two big pairs).
@@ -444,7 +453,7 @@ impl Cluster {
 ///   - going DOWN: lower the SCMI ring first, then voltage (clock follows down).
 fn apply_opp(cluster: Cluster, opp: Opp, going_up: bool) {
     let phandle = Phandle::from(0u32);
-    let hz = opp.khz as u64 * 1_000;
+    let hz = opp.ring_khz as u64 * 1_000;
     if going_up {
         cluster.set_voltage(opp.uv);
         scmi::set_clock_rate(phandle, cluster.clock_id(), hz);
@@ -568,13 +577,167 @@ pub fn governor_poll(busy: &[u64]) {
             apply_opp(cluster, opps[new], new > cur);
             IDX[ci].store(new, Ordering::Relaxed);
             info!(
-                "gov: {} peak={}% opp {}->{} = {} MHz",
+                "gov: {} peak={}% opp {}->{} = {} MHz @ {} mV",
                 cluster.name(),
                 peak_pct,
                 cur,
                 new,
-                opps[new].khz / 1_000
+                opps[new].mhz,
+                opps[new].uv / 1_000
             );
         }
     }
+}
+
+// ===========================================================================
+// OPP calibration sweep (gated, one-shot)
+// ===========================================================================
+//
+// The PVTPLL clock is voltage-coupled, so the delivered frequency for a given
+// SCMI ring drifts with rail voltage, and the drift grows at the higher OPPs
+// (ring=1608 @ 762.5 mV measured near ~1733 MHz on-board). To use the
+// 1416/1608/1800 rungs SAFELY we must know the *actual* delivered frequency at
+// each (ring, voltage); this sweep measures it directly via the PMU cycle
+// counter. It runs once, gated by `CALIBRATE`, from early `init()` (before the
+// console tty handoff) so its `CAL` log lines reach the serial console — the
+// governor's own transition logs do not, because they fire post-handoff.
+
+/// One-shot gate: when true, `init()` runs [`calibrate_cluster`] per cluster
+/// (governor NOT spawned) and the board logs a `CAL` grid; leave false for
+/// production. Requires the PMU cycle counter enabled at boot (axcpu `init_trap`).
+const CALIBRATE: bool = false;
+
+/// Sweep points `(rail_uV, ring_kHz)`. Round 1 showed the delivered frequency is
+/// dominated by voltage and that at any DT (ring=F, V_nom(F)) pair the delivery
+/// *over*-shoots F (undervolt). The safe lever is instead a FIXED low ring with a
+/// rising voltage: the delivered freq climbs but stays over-volted. So round 2
+/// maps ring 1200 across the full voltage range (plus two higher-ring cross-checks
+/// to see where the ring stops mattering). Every point keeps V >= V_nom(ring), so
+/// no measured point undervolts a live core; list is voltage-non-decreasing.
+const CAL_A76: &[(u32, u32)] = &[
+    (675_000, 1_200_000),
+    (725_000, 1_200_000),
+    (762_500, 1_200_000),
+    (800_000, 1_200_000),
+    (850_000, 1_200_000),
+    (925_000, 1_200_000),
+    (850_000, 1_416_000), // cross-check: does a higher ring beat ring 1200 at 850?
+    (925_000, 1_608_000), // cross-check at 925
+];
+
+/// A55: fixed ring 1008 across the voltage range (RK806 force-write caps at 950 mV).
+const CAL_A55: &[(u32, u32)] = &[
+    (675_000, 1_008_000),
+    (712_500, 1_008_000),
+    (762_500, 1_008_000),
+    (800_000, 1_008_000),
+    (850_000, 1_008_000),
+    (950_000, 1_008_000),
+    (850_000, 1_416_000), // cross-check
+    (950_000, 1_608_000), // cross-check
+];
+
+/// Whether to run the calibration sweep this boot (compile gate + PMIC armed).
+pub fn calibrate_wanted() -> bool {
+    CALIBRATE && GOV_READY.load(Ordering::Acquire)
+}
+
+#[inline]
+fn rd_pmccntr() -> u64 {
+    let v: u64;
+    unsafe { core::arch::asm!("mrs {}, pmccntr_el0", out(reg) v) };
+    v
+}
+#[inline]
+fn rd_cntvct() -> u64 {
+    let v: u64;
+    unsafe { core::arch::asm!("mrs {}, cntvct_el0", out(reg) v) };
+    v
+}
+#[inline]
+fn rd_cntfrq() -> u64 {
+    let v: u64;
+    unsafe { core::arch::asm!("mrs {}, cntfrq_el0", out(reg) v) };
+    v
+}
+#[inline]
+fn rd_mpidr() -> u64 {
+    let v: u64;
+    unsafe { core::arch::asm!("mrs {}, mpidr_el1", out(reg) v) };
+    v
+}
+
+/// Busy-wait `ms` milliseconds against the fixed-rate `CNTVCT` clock.
+fn cal_delay_ms(ms: u64) {
+    let frq = rd_cntfrq().max(1);
+    let start = rd_cntvct();
+    let ticks = frq * ms / 1000;
+    while rd_cntvct().wrapping_sub(start) < ticks {
+        core::hint::spin_loop();
+    }
+}
+
+/// Measure the CURRENT core's frequency (MHz) by counting CPU cycles
+/// (`PMCCNTR_EL0`) over a fixed ~60 ms window timed by `CNTVCT_EL0`. The counter
+/// is 32-bit (no `PMCR_EL0.LC`), which cannot wrap over this window.
+fn measure_mhz() -> u32 {
+    let frq = rd_cntfrq().max(1);
+    let window = frq * 60 / 1000; // 60 ms in cntvct ticks
+    let t0 = rd_cntvct();
+    let c0 = rd_pmccntr() as u32;
+    while rd_cntvct().wrapping_sub(t0) < window {
+        core::hint::spin_loop();
+    }
+    let t1 = rd_cntvct();
+    let c1 = rd_pmccntr() as u32;
+    let dvct = t1.wrapping_sub(t0).max(1);
+    let dcyc = c1.wrapping_sub(c0) as u64; // 32-bit wrap-safe
+    ((dcyc * frq) / (dvct * 1_000_000)) as u32
+}
+
+/// Run the (voltage x ring) calibration sweep for one cluster ON THE CURRENT
+/// CORE, logging the delivered frequency at each point. `cluster_idx`: 0=A55,
+/// 1=A76 big0, 2=A76 big1. The caller must have pinned this task onto a core in
+/// the target cluster (the logged `MPIDR` aff1 lets you confirm it). Restores a
+/// safe boot OPP for the cluster on exit. PMIC access here is pure polling, so it
+/// is safe on a non-boot core.
+pub fn calibrate_cluster(cluster_idx: usize, intended_cpu: usize) {
+    let (cluster, points, restore_khz) = match cluster_idx {
+        0 => (Cluster::A55, CAL_A55, 1_008_000u32),
+        1 => (Cluster::Big0, CAL_A76, 1_200_000u32),
+        _ => (Cluster::Big1, CAL_A76, 1_200_000u32),
+    };
+    let mpidr = rd_mpidr();
+    info!(
+        "CAL begin cl={} cpu={} mpidr_aff1={} aff0={}",
+        cluster.name(),
+        intended_cpu,
+        (mpidr >> 8) & 0xff,
+        mpidr & 0xff
+    );
+    let phandle = Phandle::from(0u32);
+    for &(uv, khz) in points {
+        // Voltage first (points are voltage-non-decreasing, so this only ever
+        // over-volts the current ring = safe), then the SCMI ring.
+        let vok = cluster.set_voltage(uv);
+        scmi::set_clock_rate(phandle, cluster.clock_id(), khz as u64 * 1_000);
+        cal_delay_ms(25);
+        let f = measure_mhz();
+        info!(
+            "CAL cl={} volt={}uV ring={}MHz volt_ok={} => {}MHz",
+            cluster.name(),
+            uv,
+            khz / 1_000,
+            vok,
+            f
+        );
+    }
+    // Restore: ring down first, then voltage down (safe order).
+    scmi::set_clock_rate(phandle, cluster.clock_id(), restore_khz as u64 * 1_000);
+    cluster.set_voltage(675_000);
+    info!(
+        "CAL end cl={} restored {}MHz@675mV",
+        cluster.name(),
+        restore_khz / 1_000
+    );
 }

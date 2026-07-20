@@ -35,13 +35,39 @@ governor-chosen (loaded) frequency.
   @ 675 mV draws less than the ~1490 MHz @ 800 mV overshoot the board already
   survived).
 
+## Voltage calibration — higher OPPs unlocked (2026-07-20)
+
+An on-board calibration sweep (gated `CALIBRATE` const in `cpufreq.rs`, run from
+`init()` before the console handoff so its `CAL` lines reach serial; measures each
+`(ring, voltage)` point's delivered freq via the PMU cycle counter) resolved the
+>1200 MHz question. Prereq: the cycle counter is now enabled at boot
+(`components/axcpu/src/aarch64/init.rs`), which also makes `cpuprobe`'s `mhz_pmc`
+an exact oracle (`pmc_ok=1`).
+
+Key finding: the delivered freq is dominated by voltage; at any DT `(ring=F,
+V_nom(F))` pair the delivery *over*-shoots F (e.g. ring 1608 @ 762.5 mV → **1733
+MHz** measured, a ~125 mV undervolt). The safe lever is a **fixed low ring with
+rising voltage** — the delivered freq climbs while staying over-volted. Measured
+ladders (both A76 pairs identical):
+
+| A76 @ ring 1200 | 675→1189 | 725→1318 | 800→1491 | 850→**1592** | 925→1725 |
+| A55 @ ring 1008 | 675→1021 | 762.5→1212 | 800→1285 | 850→**1372** | 950→1523 |
+
+Every rung is over-volted (voltage ≥ the delivered freq's DT nominal; margin grows
+from ~0 mV at the base to +100 mV at the top). The governor ladders are now HYBRID:
+ring-scaled below 1200/1008 (idle floor), voltage-scaled above. New tops (capped at
+850 mV, a little above the board-proven 1490 MHz @ 800 mV, below the >1700 @ 925 mV
+brownout risk):
+
+- **A76 1200 → 1592 MHz (+33%)**, **A55 1008 → 1372 MHz (+36%)**.
+
+Board-validated 2026-07-20: under load `mhz_pmc` reads **exactly** 1592.x (A76) /
+1372.x (A55) — no overshoot; **threads=8 all-core held both with no brownout**;
+sysbench eps 201 → 271. Cross-checks (ring 1416 @ 850 → 1830, ring 1608 @ 925 →
+2126) undervolt, confirming fixed-ring voltage-scaling is the safe lever.
+
 ## Known limitations / follow-ups
 
-- **>1200 MHz OPPs need calibration.** The PVTPLL coupling over-delivers at the
-  higher OPPs, so pairing e.g. the 1608 ring with its DT 762.5 mV under-volts the
-  ~1733 MHz it actually produces. Using them safely needs a per-OPP
-  delivered-frequency → voltage calibration (measure freq at each rail, pick a
-  voltage ≥ the delivered freq's nominal).
 - **`gov:` transition logs aren't capturable** post-boot (StarryOS kernel `info!`
   stops reaching the serial once the shell owns the console; during boot the
   cores are busy so no transition fires). cpuprobe freq is the evidence.
