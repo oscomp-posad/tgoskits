@@ -9,7 +9,9 @@
 #
 # WHY these choices:
 #  - linux-6.1 matches the OrangePi board kernel (6.1.43) and still vendors
-#    tools/lib/traceevent (removed ~6.7), simplifying a static build.
+#    tools/lib/traceevent (removed ~6.7), so libtraceevent links statically
+#    in-tree with no external dep -- kept ENABLED for `perf record`/`report`/
+#    `script` tracing-data decode (the perf-cli-e2e case).
 #  - GCC 11 musl cross toolchain (tgoskits container): lenient enough to build
 #    vanilla perf without Alpine's musl patch set (newer GCCs error on perf-6.1's
 #    calloc arg-order / implicit basename; see docs for the libelf follow-up).
@@ -38,7 +40,7 @@ docker run --rm --platform linux/amd64 -v "$WORK:/build" -v "$HERE:/out" "$IMAGE
     NO_LIBBPF=1 NO_BPF_SKEL=1 NO_SLANG=1 NO_GTK2=1 NO_LIBPERL=1 \
     NO_LIBPYTHON=1 NO_LIBNUMA=1 NO_LIBCRYPTO=1 NO_LIBZSTD=1 \
     NO_LZMA=1 NO_ZLIB=1 NO_JVMTI=1 NO_LIBBABELTRACE=1 NO_AUXTRACE=1 \
-    NO_LIBDEBUGINFOD=1 NO_LIBTRACEEVENT=1 NO_LIBLLVM=1
+    NO_LIBDEBUGINFOD=1 NO_LIBLLVM=1
   aarch64-linux-musl-strip -o /out/perf perf
   echo "built: $(file /out/perf)"
 '

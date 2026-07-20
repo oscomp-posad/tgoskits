@@ -8,7 +8,11 @@
 # `./perf` already exists.
 #
 # See build-perf.sh for the rationale behind linux-6.1, the musl cross toolchain,
-# and the NO_LIBELF choice.
+# and the NO_LIBELF choice. libtraceevent is kept ENABLED (no NO_LIBTRACEEVENT):
+# linux-6.1 still ships tools/lib/traceevent in-tree, so the cross build links it
+# statically with no external dependency, giving `perf record`/`report`/`script`
+# the tracing-data decode the perf-cli-e2e case exercises. (`perf probe` needs
+# libelf and stays out -- perf-cli-e2e creates its kprobe via kprobe_events.)
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PERF_VER="${PERF_VER:-6.1}"
@@ -37,7 +41,7 @@ make -j"$(nproc)" ARCH=arm64 CROSS_COMPILE=aarch64-linux-musl- \
   NO_LIBBPF=1 NO_BPF_SKEL=1 NO_SLANG=1 NO_GTK2=1 NO_LIBPERL=1 \
   NO_LIBPYTHON=1 NO_LIBNUMA=1 NO_LIBCRYPTO=1 NO_LIBZSTD=1 \
   NO_LZMA=1 NO_ZLIB=1 NO_JVMTI=1 NO_LIBBABELTRACE=1 NO_AUXTRACE=1 \
-  NO_LIBDEBUGINFOD=1 NO_LIBTRACEEVENT=1 NO_LIBLLVM=1
+  NO_LIBDEBUGINFOD=1 NO_LIBLLVM=1
 
 aarch64-linux-musl-strip -o "$HERE/perf" perf
 echo "built perf from linux-$V source: $HERE/perf ($(stat -c%s "$HERE/perf") bytes)"
