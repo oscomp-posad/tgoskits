@@ -360,24 +360,9 @@ impl Starry {
         if env_truthy(&cargo.env, "AXTEST") {
             append_encoded_rustflags(&mut cargo, AXTEST_RUSTFLAGS);
         }
-        // Opt-in ftrace function tracer: `STARRY_FUNCTION_TRACER=1` instruments
-        // every kernel function with a 2-NOP patchable entry (recorded in the
-        // `__patchable_function_entries` section) that the runtime self-patches
-        // into a call to the trace trampoline, and compiles the `function_tracer`
-        // subsystem. Off by default (like Linux's CONFIG_FUNCTION_TRACER) — it
-        // grows every function by two instructions.
-        if std::env::var("STARRY_FUNCTION_TRACER").is_ok_and(|v| v == "1") {
-            append_encoded_rustflags(
-                &mut cargo,
-                &[
-                    "-Zpatchable-function-entry=2",
-                    "--cfg",
-                    "function_tracer",
-                    "--check-cfg",
-                    "cfg(function_tracer)",
-                ],
-            );
-        }
+        // The opt-in ftrace function tracer (`STARRY_FUNCTION_TRACER=1`) is now
+        // injected in `build::load_cargo_config` (the single build-config load
+        // point) so it reaches board/uboot builds too — not just this QEMU path.
         if crate::support::axtest_coverage::enabled(&cargo) {
             crate::support::axtest_coverage::prepare_cargo(&mut cargo);
         }
