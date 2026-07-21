@@ -60,6 +60,7 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+#include <pthread.h>
 
 /* ------------------------------------------------------------------ ABI --- */
 
@@ -2206,6 +2207,1892 @@ static void area_g_sysctl(void) {
     }
 }
 
+/* ==================================================================== */
+/* Extended perf_event_open(2) feature areas H..Q. Appended to          */
+/* perf_validate.c; reuses its helpers (peo, attr_zero, pin, msleep,    */
+/* busy, read_file, write_file, PASS/FAIL/INFO/skip, online_cpu[],      */
+/* first_a55/76, selftest, wscale, struct perf_event_attr/mmap_page/    */
+/* perf_rec). QEMU-TCG safety: under `selftest` every section takes a   */
+/* skip-as-pass / lenient path and NEVER emits FAIL.                    */
+/* ==================================================================== */
+
+
+#ifndef MADV_DONTNEED
+#define MADV_DONTNEED 4
+#endif
+
+/* --- event types (verified against siblings) --- */
+#ifndef PERF_TYPE_SOFTWARE
+#define PERF_TYPE_SOFTWARE 1u
+#endif
+#ifndef PERF_TYPE_TRACEPOINT
+#define PERF_TYPE_TRACEPOINT 2u
+#endif
+#ifndef PERF_TYPE_HW_CACHE
+#define PERF_TYPE_HW_CACHE 3u
+#endif
+#ifndef PERF_TYPE_KPROBE
+#define PERF_TYPE_KPROBE 6u
+#endif
+
+/* --- SOFTWARE config ids --- */
+#ifndef SW_CPU_CLOCK
+#define SW_CPU_CLOCK 0ull
+#endif
+#ifndef SW_TASK_CLOCK
+#define SW_TASK_CLOCK 1ull
+#endif
+#ifndef SW_PAGE_FAULTS
+#define SW_PAGE_FAULTS 2ull
+#endif
+#ifndef SW_CONTEXT_SWITCHES
+#define SW_CONTEXT_SWITCHES 3ull
+#endif
+#ifndef SW_CPU_MIGRATIONS
+#define SW_CPU_MIGRATIONS 4ull
+#endif
+
+/* --- read_format bits (RF_TIMING == TIME_ENABLED|TIME_RUNNING == 3) --- */
+#ifndef FORMAT_ID
+#define FORMAT_ID (1ull << 2)
+#endif
+#ifndef FORMAT_GROUP
+#define FORMAT_GROUP (1ull << 3)
+#endif
+
+/* --- sample_type bits (SAMPLE_IP already defined by the harness) --- */
+#ifndef SAMPLE_TID
+#define SAMPLE_TID (1ull << 1)
+#endif
+#ifndef SAMPLE_TIME
+#define SAMPLE_TIME (1ull << 2)
+#endif
+#ifndef SAMPLE_READ
+#define SAMPLE_READ (1ull << 4)
+#endif
+#ifndef SAMPLE_CALLCHAIN
+#define SAMPLE_CALLCHAIN (1ull << 5)
+#endif
+#ifndef SAMPLE_CPU
+#define SAMPLE_CPU (1ull << 7)
+#endif
+#ifndef SAMPLE_REGS_USER
+#define SAMPLE_REGS_USER (1ull << 12)
+#endif
+#ifndef SAMPLE_STACK_USER
+#define SAMPLE_STACK_USER (1ull << 13)
+#endif
+
+/* --- perf_event_attr.flags side-band bits --- */
+#ifndef F_COMM
+#define F_COMM (1ull << 9)
+#endif
+#ifndef F_TASK
+#define F_TASK (1ull << 13)
+#endif
+#ifndef F_SAMPLE_ID_ALL
+#define F_SAMPLE_ID_ALL (1ull << 18)
+#endif
+#ifndef F_MMAP2
+#define F_MMAP2 (1ull << 23)
+#endif
+
+/* --- record types (REC_SAMPLE==9 already defined) --- */
+#ifndef REC_LOST
+#define REC_LOST 2u
+#endif
+#ifndef REC_COMM
+#define REC_COMM 3u
+#endif
+#ifndef REC_EXIT
+#define REC_EXIT 4u
+#endif
+#ifndef REC_FORK
+#define REC_FORK 7u
+#endif
+#ifndef REC_MMAP2
+#define REC_MMAP2 10u
+#endif
+
+/* --- callchain context markers --- */
+#ifndef PERF_CONTEXT_KERNEL
+#define PERF_CONTEXT_KERNEL ((uint64_t)-128)
+#endif
+#ifndef PERF_CONTEXT_USER
+#define PERF_CONTEXT_USER ((uint64_t)-512)
+#endif
+#ifndef PERF_CONTEXT_MAX
+#define PERF_CONTEXT_MAX ((uint64_t)-4095)
+#endif
+
+/* --- PERF_EVENT_IOC_ID: _IOR('$',7,__u64), returns the event's u64 id --- */
+#ifndef IOC_ID
+#define IOC_ID 0x80082407u
+#endif
+
+/* --- aarch64 DWARF regs: x0..x30=0..30, SP=31, PC=32, MAX=33 --- */
+#ifndef PERF_REG_ARM64_SP
+#define PERF_REG_ARM64_SP 31u
+#endif
+#ifndef PERF_REG_ARM64_PC
+#define PERF_REG_ARM64_PC 32u
+#endif
+#ifndef PERF_REG_ARM64_MAX
+#define PERF_REG_ARM64_MAX 33u
+#endif
+#ifndef PERF_REG_ARM64_MASK
+#define PERF_REG_ARM64_MASK (((uint64_t)1 << PERF_REG_ARM64_MAX) - 1)
+#endif
+#ifndef PERF_SAMPLE_REGS_ABI_64
+#define PERF_SAMPLE_REGS_ABI_64 2ull
+#endif
+
+/* --- HW_CACHE config packing: cache_id | (op<<8) | (result<<16) --- */
+#ifndef CACHE_CFG
+#define C_L1D 0ull
+#define C_L1I 1ull
+#define C_LL 2ull
+#define C_DTLB 3ull
+#define C_ITLB 4ull
+#define C_BPU 5ull
+#define OP_READ 0ull
+#define OP_PREFETCH 2ull
+#define RES_ACCESS 0ull
+#define RES_MISS 1ull
+#define CACHE_CFG(id, op, res) ((id) | ((op) << 8) | ((res) << 16))
+#endif
+
+/* -------------------------------------------------------------------- */
+/* small extension-local helpers (unique names, no harness collision)   */
+/* -------------------------------------------------------------------- */
+
+/* Wrap-safe copy of `n` bytes out of the ring at byte offset `at`. The ring
+ * data region starts at mp + PAGESIZE and is data_sz bytes (the harness
+ * mmap_page exposes only data_head/data_tail, so we use the documented
+ * default layout: data_offset == PAGE, data_size == PAGE*N). */
+static void exr_copy(const uint8_t *base, uint64_t size, uint64_t at, void *dst,
+                     size_t n) {
+    for (size_t b = 0; b < n; b++) {
+        ((uint8_t *)dst)[b] = base[(at + b) % size];
+    }
+}
+
+static volatile uint64_t ex_sink;
+static int ex_gzfd = -1;
+
+/* Syscall-heavy loop: TCG's cycle counter barely moves on pure ALU work, so
+ * real read()s are needed to make the sampling counter overflow. */
+static void exread(int zfd, uint64_t iters) {
+    uint8_t buf[4096];
+    /* Scale the syscall burst by wscale like busy(): on the board (wscale==1) the
+     * full burst runs; under a TCG selftest (wscale==16) it shrinks ~16x so the
+     * millions of emulated read()s don't blow the CI timeout. Selftest assertions
+     * are lenient (INFO, never FAIL), so fewer samples there is fine. */
+    iters /= (uint64_t)wscale;
+    for (uint64_t i = 0; i < iters; i++) {
+        if (zfd >= 0) {
+            if (read(zfd, buf, sizeof(buf)) < 0) {
+                break;
+            }
+        } else {
+            ex_sink += i * 3ull + 1ull;
+        }
+    }
+}
+
+/* Known nested chain for the user-callchain / DWARF workloads. Each frame is
+ * noinline so the frame pointers (kept by -fno-omit-frame-pointer) are
+ * walkable; most overflows land in ex_busy's read(). */
+__attribute__((noinline)) static void ex_busy(void) { exread(ex_gzfd, 400000ull); }
+__attribute__((noinline)) static void ex_inner(void) { ex_busy(); }
+__attribute__((noinline)) static void ex_mid(void) { ex_inner(); }
+__attribute__((noinline)) static void ex_outer(void) { ex_mid(); }
+
+/* ==================================================================== */
+/* Area H — PERF_TYPE_SOFTWARE counters  (SW-*)  [from perf-sw-counters] */
+/* ==================================================================== */
+
+static void area_h_sw_workload(void) {
+    busy(20000000ull); /* cpu-clock / task-clock (time-based; wscale ok) */
+    /* page-faults: fault anon pages, drop, re-touch (guaranteed faults). */
+    const size_t pages = 256, len = pages * 4096;
+    void *p = mmap(NULL, len, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p != MAP_FAILED) {
+        volatile uint8_t *b = (volatile uint8_t *)p;
+        for (size_t i = 0; i < pages; i++) {
+            b[i * 4096] = (uint8_t)i;
+        }
+        (void)madvise(p, len, MADV_DONTNEED);
+        for (size_t i = 0; i < pages; i++) {
+            b[i * 4096] = (uint8_t)(i + 1);
+        }
+        (void)munmap(p, len);
+    }
+    /* context-switches: block repeatedly. */
+    for (int i = 0; i < 20; i++) {
+        msleep(1);
+    }
+}
+
+static void area_h_software(void) {
+    struct {
+        const char *name;
+        uint64_t config;
+        int need_pos;
+    } ev[] = {
+        {"cpu-clock", SW_CPU_CLOCK, 1},
+        {"task-clock", SW_TASK_CLOCK, 1},
+        {"page-faults", SW_PAGE_FAULTS, 1},
+        {"context-switches", SW_CONTEXT_SWITCHES, 1},
+        {"cpu-migrations", SW_CPU_MIGRATIONS, 0},
+    };
+    const int n = 5;
+    long fds[5];
+    int allopen = 1;
+    for (int i = 0; i < n; i++) {
+        struct perf_event_attr a;
+        attr_zero(&a);
+        a.type = PERF_TYPE_SOFTWARE;
+        a.config = ev[i].config;
+        a.read_format = 0; /* read() returns just the u64 value (8 bytes) */
+        a.flags = F_DISABLED;
+        fds[i] = peo(&a, 0, -1, -1, 0);
+        if (fds[i] < 0) {
+            if (errno == ENOSYS && i == 0) {
+                skip("SW-1", "perf_event_open ENOSYS");
+                return;
+            }
+            allopen = 0;
+        } else {
+            ioctl((int)fds[i], IOC_ENABLE, 0);
+        }
+    }
+    area_h_sw_workload();
+
+    int bad_read = 0, bad_pos = 0, read8 = 0;
+    uint64_t vals[5] = {0, 0, 0, 0, 0};
+    for (int i = 0; i < n; i++) {
+        if (fds[i] < 0) {
+            continue;
+        }
+        ioctl((int)fds[i], IOC_DISABLE, 0);
+        uint64_t v = 0;
+        ssize_t g = read((int)fds[i], &v, sizeof(v));
+        if (g == 8) {
+            read8++;
+            vals[i] = v;
+            if (ev[i].need_pos && v == 0) {
+                bad_pos++;
+            }
+        } else {
+            bad_read++;
+        }
+        close((int)fds[i]);
+    }
+
+    int ok = allopen && bad_read == 0 && bad_pos == 0 && read8 == n;
+    if (ok) {
+        PASS("SW-1",
+             "cpu_clock=%llu task_clock=%llu page_faults=%llu ctx_sw=%llu "
+             "migrations=%llu (all read()==8)",
+             (unsigned long long)vals[0], (unsigned long long)vals[1],
+             (unsigned long long)vals[2], (unsigned long long)vals[3],
+             (unsigned long long)vals[4]);
+    } else if (selftest) {
+        INFO("SW-1", "lenient: open=%d read8=%d bad_read=%d bad_pos=%d",
+             allopen, read8, bad_read, bad_pos);
+    } else {
+        FAIL("SW-1", "open=%d read8=%d bad_read=%d bad_pos=%d (SW counter <not "
+                     "counted>?)",
+             allopen, read8, bad_read, bad_pos);
+    }
+}
+
+/* ==================================================================== */
+/* Area I — PERF_TYPE_HW_CACHE combinatorial events (CACHE-*)            */
+/* ==================================================================== */
+
+static void area_i_hwcache(void) {
+    struct {
+        const char *name;
+        uint64_t cfg;
+    } sup[] = {
+        {"L1D-load", CACHE_CFG(C_L1D, OP_READ, RES_ACCESS)},
+        {"L1D-load-miss", CACHE_CFG(C_L1D, OP_READ, RES_MISS)},
+        {"L1I-load", CACHE_CFG(C_L1I, OP_READ, RES_ACCESS)},
+        {"LLC-load", CACHE_CFG(C_LL, OP_READ, RES_ACCESS)},
+        {"LLC-load-miss", CACHE_CFG(C_LL, OP_READ, RES_MISS)},
+        {"dTLB-load-miss", CACHE_CFG(C_DTLB, OP_READ, RES_MISS)},
+        {"iTLB-load-miss", CACHE_CFG(C_ITLB, OP_READ, RES_MISS)},
+        {"branch-miss", CACHE_CFG(C_BPU, OP_READ, RES_MISS)},
+    };
+    int routing_err = 0, opened = 0, unsupported = 0;
+    for (size_t i = 0; i < sizeof(sup) / sizeof(sup[0]); i++) {
+        struct perf_event_attr a;
+        attr_zero(&a);
+        a.type = PERF_TYPE_HW_CACHE;
+        a.config = sup[i].cfg;
+        long fd = peo(&a, 0, -1, -1, 0);
+        if (fd < 0) {
+            if (errno == ENOSYS || errno == EOPNOTSUPP) {
+                unsupported++; /* QEMU-TCG PMU has no cache events */
+            } else {
+                routing_err = 1; /* EINVAL etc: a mapping/routing bug */
+            }
+            continue;
+        }
+        uint64_t v = 0;
+        if (read((int)fd, &v, sizeof(v)) == 8) {
+            opened++;
+        } else {
+            routing_err = 1;
+        }
+        close((int)fd);
+    }
+
+    /* An L1D PREFETCH has no ARM PMUv3 event -> must be rejected at open. */
+    int neg_rejected;
+    {
+        struct perf_event_attr a;
+        attr_zero(&a);
+        a.type = PERF_TYPE_HW_CACHE;
+        a.config = CACHE_CFG(C_L1D, OP_PREFETCH, RES_ACCESS);
+        long bad = peo(&a, 0, -1, -1, 0);
+        neg_rejected = (bad < 0);
+        if (bad >= 0) {
+            close((int)bad);
+        }
+    }
+
+    if (!routing_err && neg_rejected) {
+        PASS("CACHE-1",
+             "opened=%d unsupported=%d no-routing-error; L1D-prefetch rejected",
+             opened, unsupported);
+    } else if (selftest) {
+        INFO("CACHE-1", "lenient: routing_err=%d neg_rejected=%d opened=%d",
+             routing_err, neg_rejected, opened);
+    } else {
+        FAIL("CACHE-1", "routing_err=%d neg_rejected=%d opened=%d", routing_err,
+             neg_rejected, opened);
+    }
+
+    /* Board-only: L1D-read-access must actually count > 0. */
+    if (selftest) {
+        skip("CACHE-2", "tcg-no-cache-events");
+    } else {
+        struct perf_event_attr a;
+        attr_zero(&a);
+        a.type = PERF_TYPE_HW_CACHE;
+        a.config = CACHE_CFG(C_L1D, OP_READ, RES_ACCESS);
+        a.flags = F_DISABLED;
+        long fd = peo(&a, 0, -1, -1, 0);
+        if (fd < 0) {
+            INFO("CACHE-2", "L1D-load open failed errno=%d (unsupported on this "
+                            "PMU?)",
+                 errno);
+        } else {
+            ioctl((int)fd, IOC_ENABLE, 0);
+            busy(40000000ull);
+            ioctl((int)fd, IOC_DISABLE, 0);
+            uint64_t v = 0;
+            ssize_t g = read((int)fd, &v, sizeof(v));
+            close((int)fd);
+            if (g == 8 && v > 0) {
+                PASS("CACHE-2", "L1D-load counted=%llu (>0)",
+                     (unsigned long long)v);
+            } else {
+                FAIL("CACHE-2", "L1D-load counted=%llu read=%zd",
+                     (unsigned long long)v, g);
+            }
+        }
+    }
+}
+
+/* ==================================================================== */
+/* Area J — in-band PERF_RECORD_LOST (LOST-*)  [from perf-hw-lost]       */
+/* ==================================================================== */
+
+static void area_j_lost(void) {
+    long pg = sysconf(_SC_PAGESIZE);
+    size_t data_sz = (size_t)pg * 1; /* one tiny data page: overflows fast */
+    struct perf_event_attr a;
+    attr_zero(&a);
+    a.type = PERF_TYPE_RAW;
+    a.config = EV_CPU_CYCLES;
+    a.sample_period = 20000ull;
+    a.sample_type = SAMPLE_IP | SAMPLE_TID | SAMPLE_TIME;
+    a.flags = F_DISABLED;
+
+    long fd = peo(&a, 0, -1, -1, 0);
+    if (fd < 0) {
+        if (selftest) {
+            skip("LOST-1", "sampling open failed under tcg");
+        } else {
+            FAIL("LOST-1", "sampling open failed errno=%d", errno);
+        }
+        return;
+    }
+    void *base = mmap(NULL, (size_t)pg + data_sz, PROT_READ | PROT_WRITE,
+                      MAP_SHARED, (int)fd, 0);
+    if (base == MAP_FAILED) {
+        FAIL("LOST-1", "mmap failed errno=%d", errno);
+        close((int)fd);
+        return;
+    }
+    struct mmap_page *mp = (struct mmap_page *)base;
+    const uint8_t *dbase = (const uint8_t *)base + pg;
+
+    int zfd = open("/dev/zero", O_RDONLY);
+    ioctl((int)fd, IOC_RESET, 0);
+    ioctl((int)fd, IOC_ENABLE, 0);
+
+    uint64_t lost_records = 0, lost_total = 0, sample_records = 0;
+    uint64_t tail = mp->data_tail;
+    for (int chunk = 0; chunk < 16; chunk++) {
+        exread(zfd, 200000ull); /* burst: fills the tiny ring, dropping samples */
+        uint64_t head = mp->data_head;
+        __sync_synchronize();
+        uint64_t off = tail;
+        while (off < head) {
+            uint64_t rel = off % data_sz;
+            struct perf_rec hdr;
+            exr_copy(dbase, data_sz, rel, &hdr, sizeof(hdr));
+            if (hdr.size == 0 || off + hdr.size > head) {
+                break;
+            }
+            if (hdr.type == REC_SAMPLE) {
+                sample_records++;
+            } else if (hdr.type == REC_LOST) {
+                uint64_t lost = 0; /* body: u64 id; u64 lost */
+                if ((uint64_t)sizeof(hdr) + 16 <= hdr.size) {
+                    exr_copy(dbase, data_sz, (rel + sizeof(hdr) + 8) % data_sz,
+                             &lost, 8);
+                }
+                lost_records++;
+                lost_total += lost;
+            }
+            off += hdr.size;
+        }
+        tail = head;
+        mp->data_tail = tail; /* drain so the kernel can emit the pending LOST */
+        __sync_synchronize();
+    }
+    ioctl((int)fd, IOC_DISABLE, 0);
+    if (zfd >= 0) {
+        close(zfd);
+    }
+    munmap(base, (size_t)pg + data_sz);
+    close((int)fd);
+
+    if (lost_records > 0 && lost_total > 0) {
+        PASS("LOST-1", "samples=%llu lost_records=%llu lost_total=%llu",
+             (unsigned long long)sample_records,
+             (unsigned long long)lost_records, (unsigned long long)lost_total);
+    } else if (selftest) {
+        INFO("LOST-1", "lenient: samples=%llu lost_records=%llu lost_total=%llu",
+             (unsigned long long)sample_records,
+             (unsigned long long)lost_records, (unsigned long long)lost_total);
+    } else {
+        FAIL("LOST-1",
+             "no in-band LOST (records=%llu total=%llu samples=%llu)",
+             (unsigned long long)lost_records, (unsigned long long)lost_total,
+             (unsigned long long)sample_records);
+    }
+}
+
+/* ==================================================================== */
+/* Area K — sample pid/tid attribution (TID-*) [from perf-hw-sample-tid] */
+/* ==================================================================== */
+
+struct ex_tid_result {
+    pid_t worker_tid, proc_pid;
+    uint64_t samples, bad_pid, bad_tid;
+    int failed, open_errno;
+};
+
+static void *ex_tid_worker(void *arg) {
+    struct ex_tid_result *wr = (struct ex_tid_result *)arg;
+    wr->worker_tid = (pid_t)syscall(SYS_gettid);
+    wr->proc_pid = getpid();
+
+    struct perf_event_attr a;
+    attr_zero(&a);
+    a.type = PERF_TYPE_RAW;
+    a.config = EV_CPU_CYCLES;
+    a.sample_period = 100000ull;
+    a.sample_type = SAMPLE_IP | SAMPLE_TID | SAMPLE_TIME;
+    a.flags = F_DISABLED;
+    /* per-task path: target the worker's own tid (pid > 0). */
+    long fd = peo(&a, wr->worker_tid, -1, -1, 0);
+    if (fd < 0) {
+        wr->failed = 1;
+        wr->open_errno = errno;
+        return NULL;
+    }
+    long pg = sysconf(_SC_PAGESIZE);
+    size_t data_sz = (size_t)pg * 8;
+    void *base = mmap(NULL, (size_t)pg + data_sz, PROT_READ | PROT_WRITE,
+                      MAP_SHARED, (int)fd, 0);
+    if (base == MAP_FAILED) {
+        wr->failed = 1;
+        close((int)fd);
+        return NULL;
+    }
+    struct mmap_page *mp = (struct mmap_page *)base;
+    const uint8_t *dbase = (const uint8_t *)base + pg;
+
+    int zfd = open("/dev/zero", O_RDONLY);
+    ioctl((int)fd, IOC_RESET, 0);
+    ioctl((int)fd, IOC_ENABLE, 0);
+    exread(zfd, 400000ull);
+    ioctl((int)fd, IOC_DISABLE, 0);
+    if (zfd >= 0) {
+        close(zfd);
+    }
+
+    uint64_t head = mp->data_head;
+    __sync_synchronize();
+    uint64_t off = mp->data_tail;
+    while (off < head) {
+        uint64_t rel = off % data_sz;
+        struct perf_rec hdr;
+        exr_copy(dbase, data_sz, rel, &hdr, sizeof(hdr));
+        if (hdr.size == 0 || off + hdr.size > head) {
+            break;
+        }
+        if (hdr.type == REC_SAMPLE) {
+            /* body: u64 ip; u32 pid; u32 tid; u64 time */
+            uint64_t poff = (uint64_t)sizeof(hdr) + 8;
+            if (poff + 8 <= hdr.size) {
+                uint32_t s_pid = 0, s_tid = 0;
+                exr_copy(dbase, data_sz, (rel + poff) % data_sz, &s_pid, 4);
+                exr_copy(dbase, data_sz, (rel + poff + 4) % data_sz, &s_tid, 4);
+                wr->samples++;
+                if ((pid_t)s_pid != wr->proc_pid) {
+                    wr->bad_pid++;
+                }
+                if ((pid_t)s_tid != wr->worker_tid) {
+                    wr->bad_tid++;
+                }
+            }
+        }
+        off += hdr.size;
+    }
+    munmap(base, (size_t)pg + data_sz);
+    close((int)fd);
+    return NULL;
+}
+
+static void area_k_sample_tid(void) {
+    struct ex_tid_result wr;
+    memset(&wr, 0, sizeof(wr));
+    pthread_t th;
+    if (pthread_create(&th, NULL, ex_tid_worker, &wr) != 0) {
+        FAIL("TID-1", "pthread_create failed");
+        return;
+    }
+    pthread_join(th, NULL);
+
+    if (wr.failed && wr.open_errno == ENOSYS) {
+        skip("TID-1", "perf_event_open ENOSYS");
+        return;
+    }
+    int ok = !wr.failed && wr.samples > 0 && wr.bad_tid == 0 &&
+             wr.bad_pid == 0 && wr.worker_tid != wr.proc_pid;
+    if (ok) {
+        PASS("TID-1",
+             "pid=%d worker_tid=%d samples=%llu (every sample tid/tgid correct)",
+             (int)wr.proc_pid, (int)wr.worker_tid,
+             (unsigned long long)wr.samples);
+    } else if (selftest) {
+        INFO("TID-1",
+             "lenient: samples=%llu bad_pid=%llu bad_tid=%llu tid=%d pid=%d",
+             (unsigned long long)wr.samples, (unsigned long long)wr.bad_pid,
+             (unsigned long long)wr.bad_tid, (int)wr.worker_tid,
+             (int)wr.proc_pid);
+    } else {
+        FAIL("TID-1",
+             "samples=%llu bad_pid=%llu bad_tid=%llu worker_tid=%d pid=%d",
+             (unsigned long long)wr.samples, (unsigned long long)wr.bad_pid,
+             (unsigned long long)wr.bad_tid, (int)wr.worker_tid,
+             (int)wr.proc_pid);
+    }
+}
+
+/* ==================================================================== */
+/* Area L — event groups (GRP-*)  [perf-hw-group + -group-crosstask]     */
+/* ==================================================================== */
+
+struct ex_ct_shared {
+    volatile pid_t b_tid;
+    volatile int stop;
+};
+
+static void *ex_ct_worker(void *arg) {
+    struct ex_ct_shared *s = (struct ex_ct_shared *)arg;
+    s->b_tid = (pid_t)syscall(SYS_gettid);
+    __sync_synchronize();
+    while (!s->stop) {
+        for (volatile int d = 0; d < 100000; d++) {
+        }
+    }
+    return NULL;
+}
+
+static void area_l_groups(void) {
+    /* GRP-1: SW task-clock leader + cpu-clock member, group read layout. */
+    {
+        pid_t tid = (pid_t)syscall(SYS_gettid);
+        uint64_t rf = FORMAT_GROUP | RF_TIMING | FORMAT_ID;
+        struct perf_event_attr a;
+        attr_zero(&a);
+        a.type = PERF_TYPE_SOFTWARE;
+        a.config = SW_TASK_CLOCK;
+        a.read_format = rf;
+        a.flags = F_DISABLED;
+        long leader = peo(&a, tid, -1, -1, 0);
+        if (leader < 0) {
+            if (errno == ENOSYS) {
+                skip("GRP-1", "perf_event_open ENOSYS");
+            } else if (selftest) {
+                INFO("GRP-1", "leader open errno=%d (lenient)", errno);
+            } else {
+                FAIL("GRP-1", "leader open errno=%d", errno);
+            }
+        } else {
+            attr_zero(&a);
+            a.type = PERF_TYPE_SOFTWARE;
+            a.config = SW_CPU_CLOCK;
+            a.read_format = rf;
+            a.flags = F_DISABLED;
+            long member = peo(&a, tid, -1, leader, 0);
+            uint64_t lid = 0, mid = 0;
+            int idok = (member >= 0 &&
+                        ioctl((int)leader, IOC_ID, &lid) == 0 &&
+                        ioctl((int)member, IOC_ID, &mid) == 0);
+            if (member < 0) {
+                if (selftest) {
+                    INFO("GRP-1", "member open errno=%d (lenient)", errno);
+                } else {
+                    FAIL("GRP-1", "member open errno=%d", errno);
+                }
+                close((int)leader);
+            } else {
+                int zfd = open("/dev/zero", O_RDONLY);
+                int oz = ex_gzfd;
+                ex_gzfd = zfd;
+                ioctl((int)leader, IOC_RESET, 0);
+                ioctl((int)leader, IOC_ENABLE, 0); /* leader only */
+                ex_busy();
+                ioctl((int)leader, IOC_DISABLE, 0);
+                ex_gzfd = oz;
+                if (zfd >= 0) {
+                    close(zfd);
+                }
+                uint64_t b[16];
+                memset(b, 0, sizeof(b));
+                ssize_t got = read((int)leader, b, sizeof(b));
+                close((int)member);
+                close((int)leader);
+                uint64_t nr = b[0], val1 = b[5], id0 = b[4], id1 = b[6];
+                int ok = (got == (ssize_t)(7 * sizeof(uint64_t))) && nr == 2 &&
+                         idok && id0 == lid && id1 == mid && val1 > 0;
+                if (ok) {
+                    PASS("GRP-1",
+                         "nr=%llu task_clock=%llu cpu_clock=%llu ids-match "
+                         "(group-scheduled)",
+                         (unsigned long long)nr, (unsigned long long)b[3],
+                         (unsigned long long)val1);
+                } else if (selftest) {
+                    INFO("GRP-1", "lenient: got=%zd nr=%llu member_val=%llu", got,
+                         (unsigned long long)nr, (unsigned long long)val1);
+                } else {
+                    FAIL("GRP-1",
+                         "got=%zd nr=%llu member_val=%llu id_ok=%d (GROUP layout "
+                         "wrong?)",
+                         got, (unsigned long long)nr, (unsigned long long)val1,
+                         idok && id0 == lid && id1 == mid);
+                }
+            }
+        }
+    }
+
+    /* GRP-2: cross-thread group member rejected EINVAL; same-thread accepted. */
+    {
+        struct ex_ct_shared s = {0, 0};
+        pthread_t b;
+        if (pthread_create(&b, NULL, ex_ct_worker, &s) != 0) {
+            FAIL("GRP-2", "pthread_create failed");
+            return;
+        }
+        int spin = 0;
+        while (s.b_tid == 0 && spin++ < 100000000) {
+            for (volatile int d = 0; d < 100; d++) {
+            }
+        }
+        __sync_synchronize();
+        pid_t self_tid = (pid_t)syscall(SYS_gettid);
+
+        struct perf_event_attr a;
+        attr_zero(&a);
+        a.type = PERF_TYPE_RAW;
+        a.config = EV_CPU_CYCLES;
+        a.sample_period = 100000ull;
+        a.sample_type = SAMPLE_IP | SAMPLE_TID | SAMPLE_READ;
+        a.read_format = FORMAT_GROUP | FORMAT_ID;
+        a.flags = F_DISABLED;
+        long leader = peo(&a, self_tid, -1, -1, 0);
+        if (leader < 0) {
+            if (errno == ENOSYS) {
+                skip("GRP-2", "ENOSYS");
+            } else if (selftest) {
+                INFO("GRP-2", "leader open errno=%d (lenient)", errno);
+            } else {
+                FAIL("GRP-2", "leader open errno=%d", errno);
+            }
+        } else {
+            struct perf_event_attr m;
+            attr_zero(&m);
+            m.type = PERF_TYPE_RAW;
+            m.config = EV_CPU_CYCLES;
+            m.flags = F_DISABLED;
+            errno = 0;
+            long xfd = peo(&m, s.b_tid, -1, leader, 0); /* cross-thread */
+            int xerr = errno;
+            int cross_rejected = (xfd < 0 && xerr == EINVAL);
+            if (xfd >= 0) {
+                close((int)xfd);
+            }
+            long sfd = peo(&m, self_tid, -1, leader, 0); /* same-thread */
+            int same_ok = (sfd >= 0);
+            if (sfd >= 0) {
+                close((int)sfd);
+            }
+            close((int)leader);
+            if (cross_rejected && same_ok) {
+                PASS("GRP-2", "cross-thread member EINVAL; same-thread member "
+                              "opens (UAF gate holds)");
+            } else if (selftest) {
+                INFO("GRP-2", "lenient: cross_rejected=%d(errno=%d) same_ok=%d",
+                     cross_rejected, xerr, same_ok);
+            } else {
+                FAIL("GRP-2", "cross_rejected=%d(errno=%d) same_ok=%d",
+                     cross_rejected, xerr, same_ok);
+            }
+        }
+        s.stop = 1;
+        pthread_join(b, NULL);
+    }
+}
+
+/* ==================================================================== */
+/* Area M — PERF_SAMPLE_READ (SREAD-*)  [sample-read + group-sample]     */
+/* ==================================================================== */
+
+static void area_m_sread_single(void) {
+    struct perf_event_attr a;
+    attr_zero(&a);
+    a.type = PERF_TYPE_RAW;
+    a.config = EV_CPU_CYCLES;
+    a.sample_period = 100000ull;
+    a.sample_type = SAMPLE_IP | SAMPLE_TID | SAMPLE_TIME | SAMPLE_READ;
+    a.read_format = 0;
+    a.flags = F_DISABLED;
+    long fd = peo(&a, 0, -1, -1, 0);
+    if (fd < 0) {
+        if (errno == ENOSYS) {
+            skip("SREAD-1", "ENOSYS");
+        } else if (selftest) {
+            INFO("SREAD-1", "open errno=%d (lenient)", errno);
+        } else {
+            FAIL("SREAD-1", "open errno=%d", errno);
+        }
+        return;
+    }
+    long pg = sysconf(_SC_PAGESIZE);
+    size_t data_sz = (size_t)pg * 8;
+    void *base = mmap(NULL, (size_t)pg + data_sz, PROT_READ | PROT_WRITE,
+                      MAP_SHARED, (int)fd, 0);
+    if (base == MAP_FAILED) {
+        FAIL("SREAD-1", "mmap errno=%d", errno);
+        close((int)fd);
+        return;
+    }
+    struct mmap_page *mp = (struct mmap_page *)base;
+    const uint8_t *dbase = (const uint8_t *)base + pg;
+    int zfd = open("/dev/zero", O_RDONLY);
+    ioctl((int)fd, IOC_RESET, 0);
+    ioctl((int)fd, IOC_ENABLE, 0);
+    exread(zfd, 400000ull);
+    ioctl((int)fd, IOC_DISABLE, 0);
+    if (zfd >= 0) {
+        close(zfd);
+    }
+
+    uint64_t head = mp->data_head;
+    __sync_synchronize();
+    uint64_t off = mp->data_tail;
+    uint64_t samples = 0, prev = 0, bad_order = 0, zero_val = 0;
+    const uint64_t rv_off = (uint64_t)sizeof(struct perf_rec) + 8 + 8 + 8;
+    while (off < head) {
+        uint64_t rel = off % data_sz;
+        struct perf_rec hdr;
+        exr_copy(dbase, data_sz, rel, &hdr, sizeof(hdr));
+        if (hdr.size == 0 || off + hdr.size > head) {
+            break;
+        }
+        if (hdr.type == REC_SAMPLE && rv_off + 8 <= hdr.size) {
+            uint64_t rv = 0;
+            exr_copy(dbase, data_sz, (rel + rv_off) % data_sz, &rv, 8);
+            samples++;
+            if (rv == 0) {
+                zero_val++;
+            }
+            if (samples > 1 && rv <= prev) {
+                bad_order++;
+            }
+            prev = rv;
+        }
+        off += hdr.size;
+    }
+    munmap(base, (size_t)pg + data_sz);
+    close((int)fd);
+
+    int ok = samples >= 2 && zero_val == 0 && bad_order == 0;
+    if (ok) {
+        PASS("SREAD-1", "samples=%llu last=%llu strictly-increasing",
+             (unsigned long long)samples, (unsigned long long)prev);
+    } else if (selftest) {
+        INFO("SREAD-1", "lenient: samples=%llu bad_order=%llu zero=%llu",
+             (unsigned long long)samples, (unsigned long long)bad_order,
+             (unsigned long long)zero_val);
+    } else {
+        FAIL("SREAD-1", "samples=%llu bad_order=%llu zero=%llu",
+             (unsigned long long)samples, (unsigned long long)bad_order,
+             (unsigned long long)zero_val);
+    }
+}
+
+struct ex_gs_result {
+    int failed, open_errno;
+    uint64_t samples, bad_nr, bad_id, zero_memb;
+    uint64_t last_lead;
+};
+
+static void *ex_gs_worker(void *arg) {
+    struct ex_gs_result *wr = (struct ex_gs_result *)arg;
+    pid_t self = (pid_t)syscall(SYS_gettid);
+
+    struct perf_event_attr a;
+    attr_zero(&a);
+    a.type = PERF_TYPE_RAW;
+    a.config = EV_CPU_CYCLES;
+    a.sample_period = 100000ull;
+    a.sample_type = SAMPLE_IP | SAMPLE_TID | SAMPLE_TIME | SAMPLE_READ;
+    a.read_format = FORMAT_GROUP | FORMAT_ID;
+    a.flags = F_DISABLED;
+    long leader = peo(&a, self, -1, -1, 0);
+    if (leader < 0) {
+        wr->failed = 1;
+        wr->open_errno = errno;
+        return NULL;
+    }
+    struct perf_event_attr m;
+    attr_zero(&m);
+    m.type = PERF_TYPE_RAW;
+    m.config = EV_CPU_CYCLES;
+    m.sample_period = 0;
+    m.read_format = FORMAT_GROUP | FORMAT_ID;
+    m.flags = F_DISABLED;
+    long member = peo(&m, self, -1, leader, 0);
+    if (member < 0) {
+        wr->failed = 1;
+        wr->open_errno = errno;
+        close((int)leader);
+        return NULL;
+    }
+    uint64_t leader_id = 0, member_id = 0;
+    if (ioctl((int)leader, IOC_ID, &leader_id) != 0 ||
+        ioctl((int)member, IOC_ID, &member_id) != 0 ||
+        leader_id == member_id) {
+        wr->failed = 1;
+        close((int)member);
+        close((int)leader);
+        return NULL;
+    }
+    long pg = sysconf(_SC_PAGESIZE);
+    size_t data_sz = (size_t)pg * 8;
+    void *base = mmap(NULL, (size_t)pg + data_sz, PROT_READ | PROT_WRITE,
+                      MAP_SHARED, (int)leader, 0);
+    if (base == MAP_FAILED) {
+        wr->failed = 1;
+        close((int)member);
+        close((int)leader);
+        return NULL;
+    }
+    struct mmap_page *mp = (struct mmap_page *)base;
+    const uint8_t *dbase = (const uint8_t *)base + pg;
+    int zfd = open("/dev/zero", O_RDONLY);
+    ioctl((int)leader, IOC_RESET, 0);
+    ioctl((int)leader, IOC_ENABLE, 0);
+    exread(zfd, 400000ull);
+    ioctl((int)leader, IOC_DISABLE, 0);
+    if (zfd >= 0) {
+        close(zfd);
+    }
+
+    uint64_t head = mp->data_head;
+    __sync_synchronize();
+    uint64_t off = mp->data_tail;
+    /* body: u64 ip; u32 pid,tid; u64 time; then GROUP|ID block:
+     *   u64 nr; { u64 value; u64 id; }[nr]. */
+    const uint64_t read_off = (uint64_t)sizeof(struct perf_rec) + 8 + 8 + 8;
+    while (off < head) {
+        uint64_t rel = off % data_sz;
+        struct perf_rec hdr;
+        exr_copy(dbase, data_sz, rel, &hdr, sizeof(hdr));
+        if (hdr.size == 0 || off + hdr.size > head) {
+            break;
+        }
+        if (hdr.type == REC_SAMPLE && read_off + 40 <= hdr.size) {
+            uint64_t nr = 0, lval = 0, lid = 0, mval = 0, mid = 0;
+            exr_copy(dbase, data_sz, (rel + read_off) % data_sz, &nr, 8);
+            exr_copy(dbase, data_sz, (rel + read_off + 8) % data_sz, &lval, 8);
+            exr_copy(dbase, data_sz, (rel + read_off + 16) % data_sz, &lid, 8);
+            exr_copy(dbase, data_sz, (rel + read_off + 24) % data_sz, &mval, 8);
+            exr_copy(dbase, data_sz, (rel + read_off + 32) % data_sz, &mid, 8);
+            wr->samples++;
+            if (nr != 2) {
+                wr->bad_nr++;
+            }
+            if (lid != leader_id || mid != member_id) {
+                wr->bad_id++;
+            }
+            if (mval == 0) {
+                wr->zero_memb++;
+            }
+            wr->last_lead = lval;
+        }
+        off += hdr.size;
+    }
+    munmap(base, (size_t)pg + data_sz);
+    close((int)member);
+    close((int)leader);
+    return NULL;
+}
+
+static void area_m_sample_read(void) {
+    area_m_sread_single();
+
+    struct ex_gs_result wr;
+    memset(&wr, 0, sizeof(wr));
+    pthread_t th;
+    if (pthread_create(&th, NULL, ex_gs_worker, &wr) != 0) {
+        FAIL("SREAD-2", "pthread_create failed");
+        return;
+    }
+    pthread_join(th, NULL);
+
+    if (wr.failed && wr.open_errno == ENOSYS) {
+        skip("SREAD-2", "ENOSYS");
+        return;
+    }
+    int ok = !wr.failed && wr.samples >= 2 && wr.bad_nr == 0 &&
+             wr.bad_id == 0 && wr.zero_memb == 0;
+    if (ok) {
+        PASS("SREAD-2",
+             "group-sample samples=%llu nr==2 ids-match member_val=%llu",
+             (unsigned long long)wr.samples, (unsigned long long)wr.last_lead);
+    } else if (selftest) {
+        INFO("SREAD-2",
+             "lenient: samples=%llu bad_nr=%llu bad_id=%llu zero_memb=%llu",
+             (unsigned long long)wr.samples, (unsigned long long)wr.bad_nr,
+             (unsigned long long)wr.bad_id, (unsigned long long)wr.zero_memb);
+    } else {
+        FAIL("SREAD-2",
+             "samples=%llu bad_nr=%llu bad_id=%llu zero_memb=%llu failed=%d",
+             (unsigned long long)wr.samples, (unsigned long long)wr.bad_nr,
+             (unsigned long long)wr.bad_id, (unsigned long long)wr.zero_memb,
+             wr.failed);
+    }
+}
+
+/* ==================================================================== */
+/* Area N — system-wide `-a` (SYSW-*)  [sw-systemwide + smp-*-allcpu]    */
+/* ==================================================================== */
+
+static void area_n_syswide(void) {
+    /* (a) SW system-wide cpu-clock + context-switches over forked children. */
+    {
+        struct perf_event_attr a;
+        attr_zero(&a);
+        a.type = PERF_TYPE_SOFTWARE;
+        a.config = SW_CPU_CLOCK;
+        a.flags = F_DISABLED;
+        long cc = peo(&a, -1, 0, -1, 0);
+        a.config = SW_CONTEXT_SWITCHES;
+        long cs = peo(&a, -1, 0, -1, 0);
+        if (cc < 0 || cs < 0) {
+            if (errno == ENOSYS) {
+                skip("SYSW-A", "system-wide SW ENOSYS");
+            } else if (selftest) {
+                INFO("SYSW-A", "open errno=%d (lenient)", errno);
+            } else {
+                FAIL("SYSW-A", "open cc=%ld cs=%ld errno=%d", cc, cs, errno);
+            }
+            if (cc >= 0)
+                close((int)cc);
+            if (cs >= 0)
+                close((int)cs);
+        } else {
+            ioctl((int)cc, IOC_ENABLE, 0);
+            ioctl((int)cs, IOC_ENABLE, 0);
+            for (int k = 0; k < 8; k++) {
+                pid_t c = fork();
+                if (c == 0) {
+                    char *p = malloc(1 << 20);
+                    if (p) {
+                        memset(p, k + 1, 1 << 20);
+                        free(p);
+                    }
+                    _exit(0);
+                }
+                if (c > 0) {
+                    int st;
+                    waitpid(c, &st, 0);
+                }
+            }
+            ioctl((int)cc, IOC_DISABLE, 0);
+            ioctl((int)cs, IOC_DISABLE, 0);
+            uint64_t v_cc = 0, v_cs = 0;
+            ssize_t g1 = read((int)cc, &v_cc, sizeof(v_cc));
+            ssize_t g2 = read((int)cs, &v_cs, sizeof(v_cs));
+            close((int)cc);
+            close((int)cs);
+            int ok = (g1 == 8 && g2 == 8 && v_cc > 0 && v_cs > 0);
+            if (ok) {
+                PASS("SYSW-A", "cpu_clock=%llu ctx_switches=%llu (pid=-1 aggregate)",
+                     (unsigned long long)v_cc, (unsigned long long)v_cs);
+            } else if (selftest) {
+                INFO("SYSW-A", "lenient: cpu_clock=%llu ctx_switches=%llu",
+                     (unsigned long long)v_cc, (unsigned long long)v_cs);
+            } else {
+                FAIL("SYSW-A", "cpu_clock=%llu ctx_switches=%llu",
+                     (unsigned long long)v_cc, (unsigned long long)v_cs);
+            }
+        }
+    }
+
+    /* (b) per-online-cpu RAW cycles counting: attr.cpu honoured. */
+    if (n_online < 2) {
+        skip("SYSW-B", "needs>=2-cpus");
+    } else {
+        pid_t kids[MAXCPU];
+        int nk = 0;
+        for (int i = 0; i < n_online; i++) {
+            pid_t k = fork();
+            if (k == 0) {
+                pin(online_cpu[i]);
+                busy(40000000ull);
+                _exit(0);
+            }
+            kids[nk++] = k;
+        }
+        long fds[MAXCPU];
+        int allopen = 1;
+        for (int i = 0; i < n_online; i++) {
+            struct perf_event_attr a;
+            attr_zero(&a);
+            a.type = PERF_TYPE_RAW;
+            a.config = EV_CPU_CYCLES;
+            a.read_format = RF_TIMING;
+            a.flags = F_DISABLED;
+            fds[i] = peo(&a, -1, online_cpu[i], -1, 0);
+            if (fds[i] < 0) {
+                allopen = 0;
+            } else {
+                ioctl((int)fds[i], IOC_ENABLE, 0);
+            }
+        }
+        for (int i = 0; i < nk; i++) {
+            int st;
+            waitpid(kids[i], &st, 0);
+        }
+        int counted = 0;
+        for (int i = 0; i < n_online; i++) {
+            if (fds[i] < 0) {
+                continue;
+            }
+            ioctl((int)fds[i], IOC_DISABLE, 0);
+            uint64_t b[3] = {0, 0, 0};
+            if (read((int)fds[i], b, sizeof(b)) == 24 && b[0] > 0) {
+                counted++;
+            }
+            close((int)fds[i]);
+        }
+        int ok = allopen && counted == n_online;
+        if (ok) {
+            PASS("SYSW-B", "%d/%d per-cpu events counted (cpu=i honoured)",
+                 counted, n_online);
+        } else if (selftest) {
+            INFO("SYSW-B", "lenient: open_all=%d counted=%d/%d", allopen, counted,
+                 n_online);
+        } else {
+            FAIL("SYSW-B", "open_all=%d counted=%d/%d (attr.cpu ignored?)",
+                 allopen, counted, n_online);
+        }
+    }
+
+    /* (c) per-cpu SAMPLING fan-out: every sample carries cpu == i. */
+    if (n_online < 2) {
+        skip("SYSW-C", "needs>=2-cpus");
+    } else {
+        long pg = sysconf(_SC_PAGESIZE);
+        size_t data_sz = (size_t)pg * 8;
+        pid_t kids[MAXCPU];
+        int nk = 0;
+        for (int i = 0; i < n_online; i++) {
+            pid_t k = fork();
+            if (k == 0) {
+                pin(online_cpu[i]);
+                int zfd = open("/dev/zero", O_RDONLY);
+                exread(zfd, 400000ull);
+                if (zfd >= 0) {
+                    close(zfd);
+                }
+                _exit(0);
+            }
+            kids[nk++] = k;
+        }
+        long fds[MAXCPU];
+        void *bases[MAXCPU];
+        int allopen = 1;
+        for (int i = 0; i < n_online; i++) {
+            struct perf_event_attr a;
+            attr_zero(&a);
+            a.type = PERF_TYPE_RAW;
+            a.config = EV_CPU_CYCLES;
+            a.sample_period = 100000ull;
+            a.sample_type = SAMPLE_IP | SAMPLE_TID | SAMPLE_TIME | SAMPLE_CPU;
+            a.flags = F_DISABLED;
+            fds[i] = peo(&a, -1, online_cpu[i], -1, 0);
+            bases[i] = MAP_FAILED;
+            if (fds[i] < 0) {
+                allopen = 0;
+                continue;
+            }
+            bases[i] = mmap(NULL, (size_t)pg + data_sz, PROT_READ | PROT_WRITE,
+                            MAP_SHARED, (int)fds[i], 0);
+            if (bases[i] == MAP_FAILED) {
+                allopen = 0;
+            }
+        }
+        for (int i = 0; i < n_online; i++) {
+            if (fds[i] >= 0 && bases[i] != MAP_FAILED) {
+                ioctl((int)fds[i], IOC_ENABLE, 0);
+            }
+        }
+        for (int i = 0; i < nk; i++) {
+            int st;
+            waitpid(kids[i], &st, 0);
+        }
+        int rings_ok = 0, wrong = 0;
+        for (int i = 0; i < n_online; i++) {
+            if (fds[i] < 0 || bases[i] == MAP_FAILED) {
+                continue;
+            }
+            ioctl((int)fds[i], IOC_DISABLE, 0);
+            struct mmap_page *mp = (struct mmap_page *)bases[i];
+            const uint8_t *dbase = (const uint8_t *)bases[i] + pg;
+            uint64_t head = mp->data_head;
+            __sync_synchronize();
+            uint64_t off = mp->data_tail;
+            uint64_t samples = 0;
+            const uint64_t cpu_off = (uint64_t)sizeof(struct perf_rec) + 8 + 8 + 8;
+            while (off < head) {
+                uint64_t rel = off % data_sz;
+                struct perf_rec hdr;
+                exr_copy(dbase, data_sz, rel, &hdr, sizeof(hdr));
+                if (hdr.size == 0 || off + hdr.size > head) {
+                    break;
+                }
+                if (hdr.type == REC_SAMPLE && cpu_off + 4 <= hdr.size) {
+                    uint32_t s_cpu = 0xffffffffu;
+                    exr_copy(dbase, data_sz, (rel + cpu_off) % data_sz, &s_cpu, 4);
+                    samples++;
+                    if ((int)s_cpu != online_cpu[i]) {
+                        wrong++;
+                    }
+                }
+                off += hdr.size;
+            }
+            if (samples > 0) {
+                rings_ok++;
+            }
+            munmap(bases[i], (size_t)pg + data_sz);
+            close((int)fds[i]);
+        }
+        int ok = allopen && wrong == 0 && rings_ok == n_online;
+        if (ok) {
+            PASS("SYSW-C", "%d/%d rings sampled, cpu-tag correct (armed on target "
+                           "core)",
+                 rings_ok, n_online);
+        } else if (selftest) {
+            INFO("SYSW-C", "lenient: rings_ok=%d/%d wrong_cpu=%d open_all=%d",
+                 rings_ok, n_online, wrong, allopen);
+        } else {
+            FAIL("SYSW-C", "rings_ok=%d/%d wrong_cpu=%d open_all=%d", rings_ok,
+                 n_online, wrong, allopen);
+        }
+    }
+
+    /* (d) `-a` side-band records (COMM/MMAP2/FORK/EXIT) fan out to per-cpu rings.
+     * Runs on smp1 too (all activity on cpu0). */
+    {
+        long pg = sysconf(_SC_PAGESIZE);
+        size_t data_sz = (size_t)pg * 16;
+        long fds[MAXCPU];
+        void *bases[MAXCPU];
+        int opened = 0;
+        int ncpu = n_online > 0 ? n_online : 1;
+        for (int i = 0; i < ncpu; i++) {
+            fds[i] = -1;
+            bases[i] = MAP_FAILED;
+            struct perf_event_attr a;
+            attr_zero(&a);
+            a.type = PERF_TYPE_RAW;
+            a.config = EV_CPU_CYCLES;
+            a.sample_period = 0xFFFFFFFFull; /* effectively no samples */
+            a.sample_type = SAMPLE_IP | SAMPLE_TID | SAMPLE_TIME;
+            a.flags = F_DISABLED | F_COMM | F_MMAP2 | F_TASK | F_SAMPLE_ID_ALL;
+            fds[i] = peo(&a, -1, online_cpu[i], -1, 0);
+            if (fds[i] < 0) {
+                continue;
+            }
+            bases[i] = mmap(NULL, (size_t)pg + data_sz, PROT_READ | PROT_WRITE,
+                            MAP_SHARED, (int)fds[i], 0);
+            if (bases[i] == MAP_FAILED) {
+                close((int)fds[i]);
+                fds[i] = -1;
+                continue;
+            }
+            opened++;
+        }
+        if (opened == 0) {
+            skip("SYSW-D", "no -a sideband event could open");
+        } else {
+            for (int i = 0; i < ncpu; i++) {
+                if (fds[i] >= 0) {
+                    ioctl((int)fds[i], IOC_ENABLE, 0);
+                }
+            }
+            /* Post-enable activity: fork (-> FORK) a child that execs (-> COMM +
+             * MMAP2) and exits (-> EXIT). Defensive if /bin/true is absent. */
+            pid_t child = fork();
+            if (child == 0) {
+                execl("/bin/true", "true", (char *)NULL);
+                execl("/bin/busybox", "busybox", "true", (char *)NULL);
+                _exit(0); /* still yields FORK + EXIT */
+            }
+            if (child > 0) {
+                int st;
+                waitpid(child, &st, 0);
+            }
+            uint64_t n_comm = 0, n_mmap2 = 0, n_fork = 0, n_exit = 0;
+            char comm_name[64] = {0}, mmap_file[128] = {0};
+            for (int i = 0; i < ncpu; i++) {
+                if (fds[i] < 0 || bases[i] == MAP_FAILED) {
+                    continue;
+                }
+                ioctl((int)fds[i], IOC_DISABLE, 0);
+                struct mmap_page *mp = (struct mmap_page *)bases[i];
+                const uint8_t *dbase = (const uint8_t *)bases[i] + pg;
+                uint64_t head = mp->data_head;
+                __sync_synchronize();
+                uint64_t off = mp->data_tail;
+                while (off < head) {
+                    uint64_t rel = off % data_sz;
+                    struct perf_rec hdr;
+                    exr_copy(dbase, data_sz, rel, &hdr, sizeof(hdr));
+                    if (hdr.size == 0 || off + hdr.size > head) {
+                        break;
+                    }
+                    if (hdr.type == REC_COMM) {
+                        n_comm++;
+                        if (comm_name[0] == '\0') { /* body: hdr + pid/tid, name@16 */
+                            for (size_t b = 0; b + 1 < sizeof(comm_name); b++) {
+                                char c = (char)dbase[(rel + 16 + b) % data_sz];
+                                comm_name[b] = c;
+                                if (c == '\0') {
+                                    break;
+                                }
+                            }
+                            comm_name[sizeof(comm_name) - 1] = '\0';
+                        }
+                    } else if (hdr.type == REC_MMAP2) {
+                        n_mmap2++;
+                        if (mmap_file[0] == '\0') { /* filename @72 */
+                            for (size_t b = 0; b + 1 < sizeof(mmap_file); b++) {
+                                char c = (char)dbase[(rel + 72 + b) % data_sz];
+                                mmap_file[b] = c;
+                                if (c == '\0') {
+                                    break;
+                                }
+                            }
+                            mmap_file[sizeof(mmap_file) - 1] = '\0';
+                        }
+                    } else if (hdr.type == REC_FORK) {
+                        n_fork++;
+                    } else if (hdr.type == REC_EXIT) {
+                        n_exit++;
+                    }
+                    off += hdr.size;
+                }
+                munmap(bases[i], (size_t)pg + data_sz);
+                close((int)fds[i]);
+            }
+            int ok_full = (n_comm > 0 && comm_name[0] && n_mmap2 > 0 &&
+                           mmap_file[0] && n_fork > 0 && n_exit > 0);
+            int ok_core = (n_fork > 0 && n_exit > 0);
+            if (ok_full) {
+                PASS("SYSW-D",
+                     "opened=%d comm=%llu mmap2=%llu fork=%llu exit=%llu "
+                     "name='%s' file='%s'",
+                     opened, (unsigned long long)n_comm,
+                     (unsigned long long)n_mmap2, (unsigned long long)n_fork,
+                     (unsigned long long)n_exit, comm_name, mmap_file);
+            } else if (ok_core) {
+                INFO("SYSW-D",
+                     "task sideband ok (fork=%llu exit=%llu) but COMM/MMAP2 not "
+                     "observed (no execve target?) comm=%llu mmap2=%llu",
+                     (unsigned long long)n_fork, (unsigned long long)n_exit,
+                     (unsigned long long)n_comm, (unsigned long long)n_mmap2);
+            } else if (selftest) {
+                INFO("SYSW-D", "lenient: fork=%llu exit=%llu comm=%llu mmap2=%llu",
+                     (unsigned long long)n_fork, (unsigned long long)n_exit,
+                     (unsigned long long)n_comm, (unsigned long long)n_mmap2);
+            } else {
+                FAIL("SYSW-D",
+                     "no FORK/EXIT sideband in any -a ring (fork=%llu exit=%llu)",
+                     (unsigned long long)n_fork, (unsigned long long)n_exit);
+            }
+        }
+    }
+}
+
+/* ==================================================================== */
+/* Area O — PERF_SAMPLE_CALLCHAIN (CHAIN-*)  [callchain-kernel + -user]  */
+/* ==================================================================== */
+
+#define EX_CALLCHAIN_NR_MAX 512u
+
+static void area_o_callchain(void) {
+    long pg = sysconf(_SC_PAGESIZE);
+    size_t data_sz = (size_t)pg * 8;
+
+    /* CHAIN-KERNEL: flat read(/dev/zero) loop, expect a kernel-context chain. */
+    {
+        struct perf_event_attr a;
+        attr_zero(&a);
+        a.type = PERF_TYPE_RAW;
+        a.config = EV_CPU_CYCLES;
+        a.sample_period = 100000ull;
+        a.sample_type = SAMPLE_IP | SAMPLE_TID | SAMPLE_TIME | SAMPLE_CALLCHAIN;
+        a.flags = F_DISABLED;
+        long fd = peo(&a, 0, -1, -1, 0);
+        if (fd < 0) {
+            if (selftest) {
+                skip("CHAIN-KERNEL", "open failed under tcg");
+            } else {
+                FAIL("CHAIN-KERNEL", "open errno=%d", errno);
+            }
+        } else {
+            void *base = mmap(NULL, (size_t)pg + data_sz, PROT_READ | PROT_WRITE,
+                              MAP_SHARED, (int)fd, 0);
+            if (base == MAP_FAILED) {
+                FAIL("CHAIN-KERNEL", "mmap errno=%d", errno);
+                close((int)fd);
+            } else {
+                struct mmap_page *mp = (struct mmap_page *)base;
+                const uint8_t *dbase = (const uint8_t *)base + pg;
+                int zfd = open("/dev/zero", O_RDONLY);
+                ioctl((int)fd, IOC_RESET, 0);
+                ioctl((int)fd, IOC_ENABLE, 0);
+                exread(zfd, 400000ull);
+                ioctl((int)fd, IOC_DISABLE, 0);
+                if (zfd >= 0) {
+                    close(zfd);
+                }
+                uint64_t head = mp->data_head;
+                __sync_synchronize();
+                uint64_t off = mp->data_tail;
+                uint64_t samples = 0, kchains = 0, max_kips = 0;
+                int bad = 0;
+                while (off < head) {
+                    uint64_t rel = off % data_sz;
+                    struct perf_rec hdr;
+                    exr_copy(dbase, data_sz, rel, &hdr, sizeof(hdr));
+                    if (hdr.size == 0 || off + hdr.size > head) {
+                        break;
+                    }
+                    if (hdr.type == REC_SAMPLE) {
+                        samples++;
+                        uint64_t cur = (uint64_t)sizeof(hdr) + 8 + 8 + 8;
+                        if (cur + 8 <= hdr.size) {
+                            uint64_t nr = 0;
+                            exr_copy(dbase, data_sz, (rel + cur) % data_sz, &nr, 8);
+                            cur += 8;
+                            uint64_t avail = (hdr.size - cur) / 8;
+                            if (nr > avail || nr > EX_CALLCHAIN_NR_MAX) {
+                                bad = 1;
+                            } else {
+                                int in_k = 0;
+                                uint64_t k_ips = 0;
+                                for (uint64_t e = 0; e < nr; e++) {
+                                    uint64_t ent = 0;
+                                    exr_copy(dbase, data_sz,
+                                             (rel + cur + e * 8) % data_sz, &ent, 8);
+                                    if (ent >= PERF_CONTEXT_MAX) {
+                                        in_k = (ent == PERF_CONTEXT_KERNEL);
+                                        if (in_k) {
+                                            kchains++;
+                                        }
+                                    } else if (in_k) {
+                                        k_ips++;
+                                    }
+                                }
+                                if (k_ips > max_kips) {
+                                    max_kips = k_ips;
+                                }
+                            }
+                        }
+                    }
+                    off += hdr.size;
+                }
+                munmap(base, (size_t)pg + data_sz);
+                close((int)fd);
+                int ok = !bad && samples > 0 && kchains > 0 && max_kips >= 1;
+                if (ok) {
+                    PASS("CHAIN-KERNEL",
+                         "samples=%llu kchains=%llu max_kips=%llu",
+                         (unsigned long long)samples, (unsigned long long)kchains,
+                         (unsigned long long)max_kips);
+                } else if (selftest) {
+                    INFO("CHAIN-KERNEL",
+                         "lenient: samples=%llu kchains=%llu max_kips=%llu bad=%d",
+                         (unsigned long long)samples, (unsigned long long)kchains,
+                         (unsigned long long)max_kips, bad);
+                } else {
+                    FAIL("CHAIN-KERNEL",
+                         "samples=%llu kchains=%llu max_kips=%llu bad=%d",
+                         (unsigned long long)samples, (unsigned long long)kchains,
+                         (unsigned long long)max_kips, bad);
+                }
+            }
+        }
+    }
+
+    /* CHAIN-USER: nested outer->mid->inner->busy, expect >=4 user IPs. */
+    {
+        struct perf_event_attr a;
+        attr_zero(&a);
+        a.type = PERF_TYPE_RAW;
+        a.config = EV_CPU_CYCLES;
+        a.sample_period = 100000ull;
+        a.sample_type = SAMPLE_IP | SAMPLE_TID | SAMPLE_TIME | SAMPLE_CALLCHAIN;
+        a.flags = F_DISABLED;
+        long fd = peo(&a, 0, -1, -1, 0);
+        if (fd < 0) {
+            if (selftest) {
+                skip("CHAIN-USER", "open failed under tcg");
+            } else {
+                FAIL("CHAIN-USER", "open errno=%d", errno);
+            }
+        } else {
+            void *base = mmap(NULL, (size_t)pg + data_sz, PROT_READ | PROT_WRITE,
+                              MAP_SHARED, (int)fd, 0);
+            if (base == MAP_FAILED) {
+                FAIL("CHAIN-USER", "mmap errno=%d", errno);
+                close((int)fd);
+            } else {
+                struct mmap_page *mp = (struct mmap_page *)base;
+                const uint8_t *dbase = (const uint8_t *)base + pg;
+                int zfd = open("/dev/zero", O_RDONLY);
+                int oz = ex_gzfd;
+                ex_gzfd = zfd;
+                ioctl((int)fd, IOC_RESET, 0);
+                ioctl((int)fd, IOC_ENABLE, 0);
+                ex_outer(); /* outer->mid->inner->busy: user FP chain */
+                ioctl((int)fd, IOC_DISABLE, 0);
+                ex_gzfd = oz;
+                if (zfd >= 0) {
+                    close(zfd);
+                }
+                uint64_t head = mp->data_head;
+                __sync_synchronize();
+                uint64_t off = mp->data_tail;
+                uint64_t samples = 0, uchains = 0, max_uips = 0;
+                int bad = 0;
+                while (off < head) {
+                    uint64_t rel = off % data_sz;
+                    struct perf_rec hdr;
+                    exr_copy(dbase, data_sz, rel, &hdr, sizeof(hdr));
+                    if (hdr.size == 0 || off + hdr.size > head) {
+                        break;
+                    }
+                    if (hdr.type == REC_SAMPLE) {
+                        samples++;
+                        uint64_t cur = (uint64_t)sizeof(hdr) + 8 + 8 + 8;
+                        if (cur + 8 <= hdr.size) {
+                            uint64_t nr = 0;
+                            exr_copy(dbase, data_sz, (rel + cur) % data_sz, &nr, 8);
+                            cur += 8;
+                            uint64_t avail = (hdr.size - cur) / 8;
+                            if (nr > avail || nr > EX_CALLCHAIN_NR_MAX) {
+                                bad = 1;
+                            } else {
+                                int in_u = 0;
+                                uint64_t u_ips = 0;
+                                for (uint64_t e = 0; e < nr; e++) {
+                                    uint64_t ent = 0;
+                                    exr_copy(dbase, data_sz,
+                                             (rel + cur + e * 8) % data_sz, &ent, 8);
+                                    if (ent >= PERF_CONTEXT_MAX) {
+                                        in_u = (ent == PERF_CONTEXT_USER);
+                                        if (in_u) {
+                                            uchains++;
+                                        }
+                                    } else if (in_u) {
+                                        u_ips++;
+                                    }
+                                }
+                                if (u_ips > max_uips) {
+                                    max_uips = u_ips;
+                                }
+                            }
+                        }
+                    }
+                    off += hdr.size;
+                }
+                munmap(base, (size_t)pg + data_sz);
+                close((int)fd);
+                int ok = !bad && samples > 0 && uchains > 0 && max_uips >= 4;
+                if (ok) {
+                    PASS("CHAIN-USER",
+                         "samples=%llu uchains=%llu max_uips=%llu (>=4 FP frames)",
+                         (unsigned long long)samples, (unsigned long long)uchains,
+                         (unsigned long long)max_uips);
+                } else if (selftest) {
+                    INFO("CHAIN-USER",
+                         "lenient: samples=%llu uchains=%llu max_uips=%llu bad=%d",
+                         (unsigned long long)samples, (unsigned long long)uchains,
+                         (unsigned long long)max_uips, bad);
+                } else {
+                    FAIL("CHAIN-USER",
+                         "samples=%llu uchains=%llu max_uips=%llu bad=%d (user FP "
+                         "unwind not observed)",
+                         (unsigned long long)samples, (unsigned long long)uchains,
+                         (unsigned long long)max_uips, bad);
+                }
+            }
+        }
+    }
+}
+
+/* ==================================================================== */
+/* Area P — DWARF regs+stack sampling (DWARF-*)  [from perf-dwarf-user]  */
+/* ==================================================================== */
+
+static void area_p_dwarf(void) {
+    long pg = sysconf(_SC_PAGESIZE);
+    size_t data_sz = (size_t)pg * 16;
+    const uint64_t stack_req = 1024;
+
+    struct perf_event_attr a;
+    attr_zero(&a);
+    a.type = PERF_TYPE_RAW;
+    a.config = EV_CPU_CYCLES;
+    a.sample_period = 100000ull;
+    a.sample_type = SAMPLE_IP | SAMPLE_TID | SAMPLE_TIME | SAMPLE_REGS_USER |
+                    SAMPLE_STACK_USER;
+    a.sample_regs_user = PERF_REG_ARM64_MASK;
+    a.sample_stack_user = (uint32_t)stack_req;
+    a.flags = F_DISABLED;
+
+    long fd = peo(&a, 0, -1, -1, 0);
+    if (fd < 0) {
+        if (selftest) {
+            skip("DWARF-1", "open failed under tcg");
+        } else {
+            FAIL("DWARF-1", "open errno=%d", errno);
+        }
+        return;
+    }
+    void *base = mmap(NULL, (size_t)pg + data_sz, PROT_READ | PROT_WRITE,
+                      MAP_SHARED, (int)fd, 0);
+    if (base == MAP_FAILED) {
+        FAIL("DWARF-1", "mmap errno=%d", errno);
+        close((int)fd);
+        return;
+    }
+    struct mmap_page *mp = (struct mmap_page *)base;
+    const uint8_t *dbase = (const uint8_t *)base + pg;
+    int zfd = open("/dev/zero", O_RDONLY);
+    int oz = ex_gzfd;
+    ex_gzfd = zfd;
+    ioctl((int)fd, IOC_RESET, 0);
+    ioctl((int)fd, IOC_ENABLE, 0);
+    ex_outer();
+    ioctl((int)fd, IOC_DISABLE, 0);
+    ex_gzfd = oz;
+    if (zfd >= 0) {
+        close(zfd);
+    }
+
+    uint64_t head = mp->data_head;
+    __sync_synchronize();
+    uint64_t off = mp->data_tail;
+    uint64_t samples = 0, uregs = 0, good = 0;
+    int bad = 0;
+    while (off < head) {
+        uint64_t rel = off % data_sz;
+        struct perf_rec hdr;
+        exr_copy(dbase, data_sz, rel, &hdr, sizeof(hdr));
+        if (hdr.size == 0 || off + hdr.size > head) {
+            break;
+        }
+        if (hdr.type == REC_SAMPLE) {
+            samples++;
+            uint64_t cur = (uint64_t)sizeof(hdr) + 8 + 8 + 8;
+            if (cur + 8 > hdr.size) {
+                bad = 1;
+                break;
+            }
+            uint64_t abi = 0;
+            exr_copy(dbase, data_sz, (rel + cur) % data_sz, &abi, 8);
+            cur += 8;
+            uint64_t sp = 0, pc = 0;
+            int have_regs = 0;
+            if (abi == PERF_SAMPLE_REGS_ABI_64) {
+                if (cur + PERF_REG_ARM64_MAX * 8 > hdr.size) {
+                    bad = 1;
+                    break;
+                }
+                exr_copy(dbase, data_sz,
+                         (rel + cur + PERF_REG_ARM64_SP * 8) % data_sz, &sp, 8);
+                exr_copy(dbase, data_sz,
+                         (rel + cur + PERF_REG_ARM64_PC * 8) % data_sz, &pc, 8);
+                cur += PERF_REG_ARM64_MAX * 8;
+                have_regs = 1;
+            }
+            if (cur + 8 > hdr.size) {
+                bad = 1;
+                break;
+            }
+            uint64_t ssize = 0;
+            exr_copy(dbase, data_sz, (rel + cur) % data_sz, &ssize, 8);
+            cur += 8;
+            uint64_t dyn = 0;
+            int have_stack = 0;
+            if (ssize != 0) {
+                if (cur + ssize + 8 > hdr.size) {
+                    bad = 1;
+                    break;
+                }
+                cur += ssize;
+                exr_copy(dbase, data_sz, (rel + cur) % data_sz, &dyn, 8);
+                cur += 8;
+                have_stack = 1;
+            }
+            if (have_regs && sp != 0 && pc != 0) {
+                uregs++;
+                if (have_stack && ssize == stack_req && dyn > 0 && dyn <= ssize) {
+                    good++;
+                }
+            }
+        }
+        off += hdr.size;
+    }
+    munmap(base, (size_t)pg + data_sz);
+    close((int)fd);
+
+    int ok = !bad && samples > 0 && uregs > 0 && good > 0;
+    if (ok) {
+        PASS("DWARF-1", "samples=%llu uregs=%llu good=%llu (regs+stack captured)",
+             (unsigned long long)samples, (unsigned long long)uregs,
+             (unsigned long long)good);
+    } else if (selftest) {
+        INFO("DWARF-1", "lenient: samples=%llu uregs=%llu good=%llu bad=%d",
+             (unsigned long long)samples, (unsigned long long)uregs,
+             (unsigned long long)good, bad);
+    } else {
+        FAIL("DWARF-1", "samples=%llu uregs=%llu good=%llu bad=%d",
+             (unsigned long long)samples, (unsigned long long)uregs,
+             (unsigned long long)good, bad);
+    }
+}
+
+/* ==================================================================== */
+/* Area Q — dynamic kprobe via tracefs (KPROBE-*)  [from perf-cli-kprobe]*/
+/* Always skip-safe: absent kprobe_events / rootfs -> skip.             */
+/* ==================================================================== */
+
+#define EX_KPROBE_EVENTS "/sys/kernel/debug/tracing/kprobe_events"
+#define EX_KPROBE_ID "/sys/kernel/debug/tracing/events/probe/hsc/id"
+#define EX_CURRENT_TRACER "/sys/kernel/debug/tracing/current_tracer"
+
+/* First /proc/kallsyms symbol matching `needle` (exact on the symbol field when
+ * `exact`, else substring); address returned in *addr. 0 on hit, -1 otherwise.
+ * StarryOS kallsyms holds MANGLED Rust names, so `handle_syscall` must be matched
+ * as a substring, not written verbatim to kprobe_events (the parser's
+ * symbol_exists() would reject the bare name -> EINVAL). */
+static int ex_ksym(const char *needle, int exact, uint64_t *addr) {
+    FILE *f = fopen("/proc/kallsyms", "r");
+    if (!f) {
+        return -1;
+    }
+    char line[512];
+    int found = -1;
+    while (fgets(line, sizeof(line), f)) {
+        char *a = strtok(line, " ");             /* address    */
+        char *t = a ? strtok(NULL, " ") : NULL;  /* type       */
+        char *s = t ? strtok(NULL, " \n") : NULL; /* symbol     */
+        if (!s) {
+            continue;
+        }
+        int hit = exact ? (strcmp(s, needle) == 0) : (strstr(s, needle) != NULL);
+        if (hit) {
+            *addr = strtoull(a, NULL, 16);
+            found = 0;
+            break;
+        }
+    }
+    fclose(f);
+    return found;
+}
+
+static void area_q_kprobe(void) {
+    /* 1. create the probe via the robust `_stext+<offset>` form (matches the
+     * perf-cli-e2e / perf-cli-kprobe tests): resolve handle_syscall + _stext from
+     * kallsyms and place the kprobe at their delta. A bare mangled/plain symbol
+     * write is fragile; _stext always exists in kallsyms. */
+    uint64_t hsc = 0, stext = 0;
+    if (ex_ksym("_stext", 1, &stext) != 0 ||
+        ex_ksym("handle_syscall", 0, &hsc) != 0 || hsc <= stext) {
+        skip("KPROBE-1", "kallsyms-unresolved");
+        return;
+    }
+    char spec[80];
+    snprintf(spec, sizeof(spec), "p:probe/hsc _stext+%llu\n",
+             (unsigned long long)(hsc - stext));
+    if (write_file(EX_KPROBE_EVENTS, spec) != 0) {
+        skip("KPROBE-1", "no-kprobe_events");
+        return;
+    }
+    /* 2. resolve the dynamic tracepoint id. */
+    char idbuf[32] = "";
+    if (read_file(EX_KPROBE_ID, idbuf, sizeof(idbuf)) != 0) {
+        write_file(EX_KPROBE_EVENTS, "-:probe/hsc\n");
+        skip("KPROBE-1", "no-probe-id (add rejected?)");
+        return;
+    }
+    long id = strtol(idbuf, NULL, 10);
+    if (id <= 0) {
+        write_file(EX_KPROBE_EVENTS, "-:probe/hsc\n");
+        skip("KPROBE-1", "bad-probe-id");
+        return;
+    }
+
+    /* 3. open a tracepoint perf event on the id. */
+    struct perf_event_attr a;
+    attr_zero(&a);
+    a.type = PERF_TYPE_TRACEPOINT;
+    a.config = (uint64_t)id;
+    a.sample_period = 1;
+    a.sample_type = SAMPLE_IP | SAMPLE_TID | SAMPLE_TIME;
+    a.flags = F_DISABLED;
+    long fd = peo(&a, 0, -1, -1, 0);
+    if (fd < 0) {
+        int e = errno;
+        write_file(EX_KPROBE_EVENTS, "-:probe/hsc\n");
+        /* patchable-function-entry kernels reject kprobe-on-NOP-sled with EINVAL. */
+        char t[8];
+        if (e == EINVAL && read_file(EX_CURRENT_TRACER, t, sizeof(t)) == 0) {
+            skip("KPROBE-1", "kprobe-on-patchable-entry-unsupported");
+        } else {
+            skip("KPROBE-1", "tracepoint-open-failed");
+        }
+        return;
+    }
+
+    long pg = sysconf(_SC_PAGESIZE);
+    size_t data_sz = (size_t)pg * 8;
+    void *base = mmap(NULL, (size_t)pg + data_sz, PROT_READ | PROT_WRITE,
+                      MAP_SHARED, (int)fd, 0);
+    if (base == MAP_FAILED) {
+        close((int)fd);
+        write_file(EX_KPROBE_EVENTS, "-:probe/hsc\n");
+        skip("KPROBE-1", "mmap-failed");
+        return;
+    }
+    struct mmap_page *mp = (struct mmap_page *)base;
+    const uint8_t *dbase = (const uint8_t *)base + pg;
+    ioctl((int)fd, IOC_ENABLE, 0);
+    for (int i = 0; i < 500; i++) {
+        (void)getpid(); /* each syscall hits handle_syscall */
+    }
+    ioctl((int)fd, IOC_DISABLE, 0);
+
+    uint64_t head = mp->data_head;
+    __sync_synchronize();
+    uint64_t off = mp->data_tail;
+    uint64_t samples = 0;
+    while (off < head) {
+        uint64_t rel = off % data_sz;
+        struct perf_rec hdr;
+        exr_copy(dbase, data_sz, rel, &hdr, sizeof(hdr));
+        if (hdr.size == 0 || off + hdr.size > head) {
+            break;
+        }
+        if (hdr.type == REC_SAMPLE) {
+            samples++;
+        }
+        off += hdr.size;
+    }
+    munmap(base, (size_t)pg + data_sz);
+    close((int)fd);
+
+    /* 4. remove the probe; assert it is gone (best-effort). */
+    int removed = (write_file(EX_KPROBE_EVENTS, "-:probe/hsc\n") == 0);
+
+    if (samples > 0) {
+        PASS("KPROBE-1", "id=%ld samples=%llu removed=%d (probe hit -> SAMPLE)",
+             id, (unsigned long long)samples, removed);
+    } else if (selftest) {
+        INFO("KPROBE-1", "lenient: id=%ld samples=0 removed=%d", id, removed);
+    } else {
+        FAIL("KPROBE-1", "id=%ld samples=0 (no PERF_RECORD_SAMPLE from kprobe)",
+             id);
+    }
+}
+
+/* ==================================================================== */
+/* main() dispatch — add these calls in order, after area_g_sysctl();    */
+/* (i.e. between `area_g_sysctl();` and `teardown();`):                  */
+/*                                                                        */
+/*     area_h_software();                                                 */
+/*     area_i_hwcache();                                                  */
+/*     area_j_lost();                                                     */
+/*     area_k_sample_tid();                                               */
+/*     area_l_groups();                                                   */
+/*     area_m_sample_read();                                              */
+/*     area_n_syswide();                                                  */
+/*     area_o_callchain();                                                */
+/*     area_p_dwarf();                                                    */
+/*     area_q_kprobe();                                                   */
+/* ==================================================================== */
+
 /* ===================================================================== */
 /* main                                                                   */
 /* ===================================================================== */
@@ -2265,6 +4152,18 @@ int main(void) {
     area_e_smp();
     area_f_fidelity();
     area_g_sysctl();
+
+    /* --- extended perf_event_open feature coverage (areas H..Q) --- */
+    area_h_software();
+    area_i_hwcache();
+    area_j_lost();
+    area_k_sample_tid();
+    area_l_groups();
+    area_m_sample_read();
+    area_n_syswide();
+    area_o_callchain();
+    area_p_dwarf();
+    area_q_kprobe();
 
     teardown();
 

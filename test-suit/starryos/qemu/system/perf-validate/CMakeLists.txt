@@ -13,5 +13,9 @@ set(CMAKE_C_EXTENSIONS OFF)
 # skip stub there via the shared arch filter.
 starry_arch_filtered_executable(perf-validate "aarch64"
     "perf-validate skipped on non-aarch64 qemu" src/perf_validate.c)
-target_compile_options(perf-validate PRIVATE -Wall -Wextra -Werror)
+# -fno-omit-frame-pointer + -fno-optimize-sibling-calls: the CHAIN-USER section's
+# nested workload (outer->mid->inner->busy) needs walkable frame records AND must
+# not be tail-call-collapsed, else the kernel FP unwind sees fewer than the
+# expected >=4 user frames (observed on the -O2 board build).
+target_compile_options(perf-validate PRIVATE -Wall -Wextra -Werror -fno-omit-frame-pointer -fno-optimize-sibling-calls)
 install(TARGETS perf-validate RUNTIME DESTINATION usr/bin/starry-test-suit)

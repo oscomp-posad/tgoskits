@@ -37,7 +37,11 @@ BOARD_IP="${BOARD_IP:-192.168.50.2}"
 BOARD_DEST="${BOARD_DEST:-/usr/local/bin/perf-validate}"
 BOARD_PW="${BOARD_PW:-orangepi}"
 
-CFLAGS_COMMON="-static -O2 -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror"
+# -fno-omit-frame-pointer: the CHAIN-USER section needs walkable AAPCS64 frame
+# records for the kernel's FP-based user callchain unwind. -pthread: the
+# TID/GRP/SREAD sections spawn worker threads (folded into musl libc; needed for
+# the native-glibc fallback toolchain).
+CFLAGS_COMMON="-static -O2 -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -fno-omit-frame-pointer -fno-optimize-sibling-calls -pthread"
 
 # Prefer the container toolchain (aarch64-linux-musl-gcc, matches the perf 6.6
 # build env). If Docker is unavailable (e.g. the self-hosted board runner), fall
