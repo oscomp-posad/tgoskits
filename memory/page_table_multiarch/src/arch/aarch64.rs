@@ -14,6 +14,9 @@ impl PagingMetaData for A64PagingMetaData {
     const LEVELS: usize = 4;
     const PA_MAX_BITS: usize = 48;
     const VA_MAX_BITS: usize = 48;
+    // aarch64 never caches not-present translations, so a fresh (unused → valid)
+    // `map` needs no TLB maintenance — like Linux arm64 `set_pte`.
+    const NEED_FLUSH_ON_MAP: bool = false;
 
     type VirtAddr = VirtAddr;
 

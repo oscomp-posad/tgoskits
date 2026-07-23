@@ -71,6 +71,27 @@ pub trait PagingMetaData: Sync + Send {
     /// The maximum physical address.
     const PA_MAX_ADDR: usize = (1 << Self::PA_MAX_BITS) - 1;
 
+    /// Whether [`map`](PageTable64Cursor::map)ping a *fresh* (not-present →
+    /// present) entry requires TLB maintenance for that address.
+    ///
+    /// A successful `map` only ever installs into an unused (not-present) entry —
+    /// it returns [`PagingError::AlreadyMapped`] otherwise. On architectures that
+    /// never cache not-present translations (aarch64, x86_64), no stale entry can
+    /// exist, so making a page present needs no TLB flush. This is exactly why
+    /// Linux `set_pte` / demand faults skip the flush, and skipping it here removes
+    /// a broadcast TLBI (+ full-system barrier) per faulted page — the dominant
+    /// per-page cost of a first-touch storm.
+    ///
+    /// Architectures that permit negative caching of invalid PTEs must keep this
+    /// `true`: RISC-V may require an `sfence.vma` after an invalid → valid
+    /// transition, and LoongArch is unverified.
+    ///
+    /// This flag governs **only** `map` (unused → valid). `remap`/`protect`/`unmap`
+    /// change or remove *valid* entries (break-before-make) and always flush,
+    /// regardless of this flag. Defaults to `true` so a new architecture is correct
+    /// until its TLB semantics have been verified.
+    const NEED_FLUSH_ON_MAP: bool = true;
+
     /// The virtual address to be translated in this page table.
     ///
     /// This associated type allows more flexible use of page tables structs

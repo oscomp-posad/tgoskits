@@ -416,7 +416,14 @@ impl<'a, M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64Cursor
             return Err(PagingError::AlreadyMapped);
         }
         *entry = GenericPTE::new_page(target.align_down(page_size), flags, page_size.is_huge());
-        self.push(vaddr);
+        // This is a fresh not-present → present transition (the `is_unused` check
+        // above guarantees it). Architectures that never cache not-present
+        // translations need no TLB maintenance here; skipping it removes a
+        // broadcast TLBI per faulted page. See `PagingMetaData::NEED_FLUSH_ON_MAP`.
+        // `remap`/`protect`/`unmap` touch *valid* entries and still flush.
+        if M::NEED_FLUSH_ON_MAP {
+            self.push(vaddr);
+        }
         Ok(())
     }
 

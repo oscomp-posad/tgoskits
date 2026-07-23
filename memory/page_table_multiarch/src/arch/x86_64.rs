@@ -12,6 +12,9 @@ impl PagingMetaData for X64PagingMetaData {
     const LEVELS: usize = 4;
     const PA_MAX_BITS: usize = 52;
     const VA_MAX_BITS: usize = 48;
+    // x86_64 never caches not-present entries, so a fresh (unused → valid) `map`
+    // needs no TLB maintenance — like Linux x86 `set_pte`.
+    const NEED_FLUSH_ON_MAP: bool = false;
 
     type VirtAddr = VirtAddr;
 
