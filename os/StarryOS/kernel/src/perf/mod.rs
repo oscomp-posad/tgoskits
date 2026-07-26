@@ -9,6 +9,11 @@
 pub mod bpf;
 pub mod hw;
 pub mod kprobe;
+/// IRQ-safe no-fault user/kernel memory reader for PMU-sampling FP unwinding.
+/// ARM PMUv3 only; walks `TTBR0`/`TTBR1` against the direct map so a bad frame
+/// pointer never faults.
+#[cfg(target_arch = "aarch64")]
+pub mod nofault;
 /// Per-CPU hardware-PMU state (allocator, cluster identity). ARM PMUv3 only;
 /// the per-core counter pools + cluster classification live here.
 #[cfg(target_arch = "aarch64")]
@@ -33,6 +38,11 @@ pub mod task;
 #[cfg(target_arch = "aarch64")]
 pub mod tick;
 pub mod tracepoint;
+/// Frame-pointer call-graph unwinding for PMU sampling (`PERF_SAMPLE_CALLCHAIN`).
+/// ARM PMUv3 only; consumes the interrupted frame pointer plumbed through
+/// `ax_cpu::pmu` and the alloc-free `axbacktrace::walk_fp` engine.
+#[cfg(target_arch = "aarch64")]
+pub mod unwind;
 pub mod uprobe;
 
 use alloc::{borrow::Cow, boxed::Box, sync::Arc, vec};
