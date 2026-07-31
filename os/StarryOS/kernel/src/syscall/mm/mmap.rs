@@ -1015,6 +1015,36 @@ pub fn sys_madvise(addr: usize, length: usize, advice: i32) -> AxResult<isize> {
             let length = align_up_4k(length);
             aspace.discard_range(VirtAddr::from(addr), length)?;
         }
+        // MADV_POPULATE_WRITE/READ prefault the range NOW so the first real
+        // access does not fault (Linux 5.14+). `populate_area` is the same
+        // primitive MAP_POPULATE and plain `mlock` use. Linux returns EINVAL if
+        // the requested access is not permitted by the mapping's protection
+        // (POPULATE_WRITE on a non-writable VMA, POPULATE_READ on PROT_NONE), so
+        // gate on `can_access_range` with the matching mask before populating.
+        // This lets latency-sensitive workloads (e.g. the RKNN pipeline) commit
+        // large DMA/model/scratch buffers up front, paying the fault cost once at
+        // a controlled point instead of during inference.
+        MADV_POPULATE_WRITE => {
+            let length = align_up_4k(length);
+            if !aspace.can_access_range(VirtAddr::from(addr), length, MappingFlags::WRITE) {
+                return Err(AxError::InvalidInput);
+            }
+            aspace.populate_area(VirtAddr::from(addr), length, MappingFlags::WRITE)?;
+        }
+        MADV_POPULATE_READ => {
+            let length = align_up_4k(length);
+            if !aspace.can_access_range(VirtAddr::from(addr), length, MappingFlags::READ) {
+                return Err(AxError::InvalidInput);
+            }
+            aspace.populate_area(VirtAddr::from(addr), length, MappingFlags::READ)?;
+        }
+        // MADV_WILLNEED is purely advisory ("will need soon"): best-effort
+        // read-prefault, and per man 2 madvise it must not fail on a range it
+        // cannot fully service — swallow per-fragment errors.
+        MADV_WILLNEED => {
+            let length = align_up_4k(length);
+            let _ = aspace.populate_area(VirtAddr::from(addr), length, MappingFlags::READ);
+        }
         _ => {}
     }
 
