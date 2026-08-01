@@ -354,16 +354,21 @@ struct Opp {
     mhz: u32,
 }
 
-/// A76 (big) OPP ladder, low→high, from the on-board calibration sweep. The clock
-/// is voltage-coupled, so this ladder is a HYBRID: below the 675 mV exact point it
-/// scales the SCMI ring (408/816/1200 @ 675 mV land on target); above it, it holds
-/// the ring at 1200 and raises the *voltage* — the delivered freq climbs while
-/// staying over-volted (each rung's voltage exceeds the delivered freq's DT
-/// nominal, so never an undervolt). Scaling the ring instead (e.g. ring 1608 @
-/// 762.5 mV) over-delivers ~1733 MHz = ~125 mV of undervolt (measured), so it is
-/// avoided. Top rung 1725 MHz @ 925 mV is the calibration sweep's safe maximum
-/// (over-volted ~110 mV vs the delivered freq's DT nominal); board-validated
-/// all-core (threads=8) with no PSU brownout.
+/// A76 (big) OPP ladder, low→high, from the on-board calibration sweep
+/// (`snapshots/opp-calibration-2026-07-20/cal-grid.txt`). The clock is
+/// voltage-coupled, so this ladder is a HYBRID: below the 675 mV exact point it
+/// scales the SCMI ring (408/816/1200 @ 675 mV land on target); through the
+/// mid-range it holds ring 1200 and raises the *voltage* (delivered freq climbs
+/// while staying over-volted — never an undervolt); at the top it uses the
+/// **ring-length lever** — rings 1416/1608 run the PVTPLL at length 11 (vs 17 for
+/// ring 1200), delivering far more MHz per volt, so ring 1416 @ 850 mV and
+/// ring 1608 @ 925/1000 mV reach 1830/2126/2256 MHz (all board-MEASURED).
+///
+/// The 2126 MHz @ 925 mV rung is board-validated ALL-CORE (threads=8, no
+/// brownout) and is the governor's default ceiling. The 2256 MHz @ 1.0 V top rung
+/// is Linux's max and was measured ~2262 MHz per-core (run #1, pinned, no
+/// brownout) but is NOT yet all-core validated and there is no thermal governor,
+/// so it is held UNREACHABLE by default — see `A76_CAP_TO_ALLCORE_SAFE`.
 const A76_OPPS: &[Opp] = &[
     Opp { ring_khz: 408_000, uv: 675_000, mhz: 408 },
     Opp { ring_khz: 816_000, uv: 675_000, mhz: 816 },
@@ -371,12 +376,30 @@ const A76_OPPS: &[Opp] = &[
     Opp { ring_khz: 1_200_000, uv: 725_000, mhz: 1318 },
     Opp { ring_khz: 1_200_000, uv: 800_000, mhz: 1491 },
     Opp { ring_khz: 1_200_000, uv: 850_000, mhz: 1592 },
-    Opp { ring_khz: 1_200_000, uv: 925_000, mhz: 1725 },
+    // Ring-length lever step 1: ring 1416 @ 850 mV -> 1830 MHz (measured) — LOWER
+    // power than the old 1725 @ 925 mV top (V^2f 1322 < 1476), a strict win.
+    Opp { ring_khz: 1_416_000, uv: 850_000, mhz: 1830 },
+    // Step 2: ring 1608 @ 925 mV -> 2126 MHz (measured, board-validated all-core).
+    // Default governor ceiling — the highest all-core-safe rung.
+    Opp { ring_khz: 1_608_000, uv: 925_000, mhz: 2126 },
+    // Top: ring 1608 @ 1000 mV (PMIC ceiling) to match Linux's 2256 top. The
+    // 1608-2400 band is all PVTPLL length 11, so freq here is set by voltage;
+    // measured ~2262 per-core (run #1). Highest-power rung — held UNREACHABLE by
+    // default until threads=1->8 is validated (see A76_CAP_TO_ALLCORE_SAFE).
+    Opp { ring_khz: 1_608_000, uv: 1_000_000, mhz: 2256 },
 ];
 
 /// A55 (little) OPP ladder, low→high, same hybrid rationale: ring-scaled below the
-/// 675 mV point, then ring 1008 with rising voltage. Top rung 1523 MHz @ 950 mV
-/// (the RK806 force-write ceiling), the sweep's safe maximum for the little cluster.
+/// 675 mV point, then ring 1008 with rising voltage, then the ring-length lever
+/// (rings 1416/1608) at the top. Top rung 1881 MHz @ 950 mV (measured, near
+/// Linux's A55 max 1800) is the RK806 force-write ceiling for this cluster.
+///
+/// The A55 top rung is kept reachable (unlike the A76 1.0 V top): little-core
+/// current is modest — the RK806 DCDC2 is sized for the full A55 cluster at its
+/// max OPP (Linux runs A55 all-core at 1800 @ 950 mV), so 4×A55 @ 950 mV is within
+/// the board's designed envelope. NOTE it is per-core-validated, not yet
+/// threads=8 all-core validated, and shares the no-thermal-governor caveat; if a
+/// future run shows little-cluster brownout, cap it symmetrically to the 1695 rung.
 const A55_OPPS: &[Opp] = &[
     Opp { ring_khz: 408_000, uv: 675_000, mhz: 408 },
     Opp { ring_khz: 816_000, uv: 675_000, mhz: 816 },
@@ -384,7 +407,11 @@ const A55_OPPS: &[Opp] = &[
     Opp { ring_khz: 1_008_000, uv: 762_500, mhz: 1212 },
     Opp { ring_khz: 1_008_000, uv: 800_000, mhz: 1285 },
     Opp { ring_khz: 1_008_000, uv: 850_000, mhz: 1372 },
-    Opp { ring_khz: 1_008_000, uv: 950_000, mhz: 1523 },
+    // Ring-length lever: ring 1416 @ 850 mV -> 1695 MHz (measured) — higher freq
+    // AND lower power than the old 1523 @ 950 top (V^2f 1225 < 1374), a strict win.
+    Opp { ring_khz: 1_416_000, uv: 850_000, mhz: 1695 },
+    // Top: ring 1608 @ 950 mV -> 1881 MHz (measured, near Linux's A55 max 1800).
+    Opp { ring_khz: 1_608_000, uv: 950_000, mhz: 1881 },
 ];
 
 /// Index into each ladder of the boot OPP the voltage lever leaves the cluster on:
