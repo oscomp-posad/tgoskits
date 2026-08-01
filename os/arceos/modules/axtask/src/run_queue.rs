@@ -214,6 +214,88 @@ fn effective_load(cpu: usize, load: usize) -> usize {
     load.saturating_mul(1024) / cpu_capacity(cpu)
 }
 
+/// Wakeup placement (mirrors Linux `select_task_rq_fair`'s wakeup path — cheap and
+/// affinity-hard), as opposed to `select_least_loaded` which is the one-shot
+/// fork/exec placement scan. Rules, in order:
+///
+/// 1. Restrict to the task's **allowed** CPUs = `cpumask ∩ online`. The result is
+///    ALWAYS in this set (a wakeup never violates affinity). If a single CPU is
+///    allowed (e.g. `taskset -c N`), return it — a hard pin is honored.
+/// 2. If the cache-warm last CPU is allowed and **idle** (no queued ready tasks),
+///    stay there — no scan, no migration (the common, cheap case).
+/// 3. If last CPU is allowed but **busy**, migrate only to a genuinely **idle**
+///    allowed core, preferring the highest capacity (an idle A76). This is a light
+///    `load == 0` probe, NOT the full `effective_load` scan. If none is idle (the
+///    machine is saturated — e.g. a yield/wake-heavy `threads` workload) STAY on
+///    last CPU: cheap, and no thrash.
+/// 4. If last CPU is not allowed (affinity changed under the task), fall back to the
+///    full capacity-aware `select_least_loaded` within the mask (rare, off the hot
+///    path).
+#[cfg(all(feature = "smp", feature = "sched-loadbalance"))]
+fn select_wake_cpu(task: &AxTaskRef) -> usize {
+    use core::sync::atomic::Ordering;
+    let cpumask = task.cpumask();
+    let online = RUN_QUEUE_ONLINE.load(Ordering::Acquire);
+    let allowed = |c: usize| {
+        c < crate::build_info::CPU_CAPACITY && cpumask.get(c) && (online & (1usize << c)) != 0
+    };
+
+    // (1) Count allowed-online CPUs; a single one is a hard pin we must honor.
+    let mut only = None;
+    let mut count = 0usize;
+    for c in 0..ax_hal::cpu_num() {
+        if allowed(c) {
+            count += 1;
+            only = Some(c);
+            if count > 1 {
+                break;
+            }
+        }
+    }
+    match count {
+        // No allowed CPU is online: availability-over-affinity fallback (Linux
+        // `select_fallback_rq`), routed through the mask-respecting selector.
+        0 => return select_least_loaded(cpumask, task.cpu_id() as usize),
+        1 => return only.unwrap(),
+        _ => {}
+    }
+
+    let last_cpu = task.cpu_id() as usize;
+    let last_ok = allowed(last_cpu);
+
+    // (2) Cache-warm fast path: keep a woken task on its last CPU when idle.
+    if last_ok && get_run_queue(last_cpu).load() == 0 {
+        return last_cpu;
+    }
+
+    if last_ok {
+        // (3) last CPU busy: promote only to an idle, strictly-bigger-capacity
+        //     allowed core (an idle A76 for a task stuck on a busy A55), biggest
+        //     first. Mirrors Linux's wakeup `select_idle_sibling` restricted to
+        //     the big.LITTLE case: prefer an idle higher-capacity core, else stay.
+        //     Never demote to a smaller/equal idle core, and if none is idle+bigger
+        //     STAY on last CPU — so a saturated machine never migrates on wake.
+        let last_cap = cpu_capacity(last_cpu);
+        let mut best_idle: Option<(usize, usize)> = None; // (cpu, capacity)
+        for c in 0..ax_hal::cpu_num() {
+            let cap = cpu_capacity(c);
+            if cap > last_cap && allowed(c) && get_run_queue(c).load() == 0 {
+                let better = match best_idle {
+                    None => true,
+                    Some((_, bcap)) => cap > bcap,
+                };
+                if better {
+                    best_idle = Some((c, cap));
+                }
+            }
+        }
+        return best_idle.map_or(last_cpu, |(c, _)| c);
+    }
+
+    // (4) last CPU no longer allowed: full capacity-aware placement in the mask.
+    select_least_loaded(cpumask, last_cpu)
+}
+
 /// Retrieves a `'static` reference to the run queue corresponding to the given index.
 ///
 /// This function asserts that the provided index is within the range of available CPUs
@@ -593,29 +675,13 @@ pub(crate) fn select_wake_run_queue<G: BaseGuard>(task: &AxTaskRef) -> AxRunQueu
     }
     #[cfg(feature = "smp")]
     {
-        // Capacity-aware wake placement: send the woken task to the least-loaded
-        // eligible core, but keep it on its cache-hot last CPU unless a clearly
-        // less-loaded core is free (select_idle_sibling-style hysteresis: a +1
-        // effective-load margin). This only chooses where the wake lands; a task
-        // already running is never migrated off its core.
+        // Capacity-aware wake placement, cheap and affinity-hard (Linux
+        // `select_task_rq_fair` wakeup path): stay on the cache-warm last CPU,
+        // migrate only to an idle core (biggest first), and never leave the task's
+        // allowed set. No full load scan on this hot path, so a saturated wake-heavy
+        // workload stays put instead of thrashing. See `select_wake_cpu`.
         #[cfg(feature = "sched-loadbalance")]
-        let index = {
-            let last_cpu = task.cpu_id() as usize;
-            let cpumask = task.cpumask();
-            let online = RUN_QUEUE_ONLINE.load(core::sync::atomic::Ordering::Acquire);
-            let is_online = |c: usize| (online & (1usize << c)) != 0;
-            let cand = select_least_loaded(cpumask, last_cpu);
-            if last_cpu < crate::build_info::CPU_CAPACITY
-                && cpumask.get(last_cpu)
-                && is_online(last_cpu)
-                && effective_load(last_cpu, get_run_queue(last_cpu).load())
-                    <= effective_load(cand, get_run_queue(cand).load()) + 1
-            {
-                last_cpu
-            } else {
-                cand
-            }
-        };
+        let index = select_wake_cpu(task);
         // Prefer the CPU the woken task last ran on. This is cache-warm for the
         // *woken* task and, crucially, keeps threads spread out: preferring the
         // *waker's* CPU (as before) piled every worker onto one core whenever a
