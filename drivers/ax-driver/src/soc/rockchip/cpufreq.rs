@@ -414,6 +414,28 @@ const A55_OPPS: &[Opp] = &[
     Opp { ring_khz: 1_608_000, uv: 950_000, mhz: 1881 },
 ];
 
+/// All-core safety cap on the A76 governor ceiling (compile-gate, defaulted SAFE).
+///
+/// The A76 top OPP — the last `A76_OPPS` rung, 2256 MHz @ 1.0 V — is the highest-
+/// power rung. Run #1 measured it at ~2262 MHz PER-CORE (pinned, no brownout), but
+/// an all-core threads=8 run at 1.0 V is NOT yet validated, and StarryOS has no
+/// thermal governor to back it off. So while this is `true` the governor is capped
+/// one rung down, at the board-validated all-core-safe **2126 MHz @ 925 mV** rung
+/// (the frozen `threads=8`-safe point); the 1.0 V top rung stays defined but
+/// unreachable. Flip to `false` for a supervised threads=1->8 validation run to
+/// let the governor reach the top rung. Mirrors the `APPLY_RAIL_VOLTAGE` /
+/// `CALIBRATE` compile-gate pattern. Introduces no new voltage — it only withholds
+/// an existing rung.
+const A76_CAP_TO_ALLCORE_SAFE: bool = true;
+
+/// Lock the cap's assumption: it withholds exactly the 1.0 V top rung and falls
+/// back to the 925 mV rung directly below it. If the A76 ladder is ever reordered
+/// so these two rungs are not the top two, this fails the build (not the board).
+const _: () = {
+    assert!(A76_OPPS[A76_OPPS.len() - 1].uv == 1_000_000);
+    assert!(A76_OPPS[A76_OPPS.len() - 2].uv == 925_000);
+};
+
 /// Index into each ladder of the boot OPP the voltage lever leaves the cluster on:
 /// A55 1008 MHz and A76 1200 MHz are both element 2 (the 675 mV rung). The governor
 /// starts tracking here so its first move is relative to the known boot state; from
@@ -433,6 +455,18 @@ impl Cluster {
         match self {
             Cluster::A55 => A55_OPPS,
             _ => A76_OPPS,
+        }
+    }
+
+    /// Highest OPP index the governor may select for this domain. For the A76 big
+    /// pairs the 1.0 V top rung is withheld while [`A76_CAP_TO_ALLCORE_SAFE`] is
+    /// set (so the fast-attack tops out at the all-core-validated 2126 MHz rung);
+    /// every other domain reaches its full ladder.
+    fn gov_max_idx(self) -> usize {
+        let last = self.opps().len() - 1;
+        match self {
+            Cluster::Big0 | Cluster::Big1 if A76_CAP_TO_ALLCORE_SAFE => last - 1,
+            _ => last,
         }
     }
 
@@ -596,7 +630,7 @@ pub fn governor_poll(busy: &[u64]) {
         let opps = cluster.opps();
         let cur = IDX[ci].load(Ordering::Relaxed);
         let new = if any_core_high {
-            opps.len() - 1 // fast attack: jump straight to the top OPP
+            cluster.gov_max_idx() // fast attack: jump to the top reachable OPP
         } else if all_cores_low && cur > 0 {
             cur - 1 // slow decay: shed one step only when the whole cluster is idle
         } else {
