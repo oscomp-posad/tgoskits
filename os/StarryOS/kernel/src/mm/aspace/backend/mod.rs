@@ -35,6 +35,60 @@ fn divide_page(size: usize, page_size: PageSize) -> usize {
     size >> (page_size as usize).trailing_zeros()
 }
 
+/// Zero `len` bytes at `ptr` using the aarch64 `DC ZVA` (Data Cache Zero by VA)
+/// instruction, which zeroes one implementation-defined block per op without a
+/// read-for-ownership — ~3-5x faster than a generic byte memset for a fresh page.
+/// Returns `true` on success, `false` if `DC ZVA` is unavailable (`DCZID_EL0.DZP`)
+/// or `ptr`/`len` are not whole multiples of the block size (caller must then fall
+/// back to a generic zero). The block size is read once from `DCZID_EL0` and cached.
+///
+/// # Safety
+/// `ptr` must point to `len` bytes of writable, Normal-cacheable memory the caller
+/// exclusively owns.
+#[cfg(target_arch = "aarch64")]
+unsafe fn zero_page_dc_zva(ptr: *mut u8, len: usize) -> bool {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    // Cached DC ZVA block size in bytes. 0 = not yet probed; usize::MAX = DC ZVA
+    // prohibited/unavailable (never use it).
+    static ZVA_BLOCK: AtomicUsize = AtomicUsize::new(0);
+
+    let mut block = ZVA_BLOCK.load(Ordering::Relaxed);
+    if block == 0 {
+        let dczid: u64;
+        // SAFETY: reads a read-only system register with no side effects.
+        unsafe {
+            core::arch::asm!("mrs {}, DCZID_EL0", out(reg) dczid,
+                options(nomem, nostack, preserves_flags));
+        }
+        // DZP (bit 4): DC ZVA prohibited. BS (bits 3:0): log2 of the block size in
+        // 32-bit words, so the block is `4 << BS` bytes.
+        block = if dczid & (1 << 4) != 0 {
+            usize::MAX
+        } else {
+            4usize << (dczid & 0xf)
+        };
+        ZVA_BLOCK.store(block, Ordering::Relaxed);
+    }
+    if block == usize::MAX
+        || block == 0
+        || !len.is_multiple_of(block)
+        || !(ptr as usize).is_multiple_of(block)
+    {
+        return false;
+    }
+    let mut addr = ptr as usize;
+    let end = addr + len;
+    while addr < end {
+        // SAFETY: `addr` is block-aligned and within the caller's owned region;
+        // `dc zva` zeroes exactly one block starting there.
+        unsafe {
+            core::arch::asm!("dc zva, {}", in(reg) addr, options(nostack, preserves_flags));
+        }
+        addr += block;
+    }
+    true
+}
+
 pub(crate) fn alloc_frame(zeroed: bool, size: PageSize) -> AxResult<PhysAddr> {
     let page_size = size as usize;
     let num_pages = page_size / PAGE_SIZE_4K;
@@ -44,7 +98,24 @@ pub(crate) fn alloc_frame(zeroed: bool, size: PageSize) -> AxResult<PhysAddr> {
             .map_err(|_| AxError::NoMemory)?,
     );
     if zeroed {
-        unsafe { core::ptr::write_bytes(vaddr.as_mut_ptr(), 0, page_size) };
+        let ptr: *mut u8 = vaddr.as_mut_ptr();
+        // Prefer DC ZVA on aarch64; fall back to a generic memset elsewhere or when
+        // DC ZVA is prohibited / the block size does not evenly divide the page.
+        let zeroed_fast = {
+            #[cfg(target_arch = "aarch64")]
+            {
+                // SAFETY: `ptr` is the linear-map address of `page_size` freshly
+                // allocated, page-aligned, Normal-cacheable bytes we exclusively own.
+                unsafe { zero_page_dc_zva(ptr, page_size) }
+            }
+            #[cfg(not(target_arch = "aarch64"))]
+            {
+                false
+            }
+        };
+        if !zeroed_fast {
+            unsafe { core::ptr::write_bytes(ptr, 0, page_size) };
+        }
     }
     let paddr = virt_to_phys(vaddr);
 
