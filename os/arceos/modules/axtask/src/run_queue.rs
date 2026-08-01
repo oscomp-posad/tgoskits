@@ -156,6 +156,64 @@ fn select_run_queue_index(cpumask: AxCpuMask) -> usize {
     this_cpu_id()
 }
 
+/// Eligible CPU in `cpumask` with the lowest capacity-weighted load. Tie-break, in
+/// order: (1) min effective_load, (2) max raw capacity (an empty A76 beats an empty
+/// A55 — this is what makes a lone compute task land on a big core), (3) `prefer`
+/// (last/current CPU) for cache warmth via a -1 load bias, (4) lowest index. Online
+/// CPUs only; falls back to the round-robin selector if the mask names no online CPU.
+///
+/// This is initial/wake *placement* only: it chooses where a new or waking task
+/// starts, and never migrates an already-running task off its core.
+#[cfg(all(feature = "smp", feature = "sched-loadbalance"))]
+fn select_least_loaded(cpumask: AxCpuMask, prefer: usize) -> usize {
+    use core::sync::atomic::Ordering;
+    assert!(!cpumask.is_empty(), "No available CPU for task execution");
+    let online = RUN_QUEUE_ONLINE.load(Ordering::Acquire);
+    let mut best: Option<(usize, usize, usize)> = None; // (cpu, eff_load, capacity)
+    for cpu in 0..ax_hal::cpu_num() {
+        if !cpumask.get(cpu) || (online & (1usize << cpu)) == 0 {
+            continue;
+        }
+        let load = get_run_queue(cpu).load();
+        // Bias the preferred (cache-warm) core down by one so it wins exact ties,
+        // without letting it override a genuinely less-loaded core.
+        let biased = if cpu == prefer {
+            load.saturating_sub(1)
+        } else {
+            load
+        };
+        let eff = effective_load(cpu, biased);
+        let cap = cpu_capacity(cpu);
+        let better = match best {
+            None => true,
+            Some((_, beff, bcap)) => eff < beff || (eff == beff && cap > bcap),
+        };
+        if better {
+            best = Some((cpu, eff, cap));
+        }
+    }
+    best.map(|(cpu, _, _)| cpu)
+        .unwrap_or_else(|| select_run_queue_index(cpumask))
+}
+
+/// Normalized compute capacity of `cpu` (big.LITTLE weighting), floored at 1 so
+/// `effective_load`'s division is always well-defined. Sourced from the device
+/// tree's `capacity-dmips-mhz` (A76 ~ 1024, A55 ~ 530); homogeneous machines
+/// (e.g. QEMU) report all-equal and this degrades to plain load-spreading.
+#[cfg(all(feature = "smp", feature = "sched-loadbalance"))]
+#[inline]
+fn cpu_capacity(cpu: usize) -> usize {
+    (ax_hal::dtb::cpu_capacities()[cpu] as usize).max(1)
+}
+
+/// Capacity-weighted load: `load * 1024 / capacity`. A unit of work costs more on a
+/// little core, so least-`effective_load` packs compute onto big cores.
+#[cfg(all(feature = "smp", feature = "sched-loadbalance"))]
+#[inline]
+fn effective_load(cpu: usize, load: usize) -> usize {
+    load.saturating_mul(1024) / cpu_capacity(cpu)
+}
+
 /// Retrieves a `'static` reference to the run queue corresponding to the given index.
 ///
 /// This function asserts that the provided index is within the range of available CPUs
@@ -499,6 +557,13 @@ pub(crate) fn select_run_queue<G: BaseGuard>(task: &AxTaskRef) -> AxRunQueueRef<
         // process's threads on the boot core (flat multi-core scaling). Wakeups
         // still prefer the waking/last CPU for cache warmth; see
         // `select_wake_run_queue`.
+        //
+        // With `sched-loadbalance`, placement is capacity-aware: a new task is
+        // steered to the least-loaded eligible core, preferring a big (A76) core
+        // when idle so a lone compute thread does not land on a little (A55) core.
+        #[cfg(feature = "sched-loadbalance")]
+        let index = select_least_loaded(task.cpumask(), this_cpu_id());
+        #[cfg(not(feature = "sched-loadbalance"))]
         let index = select_run_queue_index(task.cpumask());
         AxRunQueueRef {
             inner: get_run_queue(index),
