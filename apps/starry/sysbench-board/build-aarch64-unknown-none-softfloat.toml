@@ -14,6 +14,10 @@ features = [
   "ax-driver/rockchip-sdhci",
   "ax-driver/rockchip-dwmmc",
   "ax-driver/rk3588-cpufreq",
+  # Capacity-aware big.LITTLE task placement: a lone CPU-bound thread lands on a
+  # big (A76) core instead of a little (A55) core. Placement-only (initial +
+  # wake) — no continuous task migration, which regressed sysbench on-board.
+  "starry-kernel/sched-loadbalance",
 ]
 log = "Info"
 max_cpu_num = 8
