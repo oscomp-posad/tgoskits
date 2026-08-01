@@ -20,6 +20,9 @@ ext4 = ["ax-fs-ng/ext4"]
 input = ["dep:ax-input", "ax-runtime/input"]
 ipi = ["ax-runtime/ipi"]
 loongarch64-low-va = []
+# Capacity-aware big.LITTLE task placement (initial + wake), placement-only —
+# no continuous migration. See ax-task's `sched-loadbalance`.
+sched-loadbalance = ["ax-task/sched-loadbalance"]
 memtrack = ["axbacktrace/alloc", "ax-alloc/tracking"]
 rknpu = ["ax-driver/rknpu", "dep:ax-dma"]
 jpeg = ["ax-driver/jpeg", "dep:ax-dma"]

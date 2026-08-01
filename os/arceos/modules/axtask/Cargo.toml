@@ -47,6 +47,13 @@ uspace = ["ax-hal/uspace"]
 sched-cfs = ["multitask", "preempt"]
 sched-rr = ["multitask", "preempt"]
 
+# Capacity-aware big.LITTLE task placement (initial + wake). Placement-only: a
+# new/woken task is steered to the least-loaded eligible core, preferring a big
+# (A76) core when idle so a lone compute thread does not land on a little (A55)
+# core. Does NOT migrate already-running tasks (no idle-pull / push balancing).
+# Requires smp: there is nothing to place across on a single core.
+sched-loadbalance = ["smp"]
+
 host-test = [
   "ax-hal/host-test",
   "ax-kspin?/host-test",
