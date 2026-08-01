@@ -593,11 +593,29 @@ pub(crate) fn select_wake_run_queue<G: BaseGuard>(task: &AxTaskRef) -> AxRunQueu
     }
     #[cfg(feature = "smp")]
     {
-        let current_cpu = this_cpu_id();
-        let last_cpu = task.cpu_id() as usize;
-        let cpumask = task.cpumask();
-        let online = RUN_QUEUE_ONLINE.load(core::sync::atomic::Ordering::Acquire);
-        let is_online = |c: usize| (online & (1usize << c)) != 0;
+        // Capacity-aware wake placement: send the woken task to the least-loaded
+        // eligible core, but keep it on its cache-hot last CPU unless a clearly
+        // less-loaded core is free (select_idle_sibling-style hysteresis: a +1
+        // effective-load margin). This only chooses where the wake lands; a task
+        // already running is never migrated off its core.
+        #[cfg(feature = "sched-loadbalance")]
+        let index = {
+            let last_cpu = task.cpu_id() as usize;
+            let cpumask = task.cpumask();
+            let online = RUN_QUEUE_ONLINE.load(core::sync::atomic::Ordering::Acquire);
+            let is_online = |c: usize| (online & (1usize << c)) != 0;
+            let cand = select_least_loaded(cpumask, last_cpu);
+            if last_cpu < crate::build_info::CPU_CAPACITY
+                && cpumask.get(last_cpu)
+                && is_online(last_cpu)
+                && effective_load(last_cpu, get_run_queue(last_cpu).load())
+                    <= effective_load(cand, get_run_queue(cand).load()) + 1
+            {
+                last_cpu
+            } else {
+                cand
+            }
+        };
         // Prefer the CPU the woken task last ran on. This is cache-warm for the
         // *woken* task and, crucially, keeps threads spread out: preferring the
         // *waker's* CPU (as before) piled every worker onto one core whenever a
@@ -605,15 +623,23 @@ pub(crate) fn select_wake_run_queue<G: BaseGuard>(task: &AxTaskRef) -> AxRunQueu
         // re-collapsed the round-robin spawn placement and was why multi-threaded
         // workloads stayed on the boot core. Fall back to the waker's CPU, then
         // round-robin; only ever select an online CPU.
-        let index = if last_cpu < crate::build_info::CPU_CAPACITY
-            && cpumask.get(last_cpu)
-            && is_online(last_cpu)
-        {
-            last_cpu
-        } else if cpumask.get(current_cpu) {
-            current_cpu
-        } else {
-            select_run_queue_index(cpumask)
+        #[cfg(not(feature = "sched-loadbalance"))]
+        let index = {
+            let current_cpu = this_cpu_id();
+            let last_cpu = task.cpu_id() as usize;
+            let cpumask = task.cpumask();
+            let online = RUN_QUEUE_ONLINE.load(core::sync::atomic::Ordering::Acquire);
+            let is_online = |c: usize| (online & (1usize << c)) != 0;
+            if last_cpu < crate::build_info::CPU_CAPACITY
+                && cpumask.get(last_cpu)
+                && is_online(last_cpu)
+            {
+                last_cpu
+            } else if cpumask.get(current_cpu) {
+                current_cpu
+            } else {
+                select_run_queue_index(cpumask)
+            }
         };
         AxRunQueueRef {
             inner: get_run_queue(index),
