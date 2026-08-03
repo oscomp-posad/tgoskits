@@ -269,6 +269,12 @@ impl AddrSpace {
         self.validate_region(start, size)?;
         let end = start + size;
 
+        // THP: a sub-2 MiB DONTNEED on a promoted huge area rounds inward to a
+        // no-op (regression) unless the partially-covered area is split to 4 KiB
+        // first.
+        #[cfg(feature = "thp")]
+        self.split_huge_for_partial_op(start, end)?;
+
         let mut frags: alloc::vec::Vec<(VirtAddrRange, Backend)> = alloc::vec::Vec::new();
         for area in self.areas.iter() {
             if area.start() >= end {
@@ -305,6 +311,12 @@ impl AddrSpace {
     /// aligned.
     pub fn unmap(&mut self, start: VirtAddr, size: usize) -> AxResult {
         self.validate_region(start, size)?;
+
+        // THP: a partial munmap that cuts through a promoted 2 MiB area must
+        // split it to 4 KiB first, else the memory-set shrink/split lands
+        // mid-block and errors (DynPageIter None) or clears the whole block.
+        #[cfg(feature = "thp")]
+        self.split_huge_for_partial_op(start, start + size)?;
 
         // Compute the actual mapped bytes being removed (unmap is already O(n)).
         let end = start + size;
@@ -521,6 +533,11 @@ impl AddrSpace {
     ) -> AxResult {
         self.validate_region(start, size)?;
 
+        // THP: a partial mprotect that cuts through a promoted 2 MiB area must
+        // split it to 4 KiB first (single backend page size per VMA).
+        #[cfg(feature = "thp")]
+        self.split_huge_for_partial_op(start, start + size)?;
+
         let touched_memfds =
             crate::syscall::memfd_collect_metas_touching_mprotect_range(self, start, size);
         let _rss = RssAccountingGuard::enter(&self.rss);
@@ -576,6 +593,79 @@ impl AddrSpace {
         }
 
         false
+    }
+
+    /// THP: split every `Size2M` anonymous area that operation `[start, end)`
+    /// only *partially* covers into 4 KiB PTEs, so a following sub-2 MiB
+    /// `unmap`/`protect`/`discard` on it is well-formed. Areas fully contained
+    /// in `[start, end)` are left as 2 MiB blocks (whole-block ops stay valid).
+    #[cfg(feature = "thp")]
+    fn split_huge_for_partial_op(&mut self, start: VirtAddr, end: VirtAddr) -> AxResult {
+        let mut to_split = alloc::vec::Vec::new();
+        for area in self.areas.iter() {
+            if area.start() >= end {
+                break;
+            }
+            if area.end() <= start {
+                continue;
+            }
+            let is_huge = matches!(
+                area.backend(),
+                Backend::Cow(c) if c.is_anonymous() && c.page_size() == PageSize::Size2M
+            );
+            // Partial coverage: an op boundary lies strictly inside the area.
+            if is_huge && (area.start() < start || end < area.end()) {
+                to_split.push(area.start());
+            }
+        }
+        for area_start in to_split {
+            self.split_huge_area(area_start)?;
+        }
+        Ok(())
+    }
+
+    /// THP: convert one entire `Size2M` anonymous area to 4 KiB granularity.
+    ///
+    /// Every resident 2 MiB block is re-mapped as 512 leaf PTEs (see
+    /// [`split_huge_block_2m`](backend::split_huge_block_2m)) and the area's
+    /// backend page size is downgraded to 4 KiB. A [`MemoryArea`] carries a
+    /// single backend page size, so touching any block forces the whole area
+    /// down to 4 KiB — the PTEs and the backend size stay consistent.
+    #[cfg(feature = "thp")]
+    fn split_huge_area(&mut self, area_start: VirtAddr) -> AxResult {
+        let (start, end, size, flags, reported_flags) = {
+            let Some(area) = self.areas.find(area_start) else {
+                return Ok(());
+            };
+            match area.backend() {
+                Backend::Cow(c) if c.is_anonymous() && c.page_size() == PageSize::Size2M => {}
+                _ => return Ok(()),
+            }
+            (
+                area.start(),
+                area.end(),
+                area.size(),
+                area.flags(),
+                area.reported_flags(),
+            )
+        };
+        let mut va = start;
+        while va < end {
+            let mut cursor = self.pt.cursor();
+            backend::split_huge_block_2m(va, Some(&self.rss), &mut cursor)?;
+            drop(cursor);
+            va += PageSize::Size2M as usize;
+        }
+        // PTEs are now 4 KiB; downgrade the VMA to a fresh 4 KiB anon backend.
+        let new_backend = Backend::new_alloc(start, PageSize::Size4K, "");
+        self.replace_area_metadata_with_reported_flags(
+            start,
+            size,
+            flags,
+            reported_flags,
+            new_backend,
+        )?;
+        Ok(())
     }
 
     /// Handles a page fault at the given address.

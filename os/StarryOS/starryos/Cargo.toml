@@ -34,6 +34,9 @@ rknpu = ["ax-driver/rknpu", "starry-kernel/rknpu"]
 jpeg = ["ax-driver/jpeg", "starry-kernel/jpeg"]
 rk3588-pwm = ["starry-kernel/rk3588-pwm"]
 stack-protector = ["ax-std/stack-protector", "starry-kernel/stack-protector"]
+# Transparent 2 MiB huge pages for private anon memory. Opt-in, OFF by default
+# (not in `default`); build with `FEATURES=thp`. See starry-kernel/thp.
+thp = ["starry-kernel/thp"]
 
 [[bin]]
 name = "starryos"

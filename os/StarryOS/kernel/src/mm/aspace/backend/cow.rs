@@ -76,6 +76,116 @@ impl FrameTableRefCount {
 
 static FRAME_TABLE: SpinNoIrq<FrameTableRefCount> = SpinNoIrq::new(FrameTableRefCount::new());
 
+/// Split one resident 2 MiB anonymous block at `block_va` into 512 identical
+/// 4 KiB PTEs, converting the physical frame, [`FRAME_TABLE`] refcount, and RSS
+/// charge to 4 KiB granularity so a subsequent 4 KiB `munmap`/`mprotect`/
+/// `madvise` on a sub-range of the block is well-formed instead of hitting
+/// [`DynPageIter`] `None` or a page-table alignment assert.
+///
+/// - Exclusive frame (refcount 1): the backing 2 MiB buddy block is exploded in
+///   place into 512 order-0 frames and re-mapped as 512 leaf PTEs pointing at
+///   the *same* physical pages (no copy).
+/// - COW-shared frame (refcount > 1, after fork): a fresh exclusive 2 MiB frame
+///   is allocated, the 2 MiB contents copied, this address space's reference to
+///   the shared frame dropped, and the fresh frame exploded + mapped. Other
+///   address spaces keep their intact 2 MiB block view of the shared frame.
+///
+/// No-op if `block_va` is not currently resident (a lazy / unfaulted block: the
+/// caller downgrades the backend to 4 KiB so future faults are 4 KiB anyway).
+///
+/// The current block PTE permissions are preserved on the 512 leaf PTEs, so COW
+/// write-protection (and hence lazy first-write copy) is not broken by the split.
+///
+/// `block_va` must be 2 MiB-aligned. Must be called with the owning
+/// [`super::AddrSpace`] locked (single writer per frame table entry).
+#[cfg(feature = "thp")]
+pub(crate) fn split_huge_block_2m(
+    block_va: VirtAddr,
+    acct: Option<&MemoryAccounting>,
+    pt: &mut PageTableCursor,
+) -> AxResult {
+    const HUGE: PageSize = PageSize::Size2M;
+    const SUBPAGES: usize = HUGE as usize / PAGE_SIZE_4K; // 512
+
+    debug_assert!(HUGE.is_aligned(block_va.as_usize()), "block_va not 2M-aligned");
+
+    let (old_paddr, flags, size) = match pt.query(block_va) {
+        Ok(v) => v,
+        Err(PagingError::NotMapped) => return Ok(()),
+        Err(_) => return Err(AxError::BadAddress),
+    };
+    if size != HUGE {
+        // Already split, or never a huge block: nothing to do.
+        return Ok(());
+    }
+
+    // Classify the frame as exclusive or COW-shared.
+    let frame_ref = FRAME_TABLE
+        .lock()
+        .get_frame_ref(old_paddr)
+        .ok_or(AxError::BadAddress)?;
+    let shared = {
+        let cnt = frame_ref.lock();
+        assert!(cnt.count > 0, "splitting unreferenced huge frame");
+        cnt.count > 1
+    };
+
+    // Prepare the target physical frame and its 512 order-0 refcount entries.
+    let target_paddr = if shared {
+        // Break COW: private copy into a fresh exclusive 2 MiB frame.
+        let new_paddr = alloc_frame(false, HUGE)?;
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                phys_to_virt(old_paddr).as_ptr(),
+                phys_to_virt(new_paddr).as_mut_ptr(),
+                HUGE as usize,
+            );
+        }
+        // Drop this aspace's reference to the shared frame; peers keep theirs.
+        frame_ref.lock().drop_frame(old_paddr, HUGE);
+        new_paddr
+    } else {
+        // Exclusive: retag the same buddy block in place. Remove the single
+        // 2 MiB refcount entry first; it is re-registered as 512 4 KiB entries.
+        FRAME_TABLE.lock().remove_frame(old_paddr);
+        old_paddr
+    };
+    super::split_frame(target_paddr);
+    {
+        let mut table = FRAME_TABLE.lock();
+        for i in 0..SUBPAGES {
+            table.init_frame(target_paddr + i * PAGE_SIZE_4K);
+        }
+    }
+
+    // Break-before-make: drop the 2 MiB block PTE, flush its (broadcast) TLB
+    // entry, then install 512 leaf PTEs preserving the block's permissions.
+    pt.unmap(block_va)?;
+    pt.flush();
+    for i in 0..SUBPAGES {
+        let va = block_va + i * PAGE_SIZE_4K;
+        let pa = target_paddr + i * PAGE_SIZE_4K;
+        pt.map(va, pa, PageSize::Size4K, flags)?;
+    }
+
+    // Convert the single 2 MiB RSS charge into 512 4 KiB charges so per-4 KiB
+    // unmap/reclassify finds an entry at each page VA.
+    if let Some(acct) = acct {
+        let kind = match acct.charge_kind(block_va) {
+            Some(k) => {
+                acct.remove_charge(block_va);
+                k
+            }
+            None => RssKind::Anon,
+        };
+        for i in 0..SUBPAGES {
+            acct.record_charge(block_va + i * PAGE_SIZE_4K, kind)?;
+        }
+    }
+
+    Ok(())
+}
+
 fn cow_file_max_read_len(
     file_len: u64,
     file_end: Option<u64>,

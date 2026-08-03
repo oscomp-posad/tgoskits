@@ -23,6 +23,8 @@ mod shared;
 
 #[cfg(axtest)]
 pub(crate) use self::cow::private_mmap_eof_check_for_test;
+#[cfg(feature = "thp")]
+pub(crate) use self::cow::split_huge_block_2m;
 pub use self::shared::SharedPages;
 pub use super::accounting::RssKind;
 use super::{
@@ -127,6 +129,18 @@ pub(crate) fn dealloc_frame(frame: PhysAddr, align: PageSize) {
     let page_size: usize = align.into();
     let num_pages = page_size / PAGE_SIZE_4K;
     global_allocator().dealloc_pages(vaddr.as_usize(), num_pages, UsageKind::VirtMem);
+}
+
+/// Explode the contiguous physical frame at `frame` (allocated as one large
+/// buddy block) into independently-freeable 4 KiB frames, so each 4 KiB page
+/// can later be released one at a time via [`dealloc_frame`]`(.., Size4K)`.
+///
+/// Metadata-only rewrite in the page allocator — no contents move and the total
+/// allocated byte count is unchanged. Used by the THP huge->4K split.
+#[cfg(feature = "thp")]
+pub(crate) fn split_frame(frame: PhysAddr) {
+    let vaddr = phys_to_virt(frame);
+    global_allocator().split_pages(vaddr.as_usize());
 }
 
 fn pages_in(range: VirtAddrRange, align: PageSize) -> AxResult<DynPageIter<VirtAddr>> {

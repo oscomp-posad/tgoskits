@@ -57,6 +57,12 @@ sg2002-cvi-usb-camera = [
 stack-guard-page = ["ax-runtime/stack-guard-page"]
 stack-protector = ["ax-runtime/stack-protector"]
 axtest = []
+# Transparent 2 MiB huge pages ("THP-lite") for private anonymous memory.
+# Opt-in and OFF by default: with this feature disabled the promotion and
+# huge->4K split code is not compiled, so the page-fault/mmap hot paths are
+# byte-for-byte unchanged. Only meaningful on aarch64 + the buddy-slab
+# allocator (RK3588 board / dynamic platform build).
+thp = []
 
 [dependencies]
 ax-alloc = { workspace = true }
