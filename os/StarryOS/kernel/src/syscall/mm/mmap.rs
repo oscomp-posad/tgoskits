@@ -86,6 +86,91 @@ fn capped_device_map_len(request_len: usize, available_len: usize, page_size: Pa
     request_len.min(available_len.align_up(page_size))
 }
 
+/// THP-lite: is a private-anonymous `mmap` eligible for transparent 2 MiB
+/// promotion? Gated on a writable mapping of at least one 2 MiB block that does
+/// not opt out via `MAP_NORESERVE` (sparse touch would inflate RSS/VA) or a
+/// per-process `PR_SET_THP_DISABLE`.
+#[cfg(feature = "thp")]
+fn thp_eligible(
+    map_flags: MmapFlags,
+    mapping_flags: MappingFlags,
+    length: usize,
+    thp_disabled: bool,
+) -> bool {
+    length >= PageSize::Size2M as usize
+        && mapping_flags.contains(MappingFlags::WRITE)
+        && !map_flags.contains(MmapFlags::NORESERVE)
+        && !thp_disabled
+}
+
+/// THP-lite: back the interior of a large private-anonymous mapping with 2 MiB
+/// blocks. The region is carved into `[4 KiB head][2 MiB body][4 KiB tail]` —
+/// only the 2 MiB-aligned interior gets a `Size2M` backend; the unaligned edges
+/// stay `Size4K`. The whole area is never rounded up to 2 MiB (that would break
+/// `/proc/*/maps` and the mmap return length).
+///
+/// Returns `Ok(true)` when the mapping was installed, `Ok(false)` when alignment
+/// leaves no full 2 MiB block (caller falls back to a plain 4 KiB mapping). On a
+/// mid-carve error the whole region is unmapped so no partial mapping leaks.
+#[cfg(feature = "thp")]
+fn thp_map_promoted_anon(
+    aspace: &mut crate::mm::AddrSpace,
+    start: VirtAddr,
+    length: usize,
+    flags: MappingFlags,
+    reported_flags: MappingFlags,
+    populate: bool,
+) -> AxResult<bool> {
+    let region_end = start + length;
+    let body_start = start.align_up(PageSize::Size2M);
+    let body_end = region_end.align_down(PageSize::Size2M);
+    if body_start >= body_end {
+        // Misalignment leaves no full 2 MiB block; use the plain 4 KiB path.
+        return Ok(false);
+    }
+
+    let carve = |aspace: &mut crate::mm::AddrSpace| -> AxResult {
+        if start < body_start {
+            aspace.map_with_reported_flags(
+                start,
+                body_start - start,
+                flags,
+                reported_flags,
+                populate,
+                Backend::new_alloc(start, PageSize::Size4K, ""),
+            )?;
+        }
+        aspace.map_with_reported_flags(
+            body_start,
+            body_end - body_start,
+            flags,
+            reported_flags,
+            populate,
+            Backend::new_alloc(body_start, PageSize::Size2M, ""),
+        )?;
+        if body_end < region_end {
+            aspace.map_with_reported_flags(
+                body_end,
+                region_end - body_end,
+                flags,
+                reported_flags,
+                populate,
+                Backend::new_alloc(body_end, PageSize::Size4K, ""),
+            )?;
+        }
+        Ok(())
+    };
+
+    match carve(aspace) {
+        Ok(()) => Ok(true),
+        Err(err) => {
+            // Roll back any sub-area already mapped so the mmap fails atomically.
+            let _ = aspace.unmap(start, length);
+            Err(err)
+        }
+    }
+}
+
 bitflags::bitflags! {
     /// flags for sys_mmap
     ///
@@ -343,6 +428,34 @@ pub fn sys_mmap(
 
     let mut mapping_flags: MappingFlags = permission_flags.into();
     let reported_mapping_flags = reported_mapping_flags_from_prot(permission_flags);
+
+    // THP-lite: transparently back large, writable, private anonymous mappings
+    // with 2 MiB blocks (512x fewer faults + one TLB block entry per 2 MiB).
+    // Only the explicit (non-MAP_HUGETLB) 4 KiB anon path is promoted; the carve
+    // keeps unaligned edges at 4 KiB and falls through to the plain 4 KiB path
+    // when ineligible or when alignment leaves no full 2 MiB block.
+    #[cfg(feature = "thp")]
+    if anonymous
+        && matches!(map_type, MmapFlags::PRIVATE)
+        && page_size == PageSize::Size4K
+        && thp_eligible(
+            map_flags,
+            mapping_flags,
+            length,
+            curr.as_thread().proc_data.thp_disable() != 0,
+        )
+        && thp_map_promoted_anon(
+            &mut aspace,
+            start,
+            length,
+            mapping_flags,
+            reported_mapping_flags,
+            map_flags.contains(MmapFlags::POPULATE),
+        )?
+    {
+        drop(aspace);
+        return Ok(start.as_usize() as _);
+    }
 
     let backend = match map_type {
         MmapFlags::SHARED => {
