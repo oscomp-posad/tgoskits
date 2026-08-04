@@ -14,9 +14,13 @@ features = [
   "ax-driver/rockchip-sdhci",
   "ax-driver/rockchip-dwmmc",
   "ax-driver/rk3588-cpufreq",
+  "starry-kernel/thp",
   # Capacity-aware big.LITTLE task placement: a lone CPU-bound thread lands on a
-  # big (A76) core instead of a little (A55) core. Placement-only (initial +
-  # wake) — no continuous task migration, which regressed sysbench on-board.
+  # big (A76) core instead of a little (A55) core. Fork placement now uses a single
+  # per-CPU occupancy counter (ready+running), so a burst of sibling threads spreads
+  # across ALL cores and spills onto the little cluster — fixing the multi-thread
+  # clustering that the earlier two-atom (nr_running + is-running flag) scheme hit.
+  # Placement-only (initial fork) — no continuous migration, no wake redirect.
   "starry-kernel/sched-loadbalance",
 ]
 log = "Info"
