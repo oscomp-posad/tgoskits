@@ -213,8 +213,14 @@ fn select_least_loaded(cpumask: AxCpuMask) -> usize {
         let n = DIAG.fetch_add(1, Ordering::Relaxed);
         if n < 48 && ax_hal::cpu_num() >= 8 {
             let o = |c: usize| get_run_queue(c).occ();
+            let cap = |c: usize| cpu_capacity(c);
+            // Log occ AND capacity so the board run disambiguates the t=1-on-A55
+            // regression: if cap[4..8] > cap[0..4] but a low-occ A76 was NOT chosen,
+            // the fault is occ (a big core reads busy); if cap is all-equal, the DTS
+            // capacity table failed to parse and placement degraded to lowest-index.
             log::info!(
-                "occ-diag[{n}] chosen={chosen} occ=[{} {} {} {} {} {} {} {}] online={:#x}",
+                "occ-diag[{n}] chosen={chosen} occ=[{} {} {} {} {} {} {} {}] cap=[{} {} {} {} {} \
+                 {} {} {}] online={:#x}",
                 o(0),
                 o(1),
                 o(2),
@@ -223,6 +229,14 @@ fn select_least_loaded(cpumask: AxCpuMask) -> usize {
                 o(5),
                 o(6),
                 o(7),
+                cap(0),
+                cap(1),
+                cap(2),
+                cap(3),
+                cap(4),
+                cap(5),
+                cap(6),
+                cap(7),
                 online
             );
         }
