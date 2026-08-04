@@ -203,8 +203,31 @@ fn select_least_loaded(cpumask: AxCpuMask) -> usize {
             best = Some((cpu, eff, cap));
         }
     }
-    best.map(|(cpu, ..)| cpu)
-        .unwrap_or_else(|| select_run_queue_index(cpumask))
+    let chosen = best
+        .map(|(cpu, ..)| cpu)
+        .unwrap_or_else(|| select_run_queue_index(cpumask));
+    // TEMP DIAG: dump per-CPU occupancy at the first placements so the board serial
+    // log reveals which cores read as busy (the t=8-on-2-A55 regression). Remove.
+    {
+        static DIAG: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+        let n = DIAG.fetch_add(1, Ordering::Relaxed);
+        if n < 48 && ax_hal::cpu_num() >= 8 {
+            let o = |c: usize| get_run_queue(c).occ();
+            log::info!(
+                "occ-diag[{n}] chosen={chosen} occ=[{} {} {} {} {} {} {} {}] online={:#x}",
+                o(0),
+                o(1),
+                o(2),
+                o(3),
+                o(4),
+                o(5),
+                o(6),
+                o(7),
+                online
+            );
+        }
+    }
+    chosen
 }
 
 /// Normalized compute capacity of `cpu` (big.LITTLE weighting), floored at 1 so
@@ -800,6 +823,25 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
     #[cfg(feature = "irq")]
     pub fn scheduler_timer_tick(&mut self) {
         let curr = &self.current_task;
+        // Self-heal placement occupancy against any accumulated drift in the
+        // incremental `occ_inc`/`occ_dec` hooks. The true occupancy of THIS CPU is
+        // its ready-queue length (`nr_running`, maintained correctly under the
+        // scheduler lock) plus one if it is currently running a non-idle task. Recompute
+        // and publish it every tick, on every CPU (idle CPUs included, so a stale-busy
+        // count cannot persist). The incremental hooks still give sub-tick accuracy for
+        // a burst of spawns between ticks; this only bounds long-run drift to one tick,
+        // so a benchmark started after boot churn sees a correct per-core load.
+        #[cfg(all(feature = "smp", feature = "sched-loadbalance"))]
+        {
+            let ready = self
+                .inner
+                .nr_running
+                .load(core::sync::atomic::Ordering::Relaxed);
+            let running = if curr.is_idle() { 0 } else { 1 };
+            self.inner
+                .occ
+                .store(ready + running, core::sync::atomic::Ordering::Relaxed);
+        }
         if !curr.is_idle() {
             // Ondemand-governor load accounting: this CPU ran a real (non-idle)
             // task this tick. Already IRQ + preempt off here; a single relaxed
@@ -1172,7 +1214,18 @@ impl AxRunQueue {
     #[cfg(all(feature = "smp", feature = "sched-loadbalance"))]
     #[inline]
     fn occ_dec(&self) {
-        let prev = self.occ.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
+        // Saturating: a decrement below zero would wrap the unsigned counter and make
+        // the CPU look infinitely busy until the next tick's resync. Clamp at 0 so a
+        // transient hook imbalance degrades to a harmless slight under-count instead.
+        // `debug_assert` still flags a real missed `occ_inc` in test builds.
+        let prev = self
+            .occ
+            .fetch_update(
+                core::sync::atomic::Ordering::Relaxed,
+                core::sync::atomic::Ordering::Relaxed,
+                |v| Some(v.saturating_sub(1)),
+            )
+            .unwrap_or(0);
         debug_assert!(prev > 0, "AxRunQueue::occ underflow on CPU {}", self.cpu_id);
     }
 
