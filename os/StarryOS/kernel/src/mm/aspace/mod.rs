@@ -225,21 +225,43 @@ impl AddrSpace {
         let end = start + size;
 
         loop {
+            #[cfg(feature = "thp")]
+            let mut downgrade_area: Option<VirtAddr> = None;
             let (area_end, callback) = {
                 let Some(area) = self.areas.find(start) else {
                     break;
                 };
                 let range = VirtAddrRange::new(start, area.end().min(end));
                 let flags = area.flags();
-                let (_, callback) = area.backend().populate(
+                #[cfg(feature = "thp")]
+                let area_start = area.start();
+                #[cfg(feature = "thp")]
+                let page_size = area.backend().page_size();
+                match area.backend().populate(
                     range,
                     flags,
                     access_flags,
                     Some(&self.rss),
                     &mut self.pt.cursor(),
-                )?;
-                (area.end(), callback)
+                ) {
+                    Ok((_, callback)) => (area.end(), callback),
+                    // THP fragmentation fallback: a 2 MiB anon area that cannot
+                    // obtain an order-9 frame is downgraded to 4 KiB and the same
+                    // `start` retried at 4 KiB below (never fail an eager fill on
+                    // a fragmented heap).
+                    #[cfg(feature = "thp")]
+                    Err(AxError::NoMemory) if page_size == PageSize::Size2M => {
+                        downgrade_area = Some(area_start);
+                        (area.end(), None)
+                    }
+                    Err(err) => return Err(err),
+                }
             };
+            #[cfg(feature = "thp")]
+            if let Some(area_start) = downgrade_area {
+                self.split_huge_area(area_start)?;
+                continue;
+            }
             // Run the eviction cleanup the populate deferred (unmap + TLB flush
             // for page-cache pages evicted during this fill). Dropping it — as
             // the old code did — frees an evicted frame while its user PTE still
@@ -678,37 +700,72 @@ impl AddrSpace {
         if !self.va_range.contains(vaddr) {
             return false;
         }
-        if let Some(area) = self.areas.find(vaddr) {
-            let flags = area.flags();
-            if flags.contains(access_flags) {
-                let page_size = area.backend().page_size();
-                let populate_result = area.backend().populate(
-                    VirtAddrRange::from_start_size(vaddr.align_down(page_size), page_size as _),
-                    flags,
-                    access_flags,
-                    Some(&self.rss),
-                    &mut self.pt.cursor(),
-                );
-                return match populate_result {
-                    Ok((n, callback)) => {
-                        if let Some(cb) = callback {
-                            cb(self);
-                        }
-                        if n == 0 {
-                            warn!("No pages populated for {vaddr:?} ({flags:?})");
-                            false
-                        } else {
-                            true
-                        }
-                    }
-                    Err(err) => {
-                        warn!("Failed to populate pages for {vaddr:?} ({flags:?}): {err}");
-                        false
-                    }
-                };
+        let Some((flags, page_size, _area_start)) = self
+            .areas
+            .find(vaddr)
+            .map(|area| (area.flags(), area.backend().page_size(), area.start()))
+        else {
+            return false;
+        };
+        if !flags.contains(access_flags) {
+            return false;
+        }
+
+        let range = VirtAddrRange::from_start_size(vaddr.align_down(page_size), page_size as _);
+        let mut populate_result = self.populate_range(range, flags, access_flags);
+
+        // THP fragmentation fallback: a 2 MiB anon block that cannot obtain an
+        // order-9 buddy frame downgrades its whole area to 4 KiB and re-faults
+        // at 4 KiB, so a fragmented heap never turns a huge promotion into a
+        // fatal fault. The exclusive in-place split needs no allocation.
+        #[cfg(feature = "thp")]
+        if matches!(populate_result, Err(AxError::NoMemory))
+            && page_size == PageSize::Size2M
+            && self.split_huge_area(_area_start).is_ok()
+        {
+            let range4k =
+                VirtAddrRange::from_start_size(vaddr.align_down(PageSize::Size4K), PAGE_SIZE_4K);
+            populate_result = self.populate_range(range4k, flags, access_flags);
+        }
+
+        match populate_result {
+            Ok((n, callback)) => {
+                if let Some(cb) = callback {
+                    cb(self);
+                }
+                if n == 0 {
+                    warn!("No pages populated for {vaddr:?} ({flags:?})");
+                    false
+                } else {
+                    true
+                }
+            }
+            Err(err) => {
+                warn!("Failed to populate pages for {vaddr:?} ({flags:?}): {err}");
+                false
             }
         }
-        false
+    }
+
+    /// Populates the area covering `range.start` over `range` via its backend.
+    /// Thin helper so [`handle_page_fault`](Self::handle_page_fault) can drop the
+    /// area borrow between the huge attempt and a 4 KiB fallback retry.
+    fn populate_range(
+        &mut self,
+        range: VirtAddrRange,
+        flags: MappingFlags,
+        access_flags: MappingFlags,
+    ) -> AxResult<(usize, Option<backend::PopulateCallback>)> {
+        let Some(area) = self.areas.find(range.start) else {
+            return Err(AxError::BadAddress);
+        };
+        area.backend().populate(
+            range,
+            flags,
+            access_flags,
+            Some(&self.rss),
+            &mut self.pt.cursor(),
+        )
     }
 
     /// Attempts to clone the current address space into a new one.

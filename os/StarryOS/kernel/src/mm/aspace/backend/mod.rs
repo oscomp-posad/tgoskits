@@ -147,7 +147,7 @@ fn pages_in(range: VirtAddrRange, align: PageSize) -> AxResult<DynPageIter<VirtA
     DynPageIter::new(range.start, range.end, align as usize).ok_or(AxError::InvalidInput)
 }
 
-type PopulateCallback = Box<dyn FnOnce(&mut AddrSpace)>;
+pub(crate) type PopulateCallback = Box<dyn FnOnce(&mut AddrSpace)>;
 
 #[enum_dispatch]
 pub trait BackendOps {
