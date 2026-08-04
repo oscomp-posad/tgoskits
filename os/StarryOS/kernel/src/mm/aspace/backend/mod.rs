@@ -24,7 +24,7 @@ mod shared;
 #[cfg(axtest)]
 pub(crate) use self::cow::private_mmap_eof_check_for_test;
 #[cfg(feature = "thp")]
-pub(crate) use self::cow::split_huge_block_2m;
+pub(crate) use self::cow::{abort_huge_split_2m, commit_huge_split_2m, prepare_huge_split_2m};
 pub use self::shared::SharedPages;
 pub use super::accounting::RssKind;
 use super::{

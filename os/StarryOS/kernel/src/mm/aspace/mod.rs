@@ -648,11 +648,16 @@ impl AddrSpace {
 
     /// THP: convert one entire `Size2M` anonymous area to 4 KiB granularity.
     ///
-    /// Every resident 2 MiB block is re-mapped as 512 leaf PTEs (see
-    /// [`split_huge_block_2m`](backend::split_huge_block_2m)) and the area's
+    /// Every resident 2 MiB block is re-mapped as 512 leaf PTEs and the area's
     /// backend page size is downgraded to 4 KiB. A [`MemoryArea`] carries a
     /// single backend page size, so touching any block forces the whole area
     /// down to 4 KiB — the PTEs and the backend size stay consistent.
+    ///
+    /// Atomic against allocation failure: all COW-break copies are prepared
+    /// first ([`prepare_huge_split_2m`](backend::prepare_huge_split_2m)); if any
+    /// block cannot be prepared the prepared ones are released and the area is
+    /// left untouched (still a valid `Size2M` area), so a fragmented / OOM heap
+    /// never leaves the area in a mixed 2 MiB/4 KiB state.
     #[cfg(feature = "thp")]
     fn split_huge_area(&mut self, area_start: VirtAddr) -> AxResult {
         let (start, end, size, flags, reported_flags) = {
@@ -671,13 +676,36 @@ impl AddrSpace {
                 area.reported_flags(),
             )
         };
+
+        // Phase 1: prepare every resident block (pre-allocates COW-break copies).
+        // On any failure release what was prepared and leave the area untouched.
+        let mut plans = alloc::vec::Vec::new();
         let mut va = start;
+        let mut prepare_err = None;
         while va < end {
-            let mut cursor = self.pt.cursor();
-            backend::split_huge_block_2m(va, Some(&self.rss), &mut cursor)?;
-            drop(cursor);
+            match backend::prepare_huge_split_2m(va, &self.pt) {
+                Ok(Some(plan)) => plans.push(plan),
+                Ok(None) => {}
+                Err(err) => {
+                    prepare_err = Some(err);
+                    break;
+                }
+            }
             va += PageSize::Size2M as usize;
         }
+        if let Some(err) = prepare_err {
+            for plan in plans {
+                backend::abort_huge_split_2m(plan);
+            }
+            return Err(err);
+        }
+
+        // Phase 2: commit each prepared block (no data-frame allocation).
+        for plan in plans {
+            let mut cursor = self.pt.cursor();
+            backend::commit_huge_split_2m(plan, Some(&self.rss), &mut cursor)?;
+        }
+
         // PTEs are now 4 KiB; downgrade the VMA to a fresh 4 KiB anon backend.
         let new_backend = Backend::new_alloc(start, PageSize::Size4K, "");
         self.replace_area_metadata_with_reported_flags(
