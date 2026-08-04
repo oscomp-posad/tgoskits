@@ -85,10 +85,11 @@ static FRAME_TABLE: SpinNoIrq<FrameTableRefCount> = SpinNoIrq::new(FrameTableRef
 /// - Exclusive frame (refcount 1): the backing 2 MiB buddy block is exploded in
 ///   place into 512 order-0 frames and re-mapped as 512 leaf PTEs pointing at
 ///   the *same* physical pages (no copy).
-/// - COW-shared frame (refcount > 1, after fork): a fresh exclusive 2 MiB frame
-///   is allocated, the 2 MiB contents copied, this address space's reference to
-///   the shared frame dropped, and the fresh frame exploded + mapped. Other
-///   address spaces keep their intact 2 MiB block view of the shared frame.
+/// - COW-shared frame (refcount > 1, after fork): the 2 MiB contents are copied
+///   into a private frame (a fresh contiguous 2 MiB frame when available, else
+///   512 individual 4 KiB frames under fragmentation), this address space's
+///   reference to the shared frame is dropped, and the private frame(s) mapped.
+///   Other address spaces keep their intact 2 MiB block view of the shared frame.
 ///
 /// No-op if `block_va` is not currently resident (a lazy / unfaulted block: the
 /// caller downgrades the backend to 4 KiB so future faults are 4 KiB anyway).
@@ -130,10 +131,22 @@ pub(crate) fn split_huge_block_2m(
         cnt.count > 1
     };
 
-    // Prepare the target physical frame and its 512 order-0 refcount entries.
-    let target_paddr = if shared {
-        // Break COW: private copy into a fresh exclusive 2 MiB frame.
-        let new_paddr = alloc_frame(false, HUGE)?;
+    // Build the 512 target 4 KiB sub-frame physical addresses.
+    //
+    // - Exclusive (refcount 1): explode the same 2 MiB buddy block in place; the
+    //   sub-frames are `old_paddr + i*4K` (no copy).
+    // - COW-shared (refcount > 1, after fork): break COW into a private copy.
+    //   Prefer one contiguous 2 MiB frame (cheap, exploded like the exclusive
+    //   case); fall back to 512 individual 4 KiB frames under fragmentation so a
+    //   COW write fault or partial munmap on a forked huge area never fails for
+    //   lack of an order-9 block.
+    let sub_paddrs: alloc::vec::Vec<PhysAddr> = if !shared {
+        // Retag the same buddy block. Remove the single 2 MiB refcount entry
+        // first; it is re-registered as 512 4 KiB entries below.
+        FRAME_TABLE.lock().remove_frame(old_paddr);
+        super::split_frame(old_paddr);
+        (0..SUBPAGES).map(|i| old_paddr + i * PAGE_SIZE_4K).collect()
+    } else if let Ok(new_paddr) = alloc_frame(false, HUGE) {
         unsafe {
             core::ptr::copy_nonoverlapping(
                 phys_to_virt(old_paddr).as_ptr(),
@@ -143,18 +156,41 @@ pub(crate) fn split_huge_block_2m(
         }
         // Drop this aspace's reference to the shared frame; peers keep theirs.
         frame_ref.lock().drop_frame(old_paddr, HUGE);
-        new_paddr
+        super::split_frame(new_paddr);
+        (0..SUBPAGES).map(|i| new_paddr + i * PAGE_SIZE_4K).collect()
     } else {
-        // Exclusive: retag the same buddy block in place. Remove the single
-        // 2 MiB refcount entry first; it is re-registered as 512 4 KiB entries.
-        FRAME_TABLE.lock().remove_frame(old_paddr);
-        old_paddr
+        // Scatter fallback: copy into 512 independent 4 KiB frames.
+        let mut frames = alloc::vec::Vec::with_capacity(SUBPAGES);
+        for i in 0..SUBPAGES {
+            match alloc_frame(false, PageSize::Size4K) {
+                Ok(f) => {
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            phys_to_virt(old_paddr + i * PAGE_SIZE_4K).as_ptr(),
+                            phys_to_virt(f).as_mut_ptr(),
+                            PAGE_SIZE_4K,
+                        );
+                    }
+                    frames.push(f);
+                }
+                Err(err) => {
+                    // Roll back the partial scatter allocation; the shared 2 MiB
+                    // frame is untouched (ref not yet dropped) so peers are safe.
+                    for f in frames {
+                        dealloc_frame(f, PageSize::Size4K);
+                    }
+                    return Err(err);
+                }
+            }
+        }
+        frame_ref.lock().drop_frame(old_paddr, HUGE);
+        frames
     };
-    super::split_frame(target_paddr);
+
     {
         let mut table = FRAME_TABLE.lock();
-        for i in 0..SUBPAGES {
-            table.init_frame(target_paddr + i * PAGE_SIZE_4K);
+        for &pa in &sub_paddrs {
+            table.init_frame(pa);
         }
     }
 
@@ -162,10 +198,8 @@ pub(crate) fn split_huge_block_2m(
     // entry, then install 512 leaf PTEs preserving the block's permissions.
     pt.unmap(block_va)?;
     pt.flush();
-    for i in 0..SUBPAGES {
-        let va = block_va + i * PAGE_SIZE_4K;
-        let pa = target_paddr + i * PAGE_SIZE_4K;
-        pt.map(va, pa, PageSize::Size4K, flags)?;
+    for (i, &pa) in sub_paddrs.iter().enumerate() {
+        pt.map(block_va + i * PAGE_SIZE_4K, pa, PageSize::Size4K, flags)?;
     }
 
     // Convert the single 2 MiB RSS charge into 512 4 KiB charges so per-4 KiB
@@ -481,6 +515,14 @@ impl CowBackend {
                 return Ok(());
             }
             _ => {
+                // For a 2 MiB (THP) backend this copies the whole 2 MiB block on
+                // the first write and remaps it writable at 2 MiB, so the child
+                // keeps a private huge page (one 2 MiB memcpy per COW'd block,
+                // then all writable — coarse but correct; the RSS/write
+                // amplification for sparse post-fork writes is the accepted THP
+                // tradeoff). Under fragmentation `alloc_new_frame` returns
+                // NoMemory, which the fault handler turns into a 4 KiB split +
+                // retry (see `split_huge_block_2m`).
                 let new_frame = self.alloc_new_frame(false)?;
                 unsafe {
                     core::ptr::copy_nonoverlapping(
