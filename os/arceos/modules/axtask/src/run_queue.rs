@@ -68,6 +68,18 @@ const ARRAY_REPEAT_VALUE: MaybeUninit<&'static mut AxRunQueue> = MaybeUninit::un
 static RUN_QUEUE_ONLINE: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 
+/// Per-CPU flag: is this CPU currently running a *non-idle* task? Updated on every
+/// context switch (see `switch_to`). Read by `select_least_loaded` so a big core
+/// busy running a task counts as occupied for placement even though its ready
+/// queue (`nr_running`) is empty. Without it, a core running one task looks as idle
+/// as a truly-idle core (`nr_running` excludes the running task, and is decremented
+/// the instant the task is picked), so a burst of sibling threads all pile onto the
+/// same idle-looking big core instead of spreading. Only maintained under the
+/// capacity-aware placement feature.
+#[cfg(all(feature = "smp", feature = "sched-loadbalance"))]
+static RQ_RUNNING: [core::sync::atomic::AtomicBool; crate::build_info::CPU_CAPACITY] =
+    [const { core::sync::atomic::AtomicBool::new(false) }; crate::build_info::CPU_CAPACITY];
+
 /// Per-CPU count of scheduler ticks during which a non-idle task was running, for
 /// the ondemand cpufreq governor's load metric. Bumped once per timer tick in
 /// [`AxRunQueue::scheduler_timer_tick`] when the current task is not the idle task
@@ -174,7 +186,13 @@ fn select_least_loaded(cpumask: AxCpuMask, prefer: usize) -> usize {
         if !cpumask.get(cpu) || (online & (1usize << cpu)) == 0 {
             continue;
         }
-        let load = get_run_queue(cpu).load();
+        // Occupancy = queued ready tasks (`nr_running`) PLUS the currently-running
+        // non-idle task, which `nr_running` does not count. Including the running
+        // task is what lets a burst of sibling threads spread across distinct big
+        // cores (and spill onto little cores once the big cores are each occupied)
+        // instead of all landing on the first big core, which still reads
+        // `nr_running == 0` while it runs the previous sibling.
+        let load = get_run_queue(cpu).load() + running_load(cpu);
         // Bias the preferred (cache-warm) core down by one so it wins exact ties,
         // without letting it override a genuinely less-loaded core.
         let biased = if cpu == prefer {
@@ -204,6 +222,14 @@ fn select_least_loaded(cpumask: AxCpuMask, prefer: usize) -> usize {
 #[inline]
 fn cpu_capacity(cpu: usize) -> usize {
     (ax_hal::dtb::cpu_capacities()[cpu] as usize).max(1)
+}
+
+/// 1 if `cpu` is currently running a non-idle task, else 0 (see [`RQ_RUNNING`]).
+/// Added to the ready-queue depth so placement accounts for the running task.
+#[cfg(all(feature = "smp", feature = "sched-loadbalance"))]
+#[inline]
+fn running_load(cpu: usize) -> usize {
+    RQ_RUNNING[cpu].load(core::sync::atomic::Ordering::Relaxed) as usize
 }
 
 /// Capacity-weighted load: `load * 1024 / capacity`. A unit of work costs more on a
@@ -1236,6 +1262,12 @@ impl AxRunQueue {
         #[cfg(feature = "preempt")]
         next_task.set_preempt_pending(false);
         next_task.set_state(TaskState::Running);
+        // Publish whether this CPU is now running a non-idle task, so capacity-aware
+        // placement (`select_least_loaded`) sees it as occupied. Set before the
+        // `prev == next` early-return so a no-op switch still reflects reality.
+        #[cfg(all(feature = "smp", feature = "sched-loadbalance"))]
+        RQ_RUNNING[this_cpu_id()]
+            .store(!next_task.is_idle(), core::sync::atomic::Ordering::Relaxed);
         if prev_task.ptr_eq(&next_task) {
             return;
         }
