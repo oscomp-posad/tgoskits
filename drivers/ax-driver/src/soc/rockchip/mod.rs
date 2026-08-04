@@ -15,6 +15,9 @@
 #[cfg(feature = "rk3588-cpufreq")]
 pub(crate) mod cpufreq;
 
+#[cfg(feature = "rk3588-ddr-dvfs")]
+pub(crate) mod ddr_dvfs;
+
 #[cfg(feature = "rk3588-cpufreq")]
 mod pmic_i2c;
 

@@ -37,6 +37,10 @@ pub fn init(args: &[String], envs: &[String]) {
     } else {
         spawn_cpufreq_governor();
     }
+    // One-shot DDR/DMC ramp to the top rung (memory-bandwidth lever). No-op unless
+    // the rk3588-ddr-dvfs feature is on; runs here, before the user workload, so its
+    // logs reach the serial console. Probe-only until the DDR-rail voltage is verified.
+    ax_driver::ddr_dvfs::ramp_to_max();
     pseudofs::usbfs::start_event_pump();
 
     ax_alloc::register_page_reclaim_fn(ax_fs_ng::vfs::page_cache_reclaim);

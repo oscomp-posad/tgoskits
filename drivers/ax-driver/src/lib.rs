@@ -133,6 +133,18 @@ pub mod cpufreq {
     pub fn calibrate_cluster(_cluster_idx: usize, _intended_cpu: usize) {}
 }
 
+/// One-shot RK3588 DDR/DMC frequency ramp (see [`crate::soc::rockchip::ddr_dvfs`]).
+/// The kernel calls [`ddr_dvfs::ramp_to_max`] once at boot; with the feature off it
+/// is a no-op so callers stay generic.
+pub mod ddr_dvfs {
+    #[cfg(feature = "rk3588-ddr-dvfs")]
+    pub use crate::soc::rockchip::ddr_dvfs::ramp_to_max;
+
+    /// Feature-off stub: no DDR ramp.
+    #[cfg(not(feature = "rk3588-ddr-dvfs"))]
+    pub fn ramp_to_max() {}
+}
+
 #[cfg(feature = "pci")]
 pub use binding_info::PciIrqRequirement;
 pub use binding_info::{BindingInfo, BindingIrq, BindingIrqBinding, BindingIrqSource, FdtIrqSpec};

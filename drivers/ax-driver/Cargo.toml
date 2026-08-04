@@ -142,6 +142,9 @@ rk3588-cpufreq = [
     "rockchip-soc",
     "dep:arm-scmi-rs",
 ]
+# One-shot DDR/DMC frequency ramp via the Rockchip SIP DRAM interface (memory
+# bandwidth lever). Self-contained (raw SMC + shared page); no extra deps.
+rk3588-ddr-dvfs = ["rockchip-soc"]
 rockchip-pm = ["rockchip-soc", "dep:rdif-power", "dep:rockchip-pm"]
 list-pci-devices = ["pci"]
 pci-list-devices = ["list-pci-devices"]

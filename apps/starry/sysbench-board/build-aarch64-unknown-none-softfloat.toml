@@ -14,6 +14,10 @@ features = [
   "ax-driver/rockchip-sdhci",
   "ax-driver/rockchip-dwmmc",
   "ax-driver/rk3588-cpufreq",
+  # DDR/DMC frequency ramp (memory-bandwidth lever). Probe-only for now: confirms the
+  # closed rkbin BL31 answers the SIP DRAM calls on-board + logs the available rungs,
+  # without ramping, until the DDR-rail voltage precondition is verified.
+  "ax-driver/rk3588-ddr-dvfs",
   "starry-kernel/thp",
   # Capacity-aware big.LITTLE task placement: a lone CPU-bound thread lands on a
   # big (A76) core instead of a little (A55) core. Fork placement now uses a single
