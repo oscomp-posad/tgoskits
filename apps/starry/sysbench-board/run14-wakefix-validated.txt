@@ -1,0 +1,35 @@
+IM_BEGIN
+IM_UNAME 10.0.0 aarch64
+IM_PSB c=0     events per second:   370.17
+IM_PSB c=1     events per second:   370.44
+IM_PSB c=2     events per second:   370.06
+IM_PSB c=3     events per second:   370.97
+IM_PSB c=4     events per second:   910.21
+IM_PSB c=5     events per second:   907.93
+IM_PSB c=6     events per second:   913.76
+IM_PSB c=7     events per second:   909.14
+IM_PM c0 MEMBW core=0 landed=0 mb=128 firsttouch_s=0.0805 memcpy_GBps=7.304 read_GBps=4.486 acc=202020202000000 
+IM_PM c4 MEMBW core=4 landed=4 mb=128 firsttouch_s=0.0271 memcpy_GBps=12.197 read_GBps=5.949 acc=202020202000000 
+IM_STAT_BEFORE t=1
+IM_CPU t=1     events per second:   910.26
+IM_STAT_AFTER t=1
+IM_STAT_BEFORE t=2
+IM_CPU t=2     events per second:  1794.85
+IM_STAT_AFTER t=2
+IM_STAT_BEFORE t=4
+IM_CPU t=4     events per second:  3170.47
+IM_STAT_AFTER t=4
+IM_STAT_BEFORE t=8
+IM_CPU t=8     events per second:  4686.02
+IM_STAT_AFTER t=8
+IM_STAT_BEFORE thr8
+IM_THR8     total number of events:              18921
+IM_STAT_AFTER thr8
+IM_MUTEX8     total time:                          0.8663s
+IM_STAT_BEFORE mem8
+IM_MEM8 bs=1M op=write 8192.00 MiB transferred (15040.73 MiB/sec)
+IM_MEM8 bs=1M op=read 8192.00 MiB transferred (18072.70 MiB/sec)
+IM_MEM8 bs=1K op=write 541.76 MiB transferred (54.11 MiB/sec)
+IM_MEM8 bs=1K op=read 526.46 MiB transferred (52.56 MiB/sec)
+IM_STAT_AFTER mem8
+IM_DONE

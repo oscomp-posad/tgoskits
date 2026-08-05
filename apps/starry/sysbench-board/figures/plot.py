@@ -34,26 +34,23 @@ C_GAP   = "#d62728"
 # ================================================================================
 # Fig 1 — CPU thread scaling (sysbench cpu, events/sec; higher = better)
 # ================================================================================
-threads = [1, 2, 4, 8]
-linux   = [974, 1930, 3900, 5322]   # 1/4/8 measured; t2 interpolated (open marker)
-occ     = [912, 1814, 2706, 1816]   # all measured (run #9)
-rr_x    = [1, 4, 8]
-rr      = [368, 3810, 5100]         # 1/4 measured (run #1); t8=5100 projected
+threads   = [1, 2, 4, 8]
+linux     = [974, 1930, 3900, 5322]     # 1/4/8 measured; t2 interpolated (open marker)
+occ_fixed = [910, 1794, 3170, 4686]     # occupancy fork+wake, measured (run #14)
+occ_broke = [912, 1814, 2706, 1816]     # occupancy w/o wake fix (run #9) — clustered
 
-fig, ax = plt.subplots(figsize=(6.2, 4.0))
+fig, ax = plt.subplots(figsize=(6.4, 4.2))
 ax.plot(threads, linux, "-o", color=C_LINUX, lw=2, ms=6, label="Linux (Armbian 6.1)")
-# mark Linux t2 as interpolated (open marker)
-ax.plot([2], [1930], "o", mfc="white", mec=C_LINUX, ms=6, zorder=5)
-ax.plot(threads, occ, "-s", color=C_OCC, lw=2, ms=6, label="StarryOS — occupancy placement")
-ax.plot(rr_x[:2], rr[:2], "-^", color=C_RR, lw=2, ms=7, label="StarryOS — round-robin (ship)")
-ax.plot([4, 8], [3810, 5100], "--^", color=C_RR, lw=1.6, ms=7, mfc="white")  # projected tail
-ax.annotate("single-thread win\n368→912 (self-heal)", xy=(1.02, 912), xytext=(1.5, 300),
-            fontsize=8.5, color=C_OCC, ha="left",
+ax.plot([2], [1930], "o", mfc="white", mec=C_LINUX, ms=6, zorder=5)  # interpolated
+ax.plot(threads, occ_fixed, "-s", color=C_OCC, lw=2.2, ms=6,
+        label="StarryOS — occupancy (fork+wake, ship)")
+ax.plot(threads, occ_broke, ":s", color=C_GAP, lw=1.5, ms=5, mfc="white",
+        label="StarryOS — before wake fix (clustered)")
+ax.annotate("wake fix: barrier-release burst\nfans out to all 8 cores\n(Linux select_idle_sibling)",
+            xy=(8, 4686), xytext=(2.4, 3950), fontsize=8, color=C_OCC,
             arrowprops=dict(arrowstyle="->", color=C_OCC, lw=1))
-ax.annotate("t=8 spill collapse\n(burst contention)", xy=(8, 1816), xytext=(4.7, 1050),
-            fontsize=8.5, color=C_GAP,
-            arrowprops=dict(arrowstyle="->", color=C_GAP, lw=1))
-ax.annotate("proj.", xy=(8, 5100), xytext=(7.0, 4550), fontsize=8, color=C_RR)
+ax.annotate("clustered on 2–3 big cores\n(A55 idle) before fix", xy=(8, 1816), xytext=(2.5, 1150),
+            fontsize=8, color=C_GAP, arrowprops=dict(arrowstyle="->", color=C_GAP, lw=1))
 ax.set_xscale("log", base=2)
 ax.set_xticks(threads); ax.set_xticklabels(threads)
 ax.set_xlabel("threads"); ax.set_ylabel("events / sec")
@@ -61,6 +58,24 @@ ax.set_title("CPU throughput scaling  (sysbench cpu, prime=20000)")
 ax.set_ylim(0, 5800)
 ax.legend(loc="upper left")
 fig.savefig("fig1_cpu_scaling.png"); plt.close(fig)
+
+# ================================================================================
+# Fig 5 — per-core residency at t=8, before vs after the wake fix (the smoking gun)
+# ================================================================================
+cores = ["cpu0\nA55", "cpu1\nA55", "cpu2\nA55", "cpu3\nA55",
+         "cpu4\nA76", "cpu5\nA76", "cpu6\nA76", "cpu7\nA76"]
+before = [26, 0, 0, 0, 18, 1005, 1001, 998]     # run #10 Δbusy ticks over t=8
+after  = [951, 988, 959, 968, 944, 954, 929, 891]  # run #14 Δbusy ticks over t=8
+x = range(8); w = 0.4
+fig, ax = plt.subplots(figsize=(7.2, 4.0))
+ax.bar([i - w/2 for i in x], before, w, color=C_GAP, label="before wake fix (run #10)")
+ax.bar([i + w/2 for i in x], after,  w, color=C_WIN, label="after wake fix (run #14)")
+ax.set_xticks(list(x)); ax.set_xticklabels(cores, fontsize=8)
+ax.set_ylabel("Δ busy ticks during t=8 run")
+ax.set_title("Per-core residency at t=8: 8 threads cluster (before) vs fan out (after)")
+ax.legend(loc="upper right")
+ax.text(1.5, 120, "A55 cluster: 0 → busy", fontsize=8.5, color=C_WIN, ha="center")
+fig.savefig("fig5_residency.png"); plt.close(fig)
 
 # ================================================================================
 # Fig 2 — per-core parity (pinned sysbench cpu; higher = better)
@@ -85,10 +100,10 @@ fig.savefig("fig2_percore.png"); plt.close(fig)
 metrics = [
     ("Mem first-touch\n(THP)", 0.086/0.030),   # lower is better -> Linux/Starry
     ("Per-core A55",           370/359),
-    ("Multi-thread t=4",       3810/3900),
+    ("Single-thread cpu",      910/974),
     ("Single-core memcpy",     12.3/13.0),
-    ("Single-thread cpu",      912/974),
     ("Per-core A76",           910/974),
+    ("Multi-thread t=8",       4686/5322),
     ("Mem BW (8-thread)",      20.0/55.0),
 ]
 metrics.sort(key=lambda m: m[1])
@@ -129,4 +144,4 @@ axr.set_ylim(0, 62)
 fig.suptitle("Memory: first-touch beats Linux; bandwidth capped by board firmware", fontsize=11)
 fig.savefig("fig4_memory.png"); plt.close(fig)
 
-print("wrote fig1_cpu_scaling.png fig2_percore.png fig3_speedup.png fig4_memory.png")
+print("wrote fig1..fig5")

@@ -19,12 +19,11 @@ features = [
   # without ramping, until the DDR-rail voltage precondition is verified.
   "ax-driver/rk3588-ddr-dvfs",
   "starry-kernel/thp",
-  # SHIP DEFAULT = round-robin scheduling (sched-loadbalance intentionally OFF). This
-  # is the board-validated best multi-thread result (t=4=3810 = 0.98x Linux, run #1):
-  # round-robin spreads a thread burst across all 8 cores. Capacity-aware placement
-  # (single-atom occupancy) lives behind sched-loadbalance in the -placement config;
-  # it wins single-thread (t=1) but its multi-thread unification is still being
-  # board-validated (see FINAL_REPORT.md). Enable it only once that lands.
+  # SHIP DEFAULT = occupancy-aware scheduling (fork + wake). Board-validated (run #14):
+  # single-thread big-core win (t=1=910) AND full 8-core multi-thread spread
+  # (t=8=4686 = 0.88x Linux; wake-heavy threads/mutex up 2.6-6.6x). Both placement
+  # paths mirror Linux CFS (select_idle_sibling / find_idlest_cpu). See FINAL_REPORT.md.
+  "starry-kernel/sched-loadbalance",
 ]
 log = "Info"
 max_cpu_num = 8
