@@ -66,13 +66,28 @@ Round-robin spawn placement spreads a burst of threads across all 8 cores:
 
 This is the **shipping default** (`sched-loadbalance` OFF) — the best board-validated multi-thread result.
 
-### 3d. The scheduler tension (honest status)
+### 3d. The scheduler tension (honest status, board-validated)
 
 There is a real tension between 3b and 3c:
 - **Round-robin** gives the best *multi-thread* spread (t=4=0.98×) but no single-thread big-core win (t=1=368).
-- **Capacity placement** gives the single-thread win (t=1=905) but, in its two-atom form, clustered multi-thread onto ~3 big cores (t=8≈2700).
+- **Capacity placement** gives the single-thread win but historically clustered multi-thread onto the big cores with no little-cluster spill.
 
-Unifying both — single-thread big-core win **and** full 8-core multi-thread spread — is the open scheduler problem. We rewrote placement to use a **single per-CPU occupancy counter** (ready+running, read as one atom, no consistency window) to achieve it. That rewrite regressed on-board (t=8 collapsed onto ~2 A55 cores) due to occupancy drift in a release build (the underflow assert is compiled out). We added two robustness measures — a **per-tick occupancy resync** (self-heals drift every ~10 ms from the lock-correct `nr_running`) and a **saturating decrement** (no wrap-to-infinitely-busy) — but these remain board-unvalidated because the board is power-cycle-flaky. **The unified scheduler is therefore gated OFF; round-robin ships.** (See §7.)
+Unifying both — single-thread big-core win **and** full 8-core multi-thread spread — was the open scheduler problem. We rewrote placement to a **single per-CPU occupancy counter** (ready+running, read as one atom, no consistency window). It first regressed on-board (t=1 fell to an A55, 368) because occupancy *drifted* in a release build (the underflow assert is compiled out), leaving big cores reading busy. We added a **per-tick occupancy resync** (recomputes `occ = nr_running + running` every ~10 ms from the lock-correct counter, self-healing drift) and a **saturating decrement**.
+
+**Board-validated result (run #9), with a per-CPU occ+capacity diagnostic:**
+
+| threads | occ scheduler (self-heal) | round-robin | Linux |
+|---|---|---|---|
+| t=1 | **912** ✅ (A76) | 368 | ~974 |
+| t=2 | 1814 | — | — |
+| t=4 | 2706 | **3810** | ~3900 |
+| t=8 | 1816 ⚠️ | ~5100 (proj) | ~5322 |
+
+The self-heal **fixed the single-thread regression** — the diagnostic confirms it: every placement now reads the A76 cores as free (`occ=[boot 0 0 0 0 0 0 0]`) and correctly picks an A76, and t=1 recovered 368→912 with t=2 scaling perfectly. The capacity table is correct (`[530,530,530,530,1024,1024,1024,1024]`), ruling out a parse fault.
+
+**But the little-cluster spill remains unsolved:** at t=8 throughput *collapses* to ~2 big cores (1816) and is *lower* than t=4 — more threads yield fewer effective cores, which points to contention on the 8-thread burst rather than a placement miss. This is a genuine SMP-scheduling research problem, now cleanly isolated: single-thread placement is solved; distributing a large simultaneous fork burst across a heterogeneous machine without clustering is not.
+
+**Decision:** **round-robin ships as the default** (best aggregate multi-thread, t=4=0.98×). The occ scheduler is a validated **opt-in** for single-thread-heavy workloads (t=1=912, matching the historical placement win) via the `-placement` config; its multi-thread spill is documented as future work. (See §7.)
 
 ---
 
@@ -114,7 +129,7 @@ We fully researched and implemented the memory-bandwidth lever, then discovered 
 
 - **Build:** native aarch64 (`cargo xtask starry build`), ~13 s. Kernel = `combined-perf` branch = base + THP + placement + cpufreq + DDR driver, all feature-gated.
 - **Board loop:** serial console catch of U-Boot + FIT-image upload, then a self-contained `full-matrix.sh` harness runs the per-core + first-touch + t=1/2/4/8 CPU ladder + 8-thread threads/mutex/memory, tees results to an ext4 file that survives the auto-reboot, and warm-reboots to Linux for SSH readback. Static board IP (169.254.50.2) for reliability.
-- **Runs cited:** #1 (round-robin CPU ladder), #3f (placement + THP), #5 (per-core + THP + DDR probe + full matrix). Linux baselines measured on the same board under Armbian.
+- **Runs cited:** #1 (round-robin CPU ladder), #3f (placement + THP), #5 (per-core + THP + DDR probe), #9 (occ self-heal + per-CPU occ/cap diagnostic). Linux baselines measured on the same board under Armbian.
 
 ---
 
@@ -123,11 +138,14 @@ We fully researched and implemented the memory-bandwidth lever, then discovered 
 **Shipping (feature-gated, board-validated):**
 - `rk3588-cpufreq` — per-core parity. (PR branch `cpu-opp-parity`.)
 - `starry-kernel/thp` — first-touch beats Linux. (PR branch `mm-faultpath-2a`.)
-- Round-robin scheduling (default) — multi-thread 0.98×.
-- big.LITTLE placement (`sched-loadbalance`, opt-in) — single-thread 0.93×. (PR branch `biglittle-placement`.)
+- Round-robin scheduling (**default**) — multi-thread 0.98×.
+- big.LITTLE occupancy placement (`sched-loadbalance`, **opt-in**) — single-thread 0.94× (t=1=912), board-validated in run #9 with the per-tick self-heal. (PR branch `biglittle-placement`; `-placement` config.)
 
-**In progress:**
-- **Unified occupancy scheduler** — single-thread win + full multi-thread spread in one policy. Implemented with per-tick self-heal + saturating dec; needs one clean board run (the `-placement` config) to validate the drift fix. Gated OFF until then.
-- **DDR ramp driver** — correct + complete; blocked by this board's mainline-TF-A firmware. Ready for an rkbin-BL31 board.
+**Validated this session:**
+- **Occupancy self-heal** — the per-tick resync fixed the single-thread regression on-board (t=1: 368→912; occ diagnostic confirms A76 cores read free and are chosen). Single-thread placement is solved.
+
+**Open / future work:**
+- **Multi-thread little-cluster spill** — at t=8 the occ scheduler still collapses onto ~2 big cores (throughput drops below t=4), pointing to burst contention, not placement. The unsolved half of the unification; round-robin remains the better multi-thread default meanwhile.
+- **DDR ramp driver** — correct + complete; blocked by this board's mainline-TF-A firmware (no SIP DRAM handler). Ready for an rkbin-BL31 board.
 
 **Known board caveat:** the OrangePi-5-Plus here is power-cycle-flaky (hangs on some warm reboots, link-local IP drifts), which bounded the number of scheduler-iteration board runs available.

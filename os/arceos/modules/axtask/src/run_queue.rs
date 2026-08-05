@@ -208,10 +208,14 @@ fn select_least_loaded(cpumask: AxCpuMask) -> usize {
         .unwrap_or_else(|| select_run_queue_index(cpumask));
     // TEMP DIAG: dump per-CPU occupancy at the first placements so the board serial
     // log reveals which cores read as busy (the t=8-on-2-A55 regression). Remove.
-    {
+    // Gate on ALL 8 CPUs online: `get_run_queue(c)` for a CPU whose run queue is not
+    // yet initialized (early boot, secondaries not up) dereferences uninitialized
+    // memory (a null + field-offset data abort at ~0x28). All-online also makes the
+    // counter skip boot and capture the benchmark's placements instead.
+    if ax_hal::cpu_num() >= 8 && (online & 0xff) == 0xff {
         static DIAG: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
         let n = DIAG.fetch_add(1, Ordering::Relaxed);
-        if n < 48 && ax_hal::cpu_num() >= 8 {
+        if n < 48 {
             let o = |c: usize| get_run_queue(c).occ();
             let cap = |c: usize| cpu_capacity(c);
             // Log occ AND capacity so the board run disambiguates the t=1-on-A55
