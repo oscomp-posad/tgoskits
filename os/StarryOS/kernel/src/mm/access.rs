@@ -45,14 +45,38 @@ pub fn access_user_memory<R>(f: impl FnOnce() -> R) -> R {
     result
 }
 
+/// TEMP diagnostic: name which `BadAddress` guard tripped on a user access, bounded
+/// to the first `EFAULT_DIAG_MAX` hits so it cannot spam the (lossy) board serial or
+/// perturb timing. A board root-cause pass (hackbench g=10 / schbench) excluded the
+/// out-of-memory story on static grounds and narrowed the load-dependent EFAULT to one
+/// of the identity/mapping guards below (try_as_thread / is_owned_by_current /
+/// can_access_range); this log names the exact one on the first failures. Remove once
+/// the branch is identified.
+const EFAULT_DIAG_MAX: usize = 32;
+#[inline]
+fn efault_diag(site: &str, start: usize, len: usize, flags: MappingFlags) {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    static N: AtomicUsize = AtomicUsize::new(0);
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    if n < EFAULT_DIAG_MAX {
+        let curr = current();
+        warn!(
+            "EFAULT-diag[{n}] site={site} task={} start={start:#x} len={len} flags={flags:#x?}",
+            curr.id_name()
+        );
+    }
+}
+
 fn check_region(start: VirtAddr, layout: Layout, access_flags: MappingFlags) -> AxResult<()> {
     let align = layout.align();
     if start.as_usize() & (align - 1) != 0 {
+        efault_diag("check_region:align", start.as_usize(), layout.size(), access_flags);
         return Err(AxError::BadAddress);
     }
 
     let curr = current();
     let Some(thr) = curr.try_as_thread() else {
+        efault_diag("check_region:not_thread", start.as_usize(), layout.size(), access_flags);
         warn!(
             "reject user region check outside thread context: task={}, start={:#x}, len={}",
             curr.id_name(),
@@ -63,11 +87,13 @@ fn check_region(start: VirtAddr, layout: Layout, access_flags: MappingFlags) -> 
     };
     let aspace_arc = thr.proc_data.aspace();
     if unsafe { aspace_arc.raw() }.is_owned_by_current() {
+        efault_diag("check_region:owned_by_current", start.as_usize(), layout.size(), access_flags);
         return Err(AxError::BadAddress);
     }
     let mut aspace = aspace_arc.lock();
 
     if !aspace.can_access_range(start, layout.size(), access_flags) {
+        efault_diag("check_region:cant_access", start.as_usize(), layout.size(), access_flags);
         return Err(AxError::BadAddress);
     }
 
@@ -349,14 +375,19 @@ fn prepare_user_memory(op: &str, start: usize, len: usize, access_flags: Mapping
     let page_end = end.align_up_4k();
 
     let curr = current();
-    let thr = curr.try_as_thread().ok_or(VmError::AccessDenied)?;
+    let Some(thr) = curr.try_as_thread() else {
+        efault_diag("prepare:not_thread", start.as_usize(), len, access_flags);
+        return Err(VmError::AccessDenied);
+    };
     let aspace_arc = thr.proc_data.aspace();
     if unsafe { aspace_arc.raw() }.is_owned_by_current() {
+        efault_diag("prepare:owned_by_current", start.as_usize(), len, access_flags);
         return Err(VmError::AccessDenied);
     }
 
     let mut aspace = aspace_arc.lock();
     if !aspace.can_access_range(start, len, access_flags) {
+        efault_diag("prepare:cant_access", start.as_usize(), len, access_flags);
         return Err(VmError::AccessDenied);
     }
 
@@ -371,7 +402,10 @@ fn prepare_user_memory(op: &str, start: usize, len: usize, access_flags: Mapping
         .populate_area(page_start, page_end - page_start, access_flags)
         .map_err(|e| match e {
             AxError::NoMemory => VmError::NoMemory,
-            _ => VmError::AccessDenied,
+            _ => {
+                efault_diag("prepare:populate_err", start.as_usize(), len, access_flags);
+                VmError::AccessDenied
+            }
         })
 }
 
