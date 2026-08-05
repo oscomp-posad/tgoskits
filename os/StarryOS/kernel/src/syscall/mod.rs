@@ -750,14 +750,35 @@ pub fn handle_syscall(uctx: &mut UserContext) {
             uctx.arg4() as _,
         ),
         Sysno::sigaltstack => sys_sigaltstack(uctx.arg0() as _, uctx.arg1() as _),
-        Sysno::futex => sys_futex(
-            uctx.arg0() as _,
-            uctx.arg1() as _,
-            uctx.arg2() as _,
-            uctx.arg3() as _,
-            uctx.arg4() as _,
-            uctx.arg5() as _,
-        ),
+        Sysno::futex => {
+            let __fr = sys_futex(
+                uctx.arg0() as _,
+                uctx.arg1() as _,
+                uctx.arg2() as _,
+                uctx.arg3() as _,
+                uctx.arg4() as _,
+                uctx.arg5() as _,
+            );
+            // TEMP diag: which futex op returns EFAULT + its args. The standard
+            // FUTEX_WAIT path was statically cleared of any BadAddress source past the
+            // (confirmed-good) uaddr read, so a real futex EFAULT must be a different op
+            // (WAIT_BITSET / WAKE_OP user-RMW / shared). Bounded. Remove once pinned.
+            if matches!(__fr, Err(ax_errno::AxError::BadAddress)) {
+                static N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+                if N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32 {
+                    error!(
+                        "FUTEX-EFAULT op={:#x} uaddr={:#x} val={:#x} to/val2={:#x} uaddr2={:#x} val3={:#x}",
+                        uctx.arg1(),
+                        uctx.arg0(),
+                        uctx.arg2(),
+                        uctx.arg3(),
+                        uctx.arg4(),
+                        uctx.arg5(),
+                    );
+                }
+            }
+            __fr
+        }
         Sysno::get_robust_list => {
             sys_get_robust_list(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _)
         }
