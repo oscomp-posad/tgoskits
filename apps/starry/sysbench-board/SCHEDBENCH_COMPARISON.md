@@ -85,11 +85,25 @@ surfaced two things the QEMU/analysis pass could not:
 - `feat(axtask)`: guarded runtime migration (newidle idle-pull + push) behind opt-in
   `sched-loadbalance-pull` / `-push` — untested on-board, for the threads>cores regime.
 
+**EFAULT root cause — FOUND + partially fixed (commit `fix(starry): surface ENOMEM …`):**
+A 5-hypothesis root-cause pass found that `prepare_user_memory` (the `vm_read`/`vm_write`
+fault-in path, `os/StarryOS/kernel/src/mm/access.rs:363-365`) did
+`.map_err(|_| VmError::AccessDenied)` — collapsing **every** `populate_area` failure
+(including a genuine `NoMemory` frame-exhaustion) into `AccessDenied` → `BadAddress` →
+EFAULT. That is why an out-of-memory during a user access surfaced as the misleading
+"Bad address". Fixed: added `VmError::NoMemory → AxError::NoMemory` and propagate the
+real error. This is the **diagnostic key** — a board re-run with it now reports the
+*true* failure (ENOMEM vs something else) instead of hiding it. The leading underlying
+suspect is the oversized **256 KB kernel stack** (`axtask/build.rs` `DEFAULT_TASK_STACK_SIZE
+= 0x40000`) × ~400 tasks exhausting the frame budget.
+
 **Next, in priority order:**
-1. **Root-cause the EFAULT-under-load bug** (clone/`fork()` + futex `uaddr` returning
-   `Bad address` at ~400 tasks) — this unblocks *both* hackbench g=10 and all of
-   schbench, and is the real path to messaging parity.
-2. Clean re-run of the shipped default (occ + IPC-fix, wake_affine OFF) at g=2/g=5 to
+1. **Board re-run with the un-mask fix** to read the *true* g=10/schbench error
+   (ENOMEM confirms the memory-pressure theory). One reset.
+2. If ENOMEM: cut `DEFAULT_TASK_STACK_SIZE` (256 KB → e.g. 64 KB) — board-validate for
+   stack-overflow safety — and/or make the kernel-stack alloc return ENOMEM not panic.
+3. Clean re-run of the shipped default (occ + IPC-fix, wake_affine OFF) at g=2/g=5 to
    confirm thread-mode returns toward the occ column.
-3. Optional structural alloc win: switch the board config to the `buddy_slab` backend
-   (real per-CPU slabs) and A/B whether it moves g=2/g=5.
+4. Separately: **schbench's futex EFAULT reproduces at ~5 threads** (not load-dependent)
+   — a distinct schbench-specific futex-usage bug to triage after the un-mask fix
+   reveals its true error too.
