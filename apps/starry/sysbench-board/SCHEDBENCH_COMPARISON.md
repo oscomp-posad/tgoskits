@@ -9,24 +9,33 @@ baseline output in `schedbench-baselines/`.
 
 ## hackbench — messaging under load (`-p` pipe, `-g` groups; Time in seconds, LOWER = better)
 
-| test | round-robin | occ | occ + IPC-fix + wake_affine (board run 1) | Linux |
-|---|---|---|---|---|
-| process, g=2  | 7.06  | 1.40  | 1.871 | 0.027 |
-| process, g=5  | 18.39 | 1.72  | 1.307 | 0.044 |
-| process, g=10 | timeout | 241.6 | **239.8 †EFAULT** | 0.077 |
-| thread,  g=2  | 6.59  | 2.60  | 3.004 | 0.030 |
-| thread,  g=5  | 17.97 | 5.16  | 9.745 | 0.045 |
-| thread,  g=10 | 69.23 | 17.35 | **41.5 †EFAULT** | 0.079 |
+| test | round-robin | occ (pre-IPC) | run1: +IPC +wake_affine | run2: +IPC, **default (no wake_affine)** | Linux |
+|---|---|---|---|---|---|
+| process, g=2  | 7.06  | 1.40  | 1.871 | **0.516** (2.7× < occ) | 0.027 |
+| process, g=5  | 18.39 | 1.72  | 1.307 | 1.330 | 0.044 |
+| process, g=10 | timeout | 241.6 | 239.8 †EFAULT | 239.1 †EFAULT | 0.077 |
+| thread,  g=2  | 6.59  | 2.60  | 3.004 | 2.760 | 0.030 |
+| thread,  g=5  | 17.97 | 5.16  | 9.745 | 9.520 | 0.045 |
+| thread,  g=10 | 69.23 | 17.35 | 41.5 †EFAULT | 40.97 †EFAULT | 0.079 |
 
-† g=10 (400 tasks) is **not a valid measurement**: the run emitted `fork() (error: Bad
-address)` / `Creating workers (error: Bad address)` — a StarryOS **EFAULT-under-load**
-bug (clone/futem path faults at ~400 tasks), so workers never all start.
+† g=10 (400 tasks) is **not a valid measurement**: `fork()`/`Creating workers (error:
+Bad address)` — the EFAULT bug (below) — so workers never all start.
 
-**Board run 1 was measured with wake_affine ON, which has since been gated OFF** (see
-below) — so this column is NOT the shipped default. At the clean, EFAULT-free counts
-(g=2/g=5), thread-mode is *worse* than occ (g=5: 9.7 vs 5.2, ~1.9×) — the wake_affine
-regression. A clean re-run of the shipped default (occ + IPC-fix, wake_affine OFF) is
-board-pending; thread-mode is expected to return toward the occ column.
+**What the two board runs actually establish (correcting run 1's read):**
+- **wake_affine hurts hackbench and is correctly gated OFF** — its clearest effect is
+  process g=2 (1.87 with it ON → **0.516** with it OFF, now 2.7× *below* the occ
+  baseline). (Run 1 mis-attributed the thread-mode gap to wake_affine.)
+- **The thread-mode regression vs the occ baseline is NOT wake_affine** — run2 (wake_affine
+  OFF) is essentially identical to run1 (thread g5 9.52 vs 9.75; g10 40.97 vs 41.5). The
+  occ column was measured **before** the IPC allocator fix, so the delta is either the
+  IPC fix or a cross-session confound (thermal/cpufreq). Process mode *improved*, thread
+  mode *regressed* — the split (thread = shared address space + one aspace mutex) hints
+  at aspace-lock contention, not a uniform confound. **Needs an IPC-fix A/B to isolate.**
+- **`EFAULT-diag` was inconclusive** — 0 diag lines came back, but the 32-hit cap of
+  serial `warn!`s was almost certainly drowned by the 400-task serial storm (lossy
+  serial). So it does NOT prove the fault is outside the instrumented guards; the next
+  diagnostic must survive serial loss (a `/proc` per-branch counter read into the results
+  file, or a low-noise isolated repro run **first**).
 
 ## schbench — BLOCKED by the same EFAULT bug
 
