@@ -2,8 +2,10 @@
 
 Board-measured on OrangePi-5-Plus (RK3588). Static aarch64-musl binaries (same
 binary on both OSes). This captures the **baseline** (round-robin + occupancy
-scheduler as of this session) for a future before → after → Linux comparison once
-the IPC/wakeup path is optimized. Raw output in `schedbench-baselines/`.
+scheduler) for a before → after → Linux comparison. The IPC/wakeup path has since
+been optimized (see "The final optimization" below — the per-message allocator
+bottleneck was root-caused and fixed); the **final** column is board-pending. Raw
+baseline output in `schedbench-baselines/`.
 
 ## hackbench — messaging under load (`-p` pipe, `-g` groups; Time in seconds, LOWER = better)
 
@@ -40,10 +42,41 @@ the IPC/wakeup path is optimized. Raw output in `schedbench-baselines/`.
   0.88–1.03× of Linux: there the bottleneck is compute placement (solved), not the
   wakeup path.
 
-## The "final" optimization target (future work)
+## The "final" optimization — ROOT-CAUSED + IMPLEMENTED (board numbers pending)
 
-Not `wake_affine` (occ already beats round-robin here). The lever is the **wakeup /
-wait-queue / pipe path**: per-wakeup cost, wait-queue data structure scaling, IPI
-batching for cross-core wakes, and the context-switch fast path. Once optimized,
-re-run this exact harness (`sched-bench.sh`) to fill the **final** column and chart
-round-robin → occ → final → Linux.
+A deep-dive on the IPC hot path found the real cause of the 50–260× hackbench gap,
+and it is **not** placement — it is **per-message heap allocation against a single
+global allocator lock**. StarryOS defaults to TLSF (one global allocator behind one
+`SpinNoIrq`; the per-CPU slab init is a no-op for it), and the pipe wakeup path
+allocated on it 4–6× per message from two spots:
+
+1. `PollSet::wake` allocated a `Vec::with_capacity(64)` **and** `drain_ready` allocated
+   a fresh 64-entry `Box` (via `Inner::new()`) on **every** wake.
+2. `block_on` did `Arc::new(AxWaker)` on **every** call (each pipe read *and* write).
+
+With 8 cores × up-to-400 tasks all serializing on that one lock (IRQs off), contention
+is super-linear — exactly the g=1 (~seconds) → g=10 (241 s) signature.
+
+**Fixes landed (all in the `combined-perf` branch):**
+- `perf(axtask)`: `PollSet::wake` now shares the allocation-free in-place stack-buffer
+  drain already used by `wake_from_irq` (zero allocs); `block_on` reuses a **per-task
+  cached `AxWaker`** instead of allocating one per call. Removes both per-message allocs.
+- `feat(axtask)`: `wake_affine` — a producer→consumer wake now co-locates the pair on
+  the waker's core when it is lightly loaded (`occ<=1`), turning the cross-core wake
+  into a local enqueue (no IPI). The `occ<=1` gate still lets an independent burst
+  (sysbench barrier release) spill/spread, so the run#14 t=8 spread is preserved.
+- `feat(axtask)`: the full guarded runtime migration (Linux `newidle` idle-pull +
+  periodic push, `is_busy` + `MIGRATION_COST` guards) is ported behind opt-in
+  `sched-loadbalance-pull` / `-push` for the threads>cores regime.
+
+Validated: builds clean (ship + full-migration configs), clippy clean, QEMU smp4 boots
+to a userspace shell under the full-migration config, and a 5-dimension adversarial
+review (occ accounting, lock ordering, waker-cache lifetime, wake_drain, wake_affine)
+found **0 confirmed bugs**.
+
+**Board-pending:** re-run `sched-bench.sh` on the RK3588 to fill the **final** column
+above and chart round-robin → occ → final → Linux. The allocator fix attacks the
+super-linear term directly, so the g=10 catastrophe (241 s) should collapse the most.
+For a still-larger structural win, switch the board config's allocator to the
+`buddy_slab` backend (it has real per-CPU slabs), removing the cross-core lock for
+these small allocs entirely.
