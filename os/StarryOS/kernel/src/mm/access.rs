@@ -360,9 +360,19 @@ fn prepare_user_memory(op: &str, start: usize, len: usize, access_flags: Mapping
         return Err(VmError::AccessDenied);
     }
 
+    // Preserve the real fault-in error instead of collapsing everything to
+    // AccessDenied (which maps to EFAULT). In particular a genuine out-of-frames
+    // must surface as ENOMEM, not a misleading "Bad address" on a valid pointer —
+    // this is what made a memory-pressure failure at high task count (hackbench
+    // g=10 / schbench: `fork()`/`futex` "Bad address") impossible to diagnose. The
+    // `check_region` (UserPtr) path already propagates this via `?`; keep the
+    // vm_read/vm_write path consistent.
     aspace
         .populate_area(page_start, page_end - page_start, access_flags)
-        .map_err(|_| VmError::AccessDenied)
+        .map_err(|e| match e {
+            AxError::NoMemory => VmError::NoMemory,
+            _ => VmError::AccessDenied,
+        })
 }
 
 #[extern_trait]

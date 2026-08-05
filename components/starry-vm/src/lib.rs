@@ -16,6 +16,12 @@ pub enum VmError {
     BadAddress,
     /// The operation is not allowed, e.g., trying to write to read-only memory.
     AccessDenied,
+    /// Faulting the accessed page in failed because the kernel is out of memory
+    /// (frames/page-table). The pointer itself is valid — this must NOT be
+    /// conflated with [`BadAddress`](Self::BadAddress)/EFAULT: a genuine
+    /// out-of-memory during a user access has to surface as `ENOMEM`, matching
+    /// Linux, or a resource-exhaustion failure is misreported as a bad pointer.
+    NoMemory,
     /// The C-style string or array is too long.
     ///
     /// This error is returned by [`vm_load_until_nul`] when the null terminator
@@ -28,6 +34,7 @@ impl From<VmError> for AxError {
     fn from(err: VmError) -> Self {
         match err {
             VmError::BadAddress | VmError::AccessDenied => AxError::BadAddress,
+            VmError::NoMemory => AxError::NoMemory,
             #[cfg(feature = "alloc")]
             VmError::TooLong => AxError::NameTooLong,
         }
