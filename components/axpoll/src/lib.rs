@@ -5,7 +5,7 @@
 
 extern crate alloc;
 
-use alloc::{boxed::Box, vec::Vec};
+use alloc::boxed::Box;
 use core::{
     mem::MaybeUninit,
     task::{Context, Waker},
@@ -94,17 +94,6 @@ impl Inner {
         self.cursor.min(POLL_SET_CAPACITY)
     }
 
-    fn is_empty(&self) -> bool {
-        self.cursor == 0
-    }
-
-    fn push_entry(&mut self, entry: Entry) {
-        debug_assert!(self.cursor < POLL_SET_CAPACITY);
-        let slot = self.cursor;
-        self.cursor += 1;
-        self.entries[slot].write(entry);
-    }
-
     fn register(&mut self, waker: &Waker, interests: IoEvents) -> Option<Entry> {
         let slot = self.cursor % POLL_SET_CAPACITY;
         let replaced = if self.cursor >= POLL_SET_CAPACITY {
@@ -121,25 +110,6 @@ impl Inner {
             interests,
         });
         replaced
-    }
-
-    fn drain_ready(&mut self, ready: IoEvents, ready_entries: &mut Vec<Entry>) {
-        if self.is_empty() {
-            return;
-        }
-
-        let mut old = Self::new();
-        core::mem::swap(&mut old, self);
-
-        for i in 0..old.len() {
-            let entry = unsafe { old.entries[i].assume_init_read() };
-            if entry.interests.intersects(ready) {
-                ready_entries.push(entry);
-            } else {
-                self.push_entry(entry);
-            }
-        }
-        old.cursor = 0;
     }
 }
 
@@ -195,27 +165,28 @@ impl PollSet {
     /// must not hold locks that may be re-entered by waker execution or poll
     /// wakeup paths.
     pub unsafe fn wake(&self, ready: IoEvents) -> usize {
-        let Some(inner) = self.0.get() else {
-            return 0;
-        };
-        let mut ready_entries = Vec::with_capacity(POLL_SET_CAPACITY);
-        {
-            inner.lock().drain_ready(ready, &mut ready_entries);
-        }
-        let woke = ready_entries.len();
-        for entry in ready_entries {
-            entry.wake();
-        }
-        woke
+        self.wake_drain(ready)
     }
 
     /// Wakes up registered wakers whose interests intersect `ready` from IRQ context.
     ///
-    /// Unlike [`wake`](Self::wake), this does not allocate a replacement
-    /// waiter buffer. It drains the already-initialized entries in place, so
-    /// device IRQ handlers can acknowledge the device and then wake matching
-    /// poll waiters without allocating in hard IRQ context.
+    /// Identical to [`wake`](Self::wake) but callable from hard IRQ context: it
+    /// shares the allocation-free in-place drain, so device IRQ handlers can
+    /// acknowledge the device and then wake matching poll waiters without
+    /// allocating.
     pub fn wake_from_irq(&self, ready: IoEvents) -> usize {
+        self.wake_drain(ready)
+    }
+
+    /// Allocation-free wake: drains ready entries into a stack buffer, compacts
+    /// the kept entries in place, and wakes outside the lock.
+    ///
+    /// This is the hot path for pipe/socket IPC (hackbench-style workloads).
+    /// It must not allocate — every heap allocation here would serialize all
+    /// CPUs on the global allocator lock, which collapses super-linearly under
+    /// many-task messaging. `Entry` is `[Waker (2 ptr) + IoEvents (u32)]`, so
+    /// the `POLL_SET_CAPACITY`-wide stack buffer is small and bounded.
+    fn wake_drain(&self, ready: IoEvents) -> usize {
         let Some(inner) = self.0.get() else {
             return 0;
         };

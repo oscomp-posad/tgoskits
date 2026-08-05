@@ -127,6 +127,12 @@ pub struct TaskInner {
     interrupted: AtomicBool,
     interrupt_waker: AtomicWaker,
 
+    /// Reusable waker for `block_on`, built lazily on first block and reused
+    /// across calls to avoid a per-`block_on` `Arc` allocation on the hot
+    /// pipe/socket IPC path. Only ever touched by the owning task, so the lock
+    /// is uncontended. See `future::cached_block_waker`.
+    block_waker: SpinNoIrq<Option<Arc<crate::future::AxWaker>>>,
+
     exit_code: AtomicI32,
     wait_for_exit: WaitQueue,
 
@@ -353,6 +359,19 @@ impl TaskInner {
         self.interrupted.store(true, Ordering::Release);
         self.interrupt_waker.wake();
     }
+
+    /// Returns a clone of the task's cached `block_on` waker, if one has been
+    /// built. See `future::cached_block_waker`.
+    #[inline]
+    pub(crate) fn block_waker(&self) -> Option<Arc<crate::future::AxWaker>> {
+        self.block_waker.lock().clone()
+    }
+
+    /// Caches the task's reusable `block_on` waker for subsequent calls.
+    #[inline]
+    pub(crate) fn set_block_waker(&self, waker: Arc<crate::future::AxWaker>) {
+        *self.block_waker.lock() = Some(waker);
+    }
 }
 
 // private methods
@@ -385,6 +404,7 @@ impl TaskInner {
             preempt_disable_count: AtomicUsize::new(0),
             interrupted: AtomicBool::new(false),
             interrupt_waker: AtomicWaker::new(),
+            block_waker: SpinNoIrq::new(None),
             exit_code: AtomicI32::new(0),
             wait_for_exit: WaitQueue::new(),
             kstack,

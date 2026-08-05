@@ -20,7 +20,7 @@ pub use poll::*;
 mod time;
 pub use time::*;
 
-struct AxWaker {
+pub(crate) struct AxWaker {
     task: WeakAxTaskRef,
     woke: SpinNoIrq<bool>,
 }
@@ -32,6 +32,32 @@ impl AxWaker {
             woke: SpinNoIrq::new(false),
         })
     }
+
+    /// Resets the `woke` flag so the waker can be reused by a subsequent
+    /// `block_on` call. See [`cached_block_waker`].
+    pub(crate) fn reset(&self) {
+        *self.woke.lock() = false;
+    }
+}
+
+/// Returns the current task's reusable `block_on` waker, building it once on
+/// first use and caching it on the task thereafter.
+///
+/// `block_on` is on the hot pipe/socket IPC path (hackbench-style messaging).
+/// A fresh `Arc<AxWaker>` per call would hit the global allocator lock on every
+/// pipe read and write, which serializes all CPUs and collapses super-linearly
+/// under many-task messaging. A task is only ever inside one *non-reentrant*
+/// `block_on` at a time, so a single cached waker (with its `woke` flag reset
+/// per call) is sufficient; nested `block_on` on the same task simply shares the
+/// flag, which at worst yields one tolerated spurious wakeup. The cached `Arc`
+/// also keeps any lingering `PollSet` clones lifetime-valid across calls.
+fn cached_block_waker(task: &AxTaskRef) -> Arc<AxWaker> {
+    if let Some(w) = task.block_waker() {
+        return w;
+    }
+    let w = AxWaker::new(task);
+    task.set_block_waker(w.clone());
+    w
 }
 
 impl Wake for AxWaker {
@@ -64,7 +90,10 @@ pub fn block_on<F: IntoFuture>(f: F) -> F::Output {
     let curr = current();
     let task = curr.clone();
 
-    let axwaker = AxWaker::new(&task);
+    // Reuse the task's cached waker instead of allocating one per call — this is
+    // the pipe/socket IPC hot path (see `cached_block_waker`).
+    let axwaker = cached_block_waker(&task);
+    axwaker.reset();
     let waker = Waker::from(axwaker.clone());
     let mut cx = Context::from_waker(&waker);
 
