@@ -429,6 +429,10 @@ unsafe impl VmIo for Vm {
             user_copy(buf.as_mut_ptr() as *mut _, start as _, buf.len())
         });
         if unlikely(failed_at != 0) {
+            // The page was just populated by prepare_user_memory yet the copy still
+            // faulted — logged here (not `prepare`'s guards) so the EFAULT-diag names
+            // this site and the faulting address for a stale-TLB / fault-handler bug.
+            efault_diag("Vm::read:user_copy_fault", failed_at, buf.len(), MappingFlags::READ);
             Err(VmError::AccessDenied)
         } else {
             Ok(())
@@ -444,6 +448,7 @@ unsafe impl VmIo for Vm {
             user_copy(start as _, buf.as_ptr() as *const _, buf.len())
         });
         if unlikely(failed_at != 0) {
+            efault_diag("Vm::write:user_copy_fault", failed_at, buf.len(), MappingFlags::WRITE);
             Err(VmError::AccessDenied)
         } else {
             Ok(())
