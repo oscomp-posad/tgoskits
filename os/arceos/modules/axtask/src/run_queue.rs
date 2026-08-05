@@ -655,28 +655,39 @@ pub(crate) fn select_wake_run_queue<G: BaseGuard>(task: &AxTaskRef) -> AxRunQueu
             && cpumask.get(last_cpu)
             && is_online(last_cpu);
 
-        // Occupancy-aware wake placement, mirroring Linux CFS. Linux's
-        // `select_idle_sibling()` returns the task's previous CPU only when it is
-        // *idle*, otherwise scans for an idle CPU; and on asymmetric (big.LITTLE)
-        // topologies it sets `SD_BALANCE_WAKE` so wakeups take the slow path
-        // `find_idlest_cpu()` with `asym_fits_capacity()`. We do the same: keep the
-        // woken task on its previous CPU when that core is idle (cache-warm, cheap),
-        // else steer it to the least-loaded eligible core (capacity-aware
-        // `select_least_loaded`). This is what fans a barrier-release burst (e.g. all
-        // of sysbench's worker threads unblocking at once) across every core instead
-        // of piling every wakee onto the wakers' handful of cores — the little
-        // cluster was left completely idle otherwise.
+        // Occupancy-aware wake placement, mirroring Linux CFS: `wake_affine` +
+        // `select_idle_sibling` + `find_idlest_cpu`.
         //
-        // Safe despite the earlier wake-redirect segfault: that bug enqueued a task
-        // onto a remote CPU while it was still finishing its context switch-out. The
-        // enqueue here goes through `put_task_with_state`, whose `on_cpu` handshake
-        // now DEFERS the enqueue to the owning CPU until the switch-out completes, so
-        // choosing a different CPU no longer races the outgoing register save.
+        // 1. wake_affine — prefer the WAKER's CPU when it is lightly loaded (occ <= 1,
+        //    i.e. at most the waker itself). A wakeup usually means the waker just
+        //    handed work to the wakee (a pipe writer waking its reader, a lock hand-off,
+        //    a producer→consumer). Co-locating the pair on one core keeps it cache-warm
+        //    AND turns the wake into a LOCAL enqueue — no cross-core IPI, no on_cpu
+        //    handshake. For messaging workloads (hackbench) that cross-core wake is the
+        //    dominant cost, so this is decisive. Linux makes the same waker-vs-prev
+        //    choice by comparing load; the `occ <= 1` gate is the cheap equivalent that
+        //    still lets an independent wake *burst* spill: once a few wakees pile on the
+        //    waker (occ climbs > 1) the rest fall through to spreading, so e.g. a
+        //    sysbench barrier-release still fans out across all cores.
+        // 2. else keep the task's previous CPU when it is idle (cache-warm), like
+        //    `select_idle_sibling` returning an idle prev_cpu.
+        // 3. else spread to the least-loaded eligible core (capacity-aware
+        //    `select_least_loaded` = our `find_idlest_cpu`).
+        //
+        // Safe despite the earlier wake-redirect segfault: the enqueue goes through
+        // `put_task_with_state`, whose `on_cpu` handshake defers to the owning CPU
+        // until the outgoing switch-out completes, so any target CPU is race-free.
         #[cfg(feature = "sched-loadbalance")]
-        let index = if last_ok && get_run_queue(last_cpu).occ() == 0 {
-            last_cpu
+        let waker = this_cpu_id();
+        #[cfg(feature = "sched-loadbalance")]
+        let waker_ok = cpumask.get(waker) && is_online(waker);
+        #[cfg(feature = "sched-loadbalance")]
+        let index = if waker_ok && get_run_queue(waker).occ() <= 1 {
+            waker // wake_affine: cache-local sync hand-off, no cross-core IPI
+        } else if last_ok && get_run_queue(last_cpu).occ() == 0 {
+            last_cpu // idle previous CPU (cache-warm)
         } else {
-            select_least_loaded(cpumask)
+            select_least_loaded(cpumask) // spread an independent burst
         };
 
         // Without the load balancer: original cheap, affinity-hard policy — prefer
