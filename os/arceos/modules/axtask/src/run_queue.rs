@@ -647,35 +647,50 @@ pub(crate) fn select_wake_run_queue<G: BaseGuard>(task: &AxTaskRef) -> AxRunQueu
     }
     #[cfg(feature = "smp")]
     {
-        // Wakeup placement is intentionally NOT capacity-aware, even under
-        // `sched-loadbalance`: prefer the CPU the woken task last ran on
-        // (cache-warm, and keeps threads spread out), then the waker's CPU, then
-        // round-robin; only ever an online CPU. Big-core preference is applied once
-        // at fork/exec (`select_run_queue`); moving an already-placed task onto a
-        // bigger core belongs to a future misfit-migration load balancer, NOT the
-        // wake path. A capacity-aware wake redirect was tried and dropped: it
-        // regressed multi-threaded CPU throughput (it refused to spread two
-        // same-cluster tasks across two idle big cores) and — because it migrates a
-        // task that may still be finishing its context switch-out on another core —
-        // raced that switch-out on real hardware and corrupted a user thread's
-        // resumed context (segfault under the wake-heavy sysbench `threads` load).
-        // Preferring `last_cpu` keeps a woken task on the core that is already
-        // serializing its own switch-out, which is why it is safe.
-        let current_cpu = this_cpu_id();
         let last_cpu = task.cpu_id() as usize;
         let cpumask = task.cpumask();
         let online = RUN_QUEUE_ONLINE.load(core::sync::atomic::Ordering::Acquire);
         let is_online = |c: usize| (online & (1usize << c)) != 0;
-        let index = if last_cpu < crate::build_info::CPU_CAPACITY
+        let last_ok = last_cpu < crate::build_info::CPU_CAPACITY
             && cpumask.get(last_cpu)
-            && is_online(last_cpu)
-        {
+            && is_online(last_cpu);
+
+        // Occupancy-aware wake placement, mirroring Linux CFS. Linux's
+        // `select_idle_sibling()` returns the task's previous CPU only when it is
+        // *idle*, otherwise scans for an idle CPU; and on asymmetric (big.LITTLE)
+        // topologies it sets `SD_BALANCE_WAKE` so wakeups take the slow path
+        // `find_idlest_cpu()` with `asym_fits_capacity()`. We do the same: keep the
+        // woken task on its previous CPU when that core is idle (cache-warm, cheap),
+        // else steer it to the least-loaded eligible core (capacity-aware
+        // `select_least_loaded`). This is what fans a barrier-release burst (e.g. all
+        // of sysbench's worker threads unblocking at once) across every core instead
+        // of piling every wakee onto the wakers' handful of cores — the little
+        // cluster was left completely idle otherwise.
+        //
+        // Safe despite the earlier wake-redirect segfault: that bug enqueued a task
+        // onto a remote CPU while it was still finishing its context switch-out. The
+        // enqueue here goes through `put_task_with_state`, whose `on_cpu` handshake
+        // now DEFERS the enqueue to the owning CPU until the switch-out completes, so
+        // choosing a different CPU no longer races the outgoing register save.
+        #[cfg(feature = "sched-loadbalance")]
+        let index = if last_ok && get_run_queue(last_cpu).occ() == 0 {
             last_cpu
-        } else if cpumask.get(current_cpu) {
-            current_cpu
+        } else {
+            select_least_loaded(cpumask)
+        };
+
+        // Without the load balancer: original cheap, affinity-hard policy — prefer
+        // the task's last CPU (cache-warm, already serializing its own switch-out),
+        // then the waker's CPU, then round-robin.
+        #[cfg(not(feature = "sched-loadbalance"))]
+        let index = if last_ok {
+            last_cpu
+        } else if cpumask.get(this_cpu_id()) {
+            this_cpu_id()
         } else {
             select_run_queue_index(cpumask)
         };
+
         AxRunQueueRef {
             inner: get_run_queue(index),
             state: irq_state,
