@@ -52,7 +52,7 @@ pub fn access_user_memory<R>(f: impl FnOnce() -> R) -> R {
 /// of the identity/mapping guards below (try_as_thread / is_owned_by_current /
 /// can_access_range); this log names the exact one on the first failures. Remove once
 /// the branch is identified.
-const EFAULT_DIAG_MAX: usize = 32;
+const EFAULT_DIAG_MAX: usize = 64;
 #[inline]
 fn efault_diag(site: &str, start: usize, len: usize, flags: MappingFlags) {
     use core::sync::atomic::{AtomicUsize, Ordering};
@@ -60,7 +60,10 @@ fn efault_diag(site: &str, start: usize, len: usize, flags: MappingFlags) {
     let n = N.fetch_add(1, Ordering::Relaxed);
     if n < EFAULT_DIAG_MAX {
         let curr = current();
-        warn!(
+        // error! (not warn!) so it survives a busy log level and stands out; bounded so
+        // it can't spam. Best read via a LOW-NOISE isolated repro (schbench -m1 -t4)
+        // where the serial isn't saturated by a 400-task storm.
+        error!(
             "EFAULT-diag[{n}] site={site} task={} start={start:#x} len={len} flags={flags:#x?}",
             curr.id_name()
         );
@@ -343,6 +346,7 @@ pub fn check_access(start: usize, len: usize) -> VmResult {
     const USER_SPACE_END: usize = USER_SPACE_BASE + USER_SPACE_SIZE;
     let ok = (USER_SPACE_BASE..USER_SPACE_END).contains(&start) && (USER_SPACE_END - start) >= len;
     if unlikely(!ok) {
+        efault_diag("check_access:out_of_range", start, len, MappingFlags::empty());
         Err(VmError::AccessDenied)
     } else {
         Ok(())
@@ -354,6 +358,7 @@ fn ensure_thread_context(op: &str, start: usize, len: usize) -> VmResult {
     if curr.try_as_thread().is_some() {
         Ok(())
     } else {
+        efault_diag("ensure_thread_context:not_thread", start, len, MappingFlags::empty());
         warn!(
             "reject user memory {op} outside thread context: task={}, start={start:#x}, len={len}",
             curr.id_name()
