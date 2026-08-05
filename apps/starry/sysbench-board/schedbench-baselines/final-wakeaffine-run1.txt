@@ -1,0 +1,22 @@
+SCHEDBENCH_BEGIN
+Running in process mode with 2 groups using 40 file descriptors each (== 80 tasks)
+Time: 1.871
+Running in process mode with 5 groups using 40 file descriptors each (== 200 tasks)
+Time: 1.307
+Running in process mode with 10 groups using 40 file descriptors each (== 400 tasks)
+fork() (error: Bad address)
+Time: 239.821
+Time: 239.835
+Time: 239.849
+Creating workers (error: Bad address)
+Running in threaded mode with 2 groups using 40 file descriptors each (== 80 tasks)
+Time: 3.004
+Running in threaded mode with 5 groups using 40 file descriptors each (== 200 tasks)
+Time: 9.745
+Running in threaded mode with 10 groups using 40 file descriptors each (== 400 tasks)
+Time: 41.485
+### schbench -m 1 -t 4 -r 5
+futex-FUTEX_WAIT: Bad address
+FUTEX_WAKE: Bad address
+### schbench -m 2 -t 8 -r 5
+FUTEX_WAKE: Bad address
