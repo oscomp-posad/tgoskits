@@ -316,19 +316,20 @@ fn render_stat() -> String {
     // btime = Unix boot timestamp = wall_clock_now − monotonic_uptime.
     let btime = wall_time().as_secs().saturating_sub(up.as_secs());
 
-    // Per-CPU lines: divide aggregate time evenly (no per-CPU tracking yet).
-    let per_cpu_user = user_jiffies / cpu_count;
-    let per_cpu_sys = sys_jiffies / cpu_count;
-    let per_cpu_idle = idle_jiffies / cpu_count;
-
     let irq_total = IRQ_CNT.load(Ordering::Relaxed) as u64;
 
     let mut buf = format!("cpu  {user_jiffies} 0 {sys_jiffies} {idle_jiffies} 0 0 0 0 0 0\n");
+    // Per-CPU lines from the REAL per-CPU busy-tick counter (`BUSY_TICKS`, bumped each
+    // scheduler tick a non-idle task runs on that CPU) rather than an even split of
+    // the aggregate. Reported in the `system` column (these are kernel scheduler
+    // ticks); `idle` is the remainder of uptime. This makes per-core residency
+    // observable to userspace: a harness snapshotting /proc/stat before/after a run
+    // sees which cores actually did the work — distinguishing thread clustering (a
+    // few cores busy) from an even spread (all cores busy).
     for i in 0..cpu_count {
-        let _ = writeln!(
-            buf,
-            "cpu{i} {per_cpu_user} 0 {per_cpu_sys} {per_cpu_idle} 0 0 0 0 0 0"
-        );
+        let busy = ax_task::cpu_busy_ticks(i as usize);
+        let idle = up_jiffies.saturating_sub(busy);
+        let _ = writeln!(buf, "cpu{i} 0 0 {busy} {idle} 0 0 0 0 0 0");
     }
     let _ = writeln!(buf, "intr {irq_total}");
     let _ = writeln!(buf, "ctxt 0");
