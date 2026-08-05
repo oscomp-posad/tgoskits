@@ -28,6 +28,10 @@
 
 *Figure 1. StarryOS ÷ Linux across every benchmark (1.0 = parity). At or above parity on all CPU and first-touch metrics; the single deficit (multi-thread memory bandwidth) is a board-firmware limitation, not a StarryOS one.*
 
+![StarryOS earlier → now vs Linux](figures/fig6_comparison_table.png)
+
+*Table 1. sysbench + memory, board-measured: StarryOS earlier this effort → now, vs Linux. The scheduler completion (occupancy-aware fork+wake) is visible in the multi-thread rows — 8-thread 1816→4686, `threads` 2861→18921, `mutex` 2.29→0.87 s — while memory first-touch beats Linux and multi-thread bandwidth remains firmware-capped.*
+
 ---
 
 ## 2. What we built (four independent, feature-gated levers)
