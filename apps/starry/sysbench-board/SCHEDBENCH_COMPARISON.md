@@ -85,25 +85,36 @@ surfaced two things the QEMU/analysis pass could not:
 - `feat(axtask)`: guarded runtime migration (newidle idle-pull + push) behind opt-in
   `sched-loadbalance-pull` / `-push` — untested on-board, for the threads>cores regime.
 
-**EFAULT root cause — FOUND + partially fixed (commit `fix(starry): surface ENOMEM …`):**
-A 5-hypothesis root-cause pass found that `prepare_user_memory` (the `vm_read`/`vm_write`
-fault-in path, `os/StarryOS/kernel/src/mm/access.rs:363-365`) did
-`.map_err(|_| VmError::AccessDenied)` — collapsing **every** `populate_area` failure
-(including a genuine `NoMemory` frame-exhaustion) into `AccessDenied` → `BadAddress` →
-EFAULT. That is why an out-of-memory during a user access surfaced as the misleading
-"Bad address". Fixed: added `VmError::NoMemory → AxError::NoMemory` and propagate the
-real error. This is the **diagnostic key** — a board re-run with it now reports the
-*true* failure (ENOMEM vs something else) instead of hiding it. The leading underlying
-suspect is the oversized **256 KB kernel stack** (`axtask/build.rs` `DEFAULT_TASK_STACK_SIZE
-= 0x40000`) × ~400 tasks exhausting the frame budget.
+**EFAULT root cause — narrowed by a 6-agent root-cause pass (OOM excluded):**
+Two things fell out:
+- **A real, independent errno-masking bug (fixed, commit `fix(starry): surface ENOMEM …`):**
+  `prepare_user_memory` (the `vm_read`/`vm_write` fault-in path, `mm/access.rs`) did
+  `.map_err(|_| VmError::AccessDenied)`, collapsing every `populate_area` error
+  (incl. `NoMemory`) into `BadAddress`/EFAULT. Now propagates `NoMemory → ENOMEM`
+  (Linux parity), so a genuine OOM can never masquerade as "Bad address" again.
+- **But OOM is NOT the EFAULT cause.** The workflow showed (code-backed) that the
+  faulting accesses hit *resident* pages — the futex WAIT word, and clone3's args on
+  the caller's own stack — so no frame is allocated and `NoMemory` is unreachable there;
+  clone's real alloc failures already return ENOMEM; a 256 KB-stack OOM would *panic*,
+  and 100 MB/400 tasks on GB-scale RAM isn't exhaustion. The load-dependent `BadAddress`
+  on a **valid pointer** therefore comes from one of three identity/mapping guards in
+  `check_region`/`prepare_user_memory`: `try_as_thread()==None`, `is_owned_by_current()`,
+  or `!can_access_range()` — all concurrency/identity conditions, not resource ones.
 
-**Next, in priority order:**
-1. **Board re-run with the un-mask fix** to read the *true* g=10/schbench error
-   (ENOMEM confirms the memory-pressure theory). One reset.
-2. If ENOMEM: cut `DEFAULT_TASK_STACK_SIZE` (256 KB → e.g. 64 KB) — board-validate for
-   stack-overflow safety — and/or make the kernel-stack alloc return ENOMEM not panic.
-3. Clean re-run of the shipped default (occ + IPC-fix, wake_affine OFF) at g=2/g=5 to
-   confirm thread-mode returns toward the occ column.
-4. Separately: **schbench's futex EFAULT reproduces at ~5 threads** (not load-dependent)
-   — a distinct schbench-specific futex-usage bug to triage after the un-mask fix
-   reveals its true error too.
+**Decisive next step (instrumentation landed, commit `debug(starry): name which …`):**
+a bounded per-branch `EFAULT-diag` log now tags exactly which guard trips (+ task + addr)
+on the first 32 failures. **One board run of hackbench g=10 / schbench names the branch**,
+turning a static hypothesis into a fact. (The shipped default already removes the
+`wake_affine`/migration paths, so that re-run also tests whether they're implicated.)
+
+**Then:**
+1. Board run with the diag → read the branch. If an identity guard
+   (`try_as_thread`/`owned_by_current`) → scheduler `current()`/`on_cpu` publish window;
+   if `can_access_range` → a concurrent-fork COW area-snapshot race.
+2. Clean default re-run (wake_affine OFF) at g=2/g=5 → confirm thread-mode returns
+   toward the occ column.
+3. **schbench's futex EFAULT reproduces at ~5 threads** (NOT load-dependent) — a
+   distinct schbench-specific futex-usage bug; the diag will name its branch too.
+4. Latent: the 256 KB kernel stack (`axtask/build.rs DEFAULT_TASK_STACK_SIZE`) is a real
+   ~100 MB/400-task cost (eventual panic risk), worth trimming toward 16–64 KB — but it
+   is a *red herring* for this EFAULT.
