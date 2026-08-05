@@ -54,6 +54,14 @@ sched-rr = ["multitask", "preempt"]
 # Requires smp: there is nothing to place across on a single core.
 sched-loadbalance = ["smp"]
 
+# wake_affine: on a wakeup, co-locate the wakee on the waker's core when it is
+# lightly loaded (Linux `wake_affine`). OPT-IN and OFF by default: board-measured to
+# REGRESS hackbench (a fan-out, not 1:1 pairs — co-location over-consolidates and
+# serializes; thread-mode ~1.9x worse at g=5, worsening with concurrency). The
+# default wake path keeps the run#14-validated occ-spread. Enable only behind a
+# board A/B on a workload with genuine 1:1 producer→consumer pairs.
+sched-loadbalance-wake-affine = ["sched-loadbalance"]
+
 # Newidle work-stealing: an idle CPU pulls one genuinely-excess Ready task off the
 # busiest remote before halting (Linux `newidle_balance`). Guarded by an is-busy
 # source gate + a MIGRATION_COST cache-hotness horizon so a briefly-blocked task is

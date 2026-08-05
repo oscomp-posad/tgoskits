@@ -636,12 +636,26 @@ pub(crate) fn select_wake_run_queue<G: BaseGuard>(task: &AxTaskRef) -> AxRunQueu
         // Safe despite the earlier wake-redirect segfault: the enqueue goes through
         // `put_task_with_state`, whose `on_cpu` handshake defers to the owning CPU
         // until the outgoing switch-out completes, so any target CPU is race-free.
+        //
+        // wake_affine (step 1) is OPT-IN (`sched-loadbalance-wake-affine`, off by
+        // default). Board measurement (RK3588, hackbench) showed it REGRESSES the
+        // messaging workload it was meant to help: hackbench is not 1:1 pipe pairs but
+        // a fan-out (each sender feeds 40 fds), so co-locating every wakee on the waker
+        // over-consolidates and serializes work that should parallelize — thread-mode
+        // hackbench regressed ~1.9x at g=5 and worsened with concurrency. The default
+        // therefore keeps the run#14-validated occ-spread wake (idle prev_cpu, else
+        // spread), which is what gave sysbench t=8 = 4686. Re-enable + re-tune the
+        // `occ` gate only behind a board A/B.
+        #[cfg(all(feature = "sched-loadbalance", feature = "sched-loadbalance-wake-affine"))]
+        let affine: Option<usize> = {
+            let waker = this_cpu_id();
+            (cpumask.get(waker) && is_online(waker) && get_run_queue(waker).occ() <= 1)
+                .then_some(waker)
+        };
+        #[cfg(all(feature = "sched-loadbalance", not(feature = "sched-loadbalance-wake-affine")))]
+        let affine: Option<usize> = None;
         #[cfg(feature = "sched-loadbalance")]
-        let waker = this_cpu_id();
-        #[cfg(feature = "sched-loadbalance")]
-        let waker_ok = cpumask.get(waker) && is_online(waker);
-        #[cfg(feature = "sched-loadbalance")]
-        let index = if waker_ok && get_run_queue(waker).occ() <= 1 {
+        let index = if let Some(waker) = affine {
             waker // wake_affine: cache-local sync hand-off, no cross-core IPI
         } else if last_ok && get_run_queue(last_cpu).occ() == 0 {
             last_cpu // idle previous CPU (cache-warm)
