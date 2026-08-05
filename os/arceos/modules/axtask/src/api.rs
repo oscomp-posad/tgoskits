@@ -614,6 +614,14 @@ pub fn wake_task_by_id(_task_id: u64) -> bool {
 pub fn run_idle() -> ! {
     loop {
         yield_now_unchecked();
+        // Newidle balance (Linux `newidle_balance`): before halting, try to pull one
+        // genuinely-excess task off the busiest remote. If we pulled one, loop back to
+        // run it instead of sleeping. Guarded (is-busy source + cache-hotness horizon)
+        // inside `idle_pull_once`. Opt-in: no-op unless `sched-loadbalance-pull`.
+        #[cfg(all(feature = "smp", feature = "sched-loadbalance-pull"))]
+        if crate::run_queue::idle_pull_once() {
+            continue;
+        }
         trace!("idle task: waiting for IRQs...");
         #[cfg(all(feature = "irq", not(feature = "host-test")))]
         ax_hal::asm::wait_for_irqs();

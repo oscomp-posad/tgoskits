@@ -54,6 +54,19 @@ sched-rr = ["multitask", "preempt"]
 # Requires smp: there is nothing to place across on a single core.
 sched-loadbalance = ["smp"]
 
+# Newidle work-stealing: an idle CPU pulls one genuinely-excess Ready task off the
+# busiest remote before halting (Linux `newidle_balance`). Guarded by an is-busy
+# source gate + a MIGRATION_COST cache-hotness horizon so a briefly-blocked task is
+# never stolen off its warm core. OPT-IN on top of the placement-only default:
+# enable only after a board A/B, since unguarded runtime migration historically
+# regressed single-thread sysbench ~0.46x on RK3588 (cross-cluster refill thrash).
+sched-loadbalance-pull = ["sched-loadbalance"]
+
+# Periodic push-balance (scheduler-tick path, busy cores only): a busy CPU sheds one
+# Ready task to the least-loaded remote when clearly imbalanced (threads > cores, so
+# no core is idle for pull to fire). Most opt-in; shares the pull cache-hotness guard.
+sched-loadbalance-push = ["sched-loadbalance"]
+
 host-test = [
   "ax-hal/host-test",
   "ax-kspin?/host-test",

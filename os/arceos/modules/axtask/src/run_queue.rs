@@ -203,49 +203,8 @@ fn select_least_loaded(cpumask: AxCpuMask) -> usize {
             best = Some((cpu, eff, cap));
         }
     }
-    let chosen = best
-        .map(|(cpu, ..)| cpu)
-        .unwrap_or_else(|| select_run_queue_index(cpumask));
-    // TEMP DIAG: dump per-CPU occupancy at the first placements so the board serial
-    // log reveals which cores read as busy (the t=8-on-2-A55 regression). Remove.
-    // Gate on ALL 8 CPUs online: `get_run_queue(c)` for a CPU whose run queue is not
-    // yet initialized (early boot, secondaries not up) dereferences uninitialized
-    // memory (a null + field-offset data abort at ~0x28). All-online also makes the
-    // counter skip boot and capture the benchmark's placements instead.
-    if ax_hal::cpu_num() >= 8 && (online & 0xff) == 0xff {
-        static DIAG: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
-        let n = DIAG.fetch_add(1, Ordering::Relaxed);
-        if n < 48 {
-            let o = |c: usize| get_run_queue(c).occ();
-            let cap = |c: usize| cpu_capacity(c);
-            // Log occ AND capacity so the board run disambiguates the t=1-on-A55
-            // regression: if cap[4..8] > cap[0..4] but a low-occ A76 was NOT chosen,
-            // the fault is occ (a big core reads busy); if cap is all-equal, the DTS
-            // capacity table failed to parse and placement degraded to lowest-index.
-            log::info!(
-                "occ-diag[{n}] chosen={chosen} occ=[{} {} {} {} {} {} {} {}] cap=[{} {} {} {} {} \
-                 {} {} {}] online={:#x}",
-                o(0),
-                o(1),
-                o(2),
-                o(3),
-                o(4),
-                o(5),
-                o(6),
-                o(7),
-                cap(0),
-                cap(1),
-                cap(2),
-                cap(3),
-                cap(4),
-                cap(5),
-                cap(6),
-                cap(7),
-                online
-            );
-        }
-    }
-    chosen
+    best.map(|(cpu, ..)| cpu)
+        .unwrap_or_else(|| select_run_queue_index(cpumask))
 }
 
 /// Normalized compute capacity of `cpu` (big.LITTLE weighting), floored at 1 so
@@ -744,6 +703,21 @@ pub(crate) struct AxRunQueue {
     /// cores looking permanently busy. A single per-CPU counter has no such hazard.
     #[cfg(all(feature = "smp", feature = "sched-loadbalance"))]
     occ: core::sync::atomic::AtomicUsize,
+
+    /// Whether this CPU is currently running a non-idle task. Published in
+    /// `switch_to`, read by a remote idle CPU's `idle_pull_once` busy-source
+    /// gate: work is stolen only from a core that is *actually running* a
+    /// non-idle task, never from an idle core that merely has a just-woken task
+    /// queued (which it is about to run itself). Mirrors Linux gating
+    /// newidle-balance on `busiest->nr_running > 1`.
+    #[cfg(all(feature = "smp", feature = "sched-loadbalance-pull"))]
+    busy: core::sync::atomic::AtomicBool,
+
+    /// Push-balance rate-limit counter: `try_push_balance` only acts once every
+    /// `PUSH_BALANCE_INTERVAL` ticks on this CPU. Only meaningful for the
+    /// periodic push balancer.
+    #[cfg(all(feature = "smp", feature = "sched-loadbalance-push"))]
+    balance_counter: usize,
 }
 
 /// A reference to the run queue with specific guard.
@@ -897,6 +871,15 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
                 #[cfg(feature = "preempt")]
                 curr.set_preempt_pending(true);
             }
+
+            // Periodic push-balance: shed one Ready task to the least-loaded remote
+            // when this CPU is clearly busier (imbalance idle-pull cannot see because
+            // no core is idle, e.g. threads > cores). Rate-limited + hysteresis-gated
+            // internally. Only a BUSY core pushes (this branch is `!curr.is_idle()`) —
+            // an idle core with queued tasks is about to run them, so it should pull,
+            // not shed a just-woken task off itself (thrash).
+            #[cfg(all(feature = "smp", feature = "sched-loadbalance-push"))]
+            self.inner.try_push_balance();
         }
     }
 
@@ -1203,6 +1186,10 @@ impl AxRunQueue {
             // active task in the scheduler), matching the `nr_running` seed above.
             #[cfg(all(feature = "smp", feature = "sched-loadbalance"))]
             occ: core::sync::atomic::AtomicUsize::new(1),
+            #[cfg(all(feature = "smp", feature = "sched-loadbalance-pull"))]
+            busy: core::sync::atomic::AtomicBool::new(false),
+            #[cfg(all(feature = "smp", feature = "sched-loadbalance-push"))]
+            balance_counter: 0,
         }
     }
 
@@ -1271,6 +1258,14 @@ impl AxRunQueue {
             )
             .unwrap_or(0);
         debug_assert!(prev > 0, "AxRunQueue::occ underflow on CPU {}", self.cpu_id);
+    }
+
+    /// Whether this CPU is currently running a non-idle task. See the `busy`
+    /// field and `idle_pull_once`'s busy-source gate.
+    #[cfg(all(feature = "smp", feature = "sched-loadbalance-pull"))]
+    #[inline]
+    fn is_busy(&self) -> bool {
+        self.busy.load(core::sync::atomic::Ordering::Acquire)
     }
 
     /// Adds a brand-new (never-scheduled) task to this run queue's scheduler
@@ -1431,9 +1426,25 @@ impl AxRunQueue {
         // run (ready -> running) does not change how many tasks this CPU owns. The
         // counter moves only when a task enters (spawn/wake/migrate-in) or leaves
         // (block/exit/migrate-out) the CPU's active set.
+        //
+        // Publish this CPU's busy state (running a non-idle task?) for remote
+        // idle-pull's busy-source gate. Set before the `prev == next` fast path so a
+        // re-picked task keeps the flag accurate.
+        #[cfg(all(feature = "smp", feature = "sched-loadbalance-pull"))]
+        self.busy
+            .store(!next_task.is_idle(), core::sync::atomic::Ordering::Release);
         if prev_task.ptr_eq(&next_task) {
             return;
         }
+
+        // Record when `prev` leaves the CPU: its cache is warmest now and cools from
+        // here. `idle_pull_once`/`pull_task` (and push-balance) refuse to migrate a
+        // task whose deschedule was more recent than `MIGRATION_COST_NANOS`.
+        #[cfg(all(
+            feature = "smp",
+            any(feature = "sched-loadbalance-pull", feature = "sched-loadbalance-push")
+        ))]
+        prev_task.set_last_stop_nanos(ax_hal::time::monotonic_time_nanos());
 
         // Claim the task as running, we do this before switching to it
         // such that any running task will have this set.
@@ -1601,6 +1612,198 @@ pub(crate) unsafe fn clear_prev_task_on_cpu() {
         }
     }
 }
+
+/// True if `cpu`'s run queue has been registered (it is online). Migration must
+/// never target a CPU whose run queue is uninitialized (early boot, a secondary
+/// not yet up): `get_run_queue` on it would dereference uninitialized memory.
+#[cfg(all(
+    feature = "smp",
+    any(feature = "sched-loadbalance-pull", feature = "sched-loadbalance-push")
+))]
+#[inline]
+fn is_cpu_online(cpu: usize) -> bool {
+    RUN_QUEUE_ONLINE.load(core::sync::atomic::Ordering::Acquire) & (1usize << cpu) != 0
+}
+
+/// Cache-hotness horizon (ns): a task descheduled more recently than this is
+/// treated as cache-hot and is not migrated, so a briefly-blocked task is not
+/// stolen off its warm core the instant it wakes (Linux's
+/// `sysctl_sched_migration_cost`, 0.5ms default; 2ms here, board-tuned against
+/// single-thread sysbench thrash on RK3588 — the cross-cluster A76<->A55 refill
+/// penalty is heavier than on a symmetric machine).
+#[cfg(all(
+    feature = "smp",
+    any(feature = "sched-loadbalance-pull", feature = "sched-loadbalance-push")
+))]
+const MIGRATION_COST_NANOS: u64 = 2_000_000;
+
+/// Steals one eligible Ready task from `from_cpu` onto `to_rq`. `true` if moved.
+///
+/// Deadlock-free: the source and destination scheduler locks are held in two
+/// disjoint critical sections (remove, then enqueue), so at most one is held at
+/// any instant. The moved task is Ready and off both queues in the gap, owned
+/// only by the local `Arc`.
+///
+/// Occupancy accounting mirrors the `migrate_current` -> `migrate_entry` pair:
+/// the task leaves the source's active set (`occ_dec` + `nr_dec` under the source
+/// lock) and enters the destination's (`sched_put_prev` does `nr_inc`; `occ_inc`
+/// after). Both counters must move: the per-tick occ self-heal recomputes
+/// `occ = nr_running + running`, so a missed source `nr_dec` would re-add the
+/// stolen task at the next tick and corrupt the load signal.
+#[cfg(all(feature = "smp", feature = "sched-loadbalance-pull"))]
+fn pull_task(from_cpu: usize, to_rq: &mut AxRunQueue) -> bool {
+    let to_cpu = to_rq.cpu_id;
+    debug_assert_ne!(from_cpu, to_cpu);
+    let now = ax_hal::time::monotonic_time_nanos();
+    // ---- CS1: SOURCE scheduler lock only ----
+    let stolen = {
+        let src_rq = get_run_queue(from_cpu);
+        let mut src = src_rq.scheduler.lock();
+        let picked = src.pick_stealable_task(|t: &TaskInner| {
+            t.cpumask().get(to_cpu)
+                && !t.on_cpu()
+                && !t.is_idle()
+                && now.saturating_sub(t.last_stop_nanos()) >= MIGRATION_COST_NANOS
+        });
+        if picked.is_some() {
+            src_rq.nr_dec();
+            src_rq.occ_dec();
+        }
+        picked
+    };
+    let Some(task) = stolen else {
+        return false;
+    };
+    // New home BEFORE enqueue so wake routing (`last_cpu`) stays correct.
+    task.set_cpu_id(to_cpu as _);
+    // ---- CS2: DEST scheduler lock only ----
+    to_rq.sched_put_prev(task, false);
+    to_rq.occ_inc();
+    true
+}
+
+/// Newidle balance: called from the idle task before it halts. Pulls one task from
+/// the busiest (capacity-weighted) online remote onto this CPU. `true` if pulled
+/// (caller yields to run it). No-op on a single online CPU.
+///
+/// Source selection is occupancy-based (`occ` = ready + running non-idle) and
+/// gated by `is_busy`: a remote is a steal candidate only if it is running a
+/// non-idle task AND owns more than that one task (`occ >= 2`). This is the direct
+/// analog of Linux gating newidle-balance on `busiest->nr_running > 1`, and it
+/// rejects the thrash case — a just-woken task sitting Ready on an otherwise-idle
+/// core, which that core is about to run itself (board-measured single-thread
+/// sysbench 0.46x when such a task was stolen).
+#[cfg(all(feature = "smp", feature = "sched-loadbalance-pull"))]
+pub(crate) fn idle_pull_once() -> bool {
+    let ncpu = ax_hal::cpu_num();
+    if ncpu <= 1 {
+        return false;
+    }
+    // NoPreemptIrqSave satisfies SpinRaw's irq/preempt-off precondition for the
+    // remote (steal) and local (enqueue) locks below.
+    let rq = current_run_queue::<ax_kernel_guard::NoPreemptIrqSave>();
+    let this = rq.inner.cpu_id;
+    let mut best: Option<(usize, usize)> = None; // (cpu, effective_load)
+    for cpu in 0..ncpu {
+        if cpu == this || !is_cpu_online(cpu) {
+            continue;
+        }
+        // Only steal from a BUSY source (running a non-idle task) that owns more
+        // than the one it is running. `occ` counts the running task, so genuine
+        // excess is `occ >= 2`; `is_busy` ensures the running component is non-idle
+        // (an idle core with a single just-woken Ready task has occ 1 and is not
+        // busy, so it is doubly rejected).
+        if !get_run_queue(cpu).is_busy() {
+            continue;
+        }
+        let occ = get_run_queue(cpu).occ();
+        if occ < 2 {
+            continue;
+        }
+        let eff = effective_load(cpu, occ);
+        if best.is_none_or(|(_, b)| eff > b) {
+            best = Some((cpu, eff));
+        }
+    }
+    match best {
+        Some((from, _)) => pull_task(from, rq.inner),
+        None => false,
+    }
+}
+
+/// Periodic push balance (scheduler-tick path, busy cores only). Rate-limited +
+/// hysteresis-gated; sheds one eligible Ready task to the least-loaded eligible
+/// remote when this CPU is clearly busier. One scheduler lock at a time (local
+/// remove, then remote enqueue), then an IPI kick so the dest picks it up. Handles
+/// imbalance idle-pull cannot see (no core idle, e.g. 10 threads / 8 cores).
+///
+/// Occupancy-based to match the rest of the placement model; the same
+/// `MIGRATION_COST_NANOS` cache-hotness horizon as `pull_task` guards the shed so
+/// a freshly-descheduled task is not bounced to a cold core.
+#[cfg(all(feature = "smp", feature = "sched-loadbalance-push"))]
+impl AxRunQueue {
+    fn try_push_balance(&mut self) {
+        const PUSH_BALANCE_INTERVAL: usize = 16;
+        self.balance_counter = self.balance_counter.wrapping_add(1);
+        if !self.balance_counter.is_multiple_of(PUSH_BALANCE_INTERVAL) {
+            return;
+        }
+        let ncpu = ax_hal::cpu_num();
+        if ncpu <= 1 {
+            return;
+        }
+        let this = self.cpu_id;
+        let local_occ = self.occ();
+        if local_occ < 2 {
+            return; // only the running task — nothing to shed
+        }
+        // least-loaded eligible remote (capacity-weighted)
+        let mut best: Option<(usize, usize)> = None;
+        for cpu in 0..ncpu {
+            if cpu == this || !is_cpu_online(cpu) {
+                continue;
+            }
+            let eff = effective_load(cpu, get_run_queue(cpu).occ());
+            if best.is_none_or(|(_, b)| eff < b) {
+                best = Some((cpu, eff));
+            }
+        }
+        let Some((dest, dest_eff)) = best else {
+            return;
+        };
+        // hysteresis: only push if clearly busier, to avoid thrashing
+        if effective_load(this, local_occ) < dest_eff + 2 {
+            return;
+        }
+        let now = ax_hal::time::monotonic_time_nanos();
+        // ---- CS1: LOCAL scheduler lock only ----
+        let task = {
+            let mut sched = self.scheduler.lock();
+            let picked = sched.pick_stealable_task(|t: &TaskInner| {
+                t.cpumask().get(dest)
+                    && !t.on_cpu()
+                    && !t.is_idle()
+                    && now.saturating_sub(t.last_stop_nanos()) >= MIGRATION_COST_NANOS
+            });
+            if picked.is_some() {
+                self.nr_dec();
+                self.occ_dec();
+            }
+            picked
+        };
+        let Some(task) = task else {
+            return;
+        };
+        task.set_cpu_id(dest as _);
+        // ---- CS2: REMOTE scheduler lock only ----
+        let dest_rq = get_run_queue(dest);
+        dest_rq.sched_put_prev(task, false);
+        dest_rq.occ_inc();
+        #[cfg(feature = "ipi")]
+        kick_remote_cpu(dest);
+    }
+}
+
 pub(crate) fn init() {
     let cpu_id = this_cpu_id();
 

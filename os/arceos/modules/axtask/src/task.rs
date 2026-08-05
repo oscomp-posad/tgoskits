@@ -111,6 +111,17 @@ pub struct TaskInner {
     #[cfg(feature = "smp")]
     wake_handoff: AtomicPtr<AxTask>,
 
+    /// Monotonic time (ns) at which this task was last switched off a CPU — its
+    /// cache-warmth clock for the load balancer. The migration paths refuse to
+    /// move a task whose deschedule was more recent than `MIGRATION_COST_NANOS`,
+    /// so a briefly-blocked task is not stolen off its warm core the instant it
+    /// wakes. `0` = never ran (cold). Only for the runtime migration balancers.
+    #[cfg(all(
+        feature = "smp",
+        any(feature = "sched-loadbalance-pull", feature = "sched-loadbalance-push")
+    ))]
+    last_stop_nanos: AtomicU64,
+
     /// A ticket ID used to identify the timer event.
     /// Set by `set_timer_ticket()` when creating a timer event in `set_alarm_wakeup()`,
     /// expired by setting it as zero in `timer_ticket_expired()`, which is called by `cancel_events()`.
@@ -396,6 +407,11 @@ impl TaskInner {
             on_cpu: AtomicBool::new(false),
             #[cfg(feature = "smp")]
             wake_handoff: AtomicPtr::new(core::ptr::null_mut()),
+            #[cfg(all(
+                feature = "smp",
+                any(feature = "sched-loadbalance-pull", feature = "sched-loadbalance-push")
+            ))]
+            last_stop_nanos: AtomicU64::new(0),
             #[cfg(feature = "preempt")]
             need_resched: AtomicBool::new(false),
             #[cfg(feature = "preempt")]
@@ -662,6 +678,27 @@ impl TaskInner {
     #[inline]
     pub(crate) fn set_on_cpu(&self, on_cpu: bool) {
         self.on_cpu.store(on_cpu, Ordering::SeqCst)
+    }
+
+    /// Monotonic time (ns) at which this task was last switched off a CPU (cache-warmth
+    /// clock for the load balancer). See the `last_stop_nanos` field.
+    #[cfg(all(
+        feature = "smp",
+        any(feature = "sched-loadbalance-pull", feature = "sched-loadbalance-push")
+    ))]
+    #[inline]
+    pub(crate) fn last_stop_nanos(&self) -> u64 {
+        self.last_stop_nanos.load(Ordering::Relaxed)
+    }
+
+    /// Records that this task was just switched off a CPU at monotonic time `now`.
+    #[cfg(all(
+        feature = "smp",
+        any(feature = "sched-loadbalance-pull", feature = "sched-loadbalance-push")
+    ))]
+    #[inline]
+    pub(crate) fn set_last_stop_nanos(&self, now: u64) {
+        self.last_stop_nanos.store(now, Ordering::Relaxed)
     }
 
     /// Stash an owned reference for a deferred cross-core wake (see the

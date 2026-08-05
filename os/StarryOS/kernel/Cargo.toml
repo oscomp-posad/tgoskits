@@ -23,6 +23,10 @@ loongarch64-low-va = []
 # Capacity-aware big.LITTLE task placement (initial + wake), placement-only —
 # no continuous migration. See ax-task's `sched-loadbalance`.
 sched-loadbalance = ["ax-task/sched-loadbalance"]
+# Opt-in runtime migration on top of placement (Linux newidle + periodic balance),
+# guarded by is-busy source + MIGRATION_COST horizon. See ax-task's features.
+sched-loadbalance-pull = ["ax-task/sched-loadbalance-pull"]
+sched-loadbalance-push = ["ax-task/sched-loadbalance-push"]
 memtrack = ["axbacktrace/alloc", "ax-alloc/tracking"]
 rknpu = ["ax-driver/rknpu", "dep:ax-dma"]
 jpeg = ["ax-driver/jpeg", "dep:ax-dma"]
