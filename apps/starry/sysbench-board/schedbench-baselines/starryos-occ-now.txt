@@ -1,0 +1,17 @@
+SBB_UNAME Linux 10.0.0 aarch64
+=== HACKBENCH (Time in s, LOWER=better) ===
+### hackbench -p -g 2 -P
+Time: 1.395
+### hackbench -p -g 5 -P
+Time: 1.721
+### hackbench -p -g 10 -P
+Time: 241.641
+### hackbench -p -g 2 -T
+Time: 2.602
+### hackbench -p -g 5 -T
+Time: 5.160
+### hackbench -p -g 10 -T
+Time: 17.346
+=== SCHBENCH (Wakeup/Request latency us LOWER=better, RPS HIGHER=better) ===
+### schbench -m 1 -t 4 -r 8
+### schbench -m 2 -t 8 -r 8

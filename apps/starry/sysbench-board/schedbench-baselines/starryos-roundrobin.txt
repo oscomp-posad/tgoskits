@@ -1,0 +1,18 @@
+SBB_UNAME Linux 10.0.0 aarch64
+=== HACKBENCH (Time in s, LOWER=better) ===
+### hackbench -p -g 2 -P
+Time: 7.055
+### hackbench -p -g 5 -P
+Time: 18.388
+### hackbench -p -g 10 -P
+TIMEOUT/err
+### hackbench -p -g 2 -T
+Time: 6.590
+### hackbench -p -g 5 -T
+Time: 17.966
+### hackbench -p -g 10 -T
+Time: 69.233
+=== SCHBENCH (latency us lower / RPS higher; 30s cap) ===
+### schbench -m 1 -t 4 -r 5
+TIMEOUT/err
+### schbench -m 2 -t 8 -r 5
