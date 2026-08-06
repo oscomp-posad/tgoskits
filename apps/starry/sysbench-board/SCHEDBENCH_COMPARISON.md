@@ -94,36 +94,32 @@ surfaced two things the QEMU/analysis pass could not:
 - `feat(axtask)`: guarded runtime migration (newidle idle-pull + push) behind opt-in
   `sched-loadbalance-pull` / `-push` — untested on-board, for the threads>cores regime.
 
-**EFAULT root cause — narrowed by a 6-agent root-cause pass (OOM excluded):**
-Two things fell out:
-- **A real, independent errno-masking bug (fixed, commit `fix(starry): surface ENOMEM …`):**
-  `prepare_user_memory` (the `vm_read`/`vm_write` fault-in path, `mm/access.rs`) did
-  `.map_err(|_| VmError::AccessDenied)`, collapsing every `populate_area` error
-  (incl. `NoMemory`) into `BadAddress`/EFAULT. Now propagates `NoMemory → ENOMEM`
-  (Linux parity), so a genuine OOM can never masquerade as "Bad address" again.
-- **But OOM is NOT the EFAULT cause.** The workflow showed (code-backed) that the
-  faulting accesses hit *resident* pages — the futex WAIT word, and clone3's args on
-  the caller's own stack — so no frame is allocated and `NoMemory` is unreachable there;
-  clone's real alloc failures already return ENOMEM; a 256 KB-stack OOM would *panic*,
-  and 100 MB/400 tasks on GB-scale RAM isn't exhaustion. The load-dependent `BadAddress`
-  on a **valid pointer** therefore comes from one of three identity/mapping guards in
-  `check_region`/`prepare_user_memory`: `try_as_thread()==None`, `is_owned_by_current()`,
-  or `!can_access_range()` — all concurrency/identity conditions, not resource ones.
+**EFAULT root cause — FOUND + FIXED (commit `fix(starry): align THP populate range …`).**
+It was **THP**, not the allocator, the scheduler, or a cross-core race (every earlier
+hypothesis here was a misattribution). `populate_area` fed `area.backend().populate()`
+the caller's range directly. The page-*fault* path (`handle_page_fault`) aligns that
+range to the area's `page_size`, but the **demand path** (`prepare_user_memory`, i.e.
+`vm_read`/`vm_write` for a *small* kernel access — a 4-byte futex word, clone's tid
+pointers) aligned only to 4 KiB. For a **2 MiB THP (COW) area**, a 4 KiB range is not
+2 MiB-aligned → `CowBackend::populate`'s `pages_in` → `DynPageIter::new` returns `None`
+→ `AxError::InvalidInput`, which `prepare_user_memory` then mis-mapped to
+`AccessDenied → BadAddress → EFAULT`. So *first-touch of a THP huge page via a small
+kernel user-access* spuriously EFAULTed on a valid pointer.
 
-**Decisive next step (instrumentation landed, commit `debug(starry): name which …`):**
-a bounded per-branch `EFAULT-diag` log now tags exactly which guard trips (+ task + addr)
-on the first 32 failures. **One board run of hackbench g=10 / schbench names the branch**,
-turning a static hypothesis into a fact. (The shipped default already removes the
-`wake_affine`/migration paths, so that re-run also tests whether they're implicated.)
+This explains everything: hackbench g=10 `fork()`/`Creating workers: Bad address`,
+schbench futex `Bad address`; **"board-only"** (the board config enables THP; the QEMU
+*default* config did not); **"load-dependent"** (more tasks → more THP first-touches).
 
-**Then:**
-1. Board run with the diag → read the branch. If an identity guard
-   (`try_as_thread`/`owned_by_current`) → scheduler `current()`/`on_cpu` publish window;
-   if `can_access_range` → a concurrent-fork COW area-snapshot race.
-2. Clean default re-run (wake_affine OFF) at g=2/g=5 → confirm thread-mode returns
-   toward the occ column.
-3. **schbench's futex EFAULT reproduces at ~5 threads** (NOT load-dependent) — a
-   distinct schbench-specific futex-usage bug; the diag will name its branch too.
-4. Latent: the 256 KB kernel stack (`axtask/build.rs DEFAULT_TASK_STACK_SIZE`) is a real
-   ~100 MB/400-task cost (eventual panic risk), worth trimming toward 16–64 KB — but it
-   is a *red herring* for this EFAULT.
+**How it was pinned (board-free):** kernel `error!` diags were invisible during
+userspace (the tty `claim_runtime_output()` silences the console post-boot). Once that
+was temporarily disabled, the diag named `prepare:populate_err → InvalidInput`. Injecting
+schbench/hackbench into the QEMU rootfs (via `debugfs`) and toggling features **isolated
+it to `thp`**: THP on ⇒ reproduces, THP off ⇒ clean — no board needed.
+
+**Fix:** `populate_area` aligns the fill range to the area's `page_size` (first touch
+fills the whole huge page — the THP intent; a 4 KiB area is a no-op). Kept the
+independent `NoMemory → ENOMEM` errno correction.
+
+**Validated (QEMU smp8, THP + occ scheduler):** schbench `-m2 -t8` and hackbench
+`-p -g4 -P` both run cleanly, **0 "Bad address"** — where before the same build faulted
+repeatedly. Board re-run of the full sched-bench suite is now unblocked.
