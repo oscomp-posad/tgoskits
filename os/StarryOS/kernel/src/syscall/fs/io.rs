@@ -138,8 +138,10 @@ pub fn sys_readv(fd: i32, iov: *const IoVec, iovcnt: usize) -> AxResult<isize> {
 pub fn sys_write(fd: i32, buf: *mut u8, len: usize) -> AxResult<isize> {
     debug!("sys_write <= fd: {fd}, buf: {buf:p}, len: {len}");
     let file_like = get_file_like(fd)?;
-    validate_user_read_buf(buf.cast_const(), len)?;
     memfd_checks_before_stream_write(&file_like, len as u64)?;
+    // `copy_user_read_buf` validates the buffer itself (via get_as_slice), so the
+    // earlier separate `validate_user_read_buf` was a redundant second check_region
+    // (aspace lock + can_access_range + populate) on every write — dropped.
     let data = copy_user_read_buf(buf.cast_const(), len)?;
     Ok(file_like.write(&mut data.as_slice())? as _)
 }
