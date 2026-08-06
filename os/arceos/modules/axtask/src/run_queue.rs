@@ -207,6 +207,42 @@ fn select_least_loaded(cpumask: AxCpuMask) -> usize {
         .unwrap_or_else(|| select_run_queue_index(cpumask))
 }
 
+/// Linux `select_idle_sibling`: an eligible, online, *idle* CPU (occ == 0), preferring
+/// the highest raw capacity (an idle A76 beats an idle A55, mirroring how CFS scans the
+/// LLC for an idle sibling and packs onto the more capable core). Returns `None` if no
+/// eligible CPU is idle, in which case the caller falls back to `select_least_loaded`.
+///
+/// Unlike `select_least_loaded` (which returns the *least* loaded CPU even when every
+/// CPU is busy), this returns a target only when it is genuinely idle — so the wakee
+/// runs immediately instead of queueing behind another task, which is the whole point
+/// of Linux steering wakeups onto idle siblings.
+///
+/// Only reachable from the `wake_affine` placement path, so gate it on that feature to
+/// avoid an unused-function warning in the conservative (occ-spread) default build.
+#[cfg(all(
+    feature = "smp",
+    feature = "sched-loadbalance",
+    feature = "sched-loadbalance-wake-affine"
+))]
+fn select_idle_sibling(cpumask: AxCpuMask) -> Option<usize> {
+    use core::sync::atomic::Ordering;
+    let online = RUN_QUEUE_ONLINE.load(Ordering::Acquire);
+    let mut best: Option<(usize, usize)> = None; // (cpu, capacity)
+    for cpu in 0..ax_hal::cpu_num() {
+        if !cpumask.get(cpu) || (online & (1usize << cpu)) == 0 {
+            continue;
+        }
+        if get_run_queue(cpu).occ() != 0 {
+            continue;
+        }
+        let cap = cpu_capacity(cpu);
+        if best.is_none_or(|(_, bcap)| cap > bcap) {
+            best = Some((cpu, cap));
+        }
+    }
+    best.map(|(cpu, _)| cpu)
+}
+
 /// Normalized compute capacity of `cpu` (big.LITTLE weighting), floored at 1 so
 /// `effective_load`'s division is always well-defined. Sourced from the device
 /// tree's `capacity-dmips-mhz` (A76 ~ 1024, A55 ~ 530); homogeneous machines
@@ -653,18 +689,57 @@ pub(crate) fn select_wake_run_queue<G: BaseGuard>(task: &AxTaskRef) -> AxRunQueu
         //     lever; Linux balances both by comparing load. Net: the cross-core wake
         //     IPI + on_cpu handshake was the dominant wakeup-latency cost, and the
         //     local hand-off removes it. See SCHEDBENCH_BOARD_RESULTS_2026-08-06.md.
+        // Proper Linux-faithful wakeup placement: `wake_affine` (choose the search
+        // target between the WAKER and the wakee's PREV cpu, idle-biased) followed by
+        // `select_idle_sibling` (steer onto a genuinely idle CPU near the target).
+        //
+        // Adapted to this SoC's cost model, which INVERTS Linux's: a *cross-core* wake
+        // here costs ~1 ms (targeted GIC SGI + the `on_cpu` switch-out handshake),
+        // whereas a *local* hand-off on the waker is ~9 µs. Linux spreads freely
+        // because its cross-core wake is ~µs; here the sync-idle local hand-off must be
+        // preferred, or schbench-style 1:1 wakeups eat ~1 ms each (measured: m1t4
+        // wakeup p50 1023 µs when spread vs 9 µs local — see SCHEDBENCH_BOARD_RESULTS).
         #[cfg(all(feature = "sched-loadbalance", feature = "sched-loadbalance-wake-affine"))]
-        let affine: Option<usize> = {
+        let index = {
             let waker = this_cpu_id();
-            (cpumask.get(waker) && is_online(waker) && get_run_queue(waker).occ() <= 1)
-                .then_some(waker)
+            let waker_ok = waker < crate::build_info::CPU_CAPACITY
+                && cpumask.get(waker)
+                && is_online(waker);
+            let waker_occ = if waker_ok {
+                get_run_queue(waker).occ()
+            } else {
+                usize::MAX
+            };
+            let prev_idle = last_ok && get_run_queue(last_cpu).occ() == 0;
+
+            if waker_ok && waker_occ == 0 {
+                // Waker idle. All cores share the L3, so `cpus_share_cache` is always
+                // true here; Linux `wake_affine_idle` then prefers an idle prev (keep
+                // the waker free for its own next work), else the waker itself.
+                if prev_idle { last_cpu } else { waker }
+            } else if waker_ok && waker_occ == 1 {
+                // Sync-like: the waker holds only itself and is about to block right
+                // after the hand-off (producer→consumer, lock release, pipe write —
+                // the schbench dispatcher). Enqueue LOCALLY so there is no cross-core
+                // IPI: this is the decisive wakeup-latency win (1023 µs → 9 µs). Once
+                // the waker is waking a *burst* (occ climbs > 1, e.g. a hackbench
+                // sender feeding 40 fds) we fall through and spread instead.
+                waker
+            } else if prev_idle {
+                // Waker busy: keep the wakee on its own idle home (cache-warm), like
+                // Linux `select_idle_sibling` returning an idle prev_cpu.
+                last_cpu
+            } else {
+                // Neither is idle: steer onto any idle sibling (capacity-first) so the
+                // wakee runs at once; if the machine is saturated, spread by load.
+                select_idle_sibling(cpumask).unwrap_or_else(|| select_least_loaded(cpumask))
+            }
         };
+        // Conservative default (wake_affine OFF): occ-spread only — idle prev, else
+        // least-loaded. No sync local hand-off. Kept as a rollback lever; the A/B on
+        // RK3588 (2026-08-06) favours the wake_affine path above.
         #[cfg(all(feature = "sched-loadbalance", not(feature = "sched-loadbalance-wake-affine")))]
-        let affine: Option<usize> = None;
-        #[cfg(feature = "sched-loadbalance")]
-        let index = if let Some(waker) = affine {
-            waker // wake_affine: cache-local sync hand-off, no cross-core IPI
-        } else if last_ok && get_run_queue(last_cpu).occ() == 0 {
+        let index = if last_ok && get_run_queue(last_cpu).occ() == 0 {
             last_cpu // idle previous CPU (cache-warm)
         } else {
             select_least_loaded(cpumask) // spread an independent burst
