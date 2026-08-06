@@ -14,16 +14,71 @@ use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
 use alloc::string::String;
 
-/// Local (same-CPU) wake-to-run: the woken task lands on the waker's own CPU.
-static LOCAL_SUM_NS: AtomicU64 = AtomicU64::new(0);
-static LOCAL_CNT: AtomicU64 = AtomicU64::new(0);
-static LOCAL_MAX_NS: AtomicU64 = AtomicU64::new(0);
+/// log2 latency buckets: bucket `k` holds wakes with `delta_ns` in `[2^(k-1), 2^k)`
+/// (bucket 0 = 0 ns). 32 buckets cover up to ~2.1 s, enough for the oversubscription
+/// tail. Percentiles are read out of the cumulative histogram in [`render`].
+const NUM_BUCKETS: usize = 32;
 
+struct Cat {
+    sum_ns: AtomicU64,
+    cnt: AtomicU64,
+    max_ns: AtomicU64,
+    hist: [AtomicU64; NUM_BUCKETS],
+}
+
+impl Cat {
+    const fn new() -> Self {
+        Self {
+            sum_ns: AtomicU64::new(0),
+            cnt: AtomicU64::new(0),
+            max_ns: AtomicU64::new(0),
+            hist: [const { AtomicU64::new(0) }; NUM_BUCKETS],
+        }
+    }
+    fn record(&self, delta: u64) {
+        self.sum_ns.fetch_add(delta, Relaxed);
+        self.cnt.fetch_add(1, Relaxed);
+        self.max_ns.fetch_max(delta, Relaxed);
+        let b = if delta == 0 {
+            0
+        } else {
+            (64 - delta.leading_zeros() as usize).min(NUM_BUCKETS - 1)
+        };
+        self.hist[b].fetch_add(1, Relaxed);
+    }
+    fn reset(&self) {
+        self.sum_ns.store(0, Relaxed);
+        self.cnt.store(0, Relaxed);
+        self.max_ns.store(0, Relaxed);
+        for h in &self.hist {
+            h.store(0, Relaxed);
+        }
+    }
+    /// Percentile latency estimate (ns) = upper bound of the bucket the given
+    /// fraction falls in. `pct` is 0..=100.
+    fn pctl_ns(&self, pct: u64) -> u64 {
+        let total = self.cnt.load(Relaxed);
+        if total == 0 {
+            return 0;
+        }
+        let target = total * pct / 100;
+        let mut cum = 0u64;
+        for (k, h) in self.hist.iter().enumerate() {
+            cum += h.load(Relaxed);
+            if cum >= target {
+                // bucket k upper bound = 2^k ns (bucket 0 = ~0)
+                return if k == 0 { 0 } else { 1u64 << k };
+            }
+        }
+        self.max_ns.load(Relaxed)
+    }
+}
+
+/// Local (same-CPU) wake-to-run: the woken task lands on the waker's own CPU.
+static LOCAL: Cat = Cat::new();
 /// Cross-core wake-to-run: the woken task is enqueued on a different CPU than the
 /// waker (pays the GIC SGI + `on_cpu` switch-out handshake).
-static XCORE_SUM_NS: AtomicU64 = AtomicU64::new(0);
-static XCORE_CNT: AtomicU64 = AtomicU64::new(0);
-static XCORE_MAX_NS: AtomicU64 = AtomicU64::new(0);
+static XCORE: Cat = Cat::new();
 
 /// Of the cross-core wakes, how many took the deferred `on_cpu` stash path (the
 /// wakee was still finishing its switch-out on its owning CPU at wake time).
@@ -55,53 +110,39 @@ pub(crate) fn record_run(wake_ns: u64, xcore: bool) {
     if wake_ns == 0 {
         return;
     }
-    let now = now_ns();
-    let delta = now.saturating_sub(wake_ns);
-    let (sum, cnt, max) = if xcore {
-        (&XCORE_SUM_NS, &XCORE_CNT, &XCORE_MAX_NS)
-    } else {
-        (&LOCAL_SUM_NS, &LOCAL_CNT, &LOCAL_MAX_NS)
-    };
-    sum.fetch_add(delta, Relaxed);
-    cnt.fetch_add(1, Relaxed);
-    max.fetch_max(delta, Relaxed);
+    let delta = now_ns().saturating_sub(wake_ns);
+    if xcore { &XCORE } else { &LOCAL }.record(delta);
 }
 
 /// Zero all counters (so a benchmark can snapshot a clean interval).
 pub fn reset() {
-    for a in [
-        &LOCAL_SUM_NS,
-        &LOCAL_CNT,
-        &LOCAL_MAX_NS,
-        &XCORE_SUM_NS,
-        &XCORE_CNT,
-        &XCORE_MAX_NS,
-        &XCORE_DEFER_CNT,
-    ] {
-        a.store(0, Relaxed);
-    }
+    LOCAL.reset();
+    XCORE.reset();
+    XCORE_DEFER_CNT.store(0, Relaxed);
+}
+
+fn render_cat(name: &str, c: &Cat) -> String {
+    let cnt = c.cnt.load(Relaxed);
+    let avg = if cnt > 0 { c.sum_ns.load(Relaxed) / cnt } else { 0 };
+    // Percentiles in µs (bucket upper bounds → coarse but distribution-true).
+    alloc::format!(
+        "{name}  count={cnt} avg_us={} p50_us={} p90_us={} p99_us={} max_us={}\n",
+        avg / 1000,
+        c.pctl_ns(50) / 1000,
+        c.pctl_ns(90) / 1000,
+        c.pctl_ns(99) / 1000,
+        c.max_ns.load(Relaxed) / 1000,
+    )
 }
 
 /// Render the current snapshot as text for `/proc/wakeprof`.
 pub fn render() -> String {
-    let lsum = LOCAL_SUM_NS.load(Relaxed);
-    let lcnt = LOCAL_CNT.load(Relaxed);
-    let lmax = LOCAL_MAX_NS.load(Relaxed);
-    let xsum = XCORE_SUM_NS.load(Relaxed);
-    let xcnt = XCORE_CNT.load(Relaxed);
-    let xmax = XCORE_MAX_NS.load(Relaxed);
-    let xdef = XCORE_DEFER_CNT.load(Relaxed);
-    let lavg = if lcnt > 0 { lsum / lcnt } else { 0 };
-    let xavg = if xcnt > 0 { xsum / xcnt } else { 0 };
-    // ns → µs for readability; keep raw ns too.
-    alloc::format!(
-        "wake-to-run latency profile (ns)\n\
-         local  count={lcnt} avg_ns={lavg} avg_us={} max_ns={lmax} max_us={}\n\
-         xcore  count={xcnt} avg_ns={xavg} avg_us={} max_ns={xmax} max_us={}\n\
-         xcore_deferred_count={xdef}\n",
-        lavg / 1000,
-        lmax / 1000,
-        xavg / 1000,
-        xmax / 1000,
-    )
+    let mut s = String::from("wake-to-run latency profile (percentiles = bucket upper bound)\n");
+    s.push_str(&render_cat("local", &LOCAL));
+    s.push_str(&render_cat("xcore", &XCORE));
+    s.push_str(&alloc::format!(
+        "xcore_deferred_count={}\n",
+        XCORE_DEFER_CNT.load(Relaxed)
+    ));
+    s
 }
