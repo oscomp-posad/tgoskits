@@ -78,6 +78,8 @@ cfg_if::cfg_if! {
         #[cfg(feature = "irq")]
         mod irq_notify;
         mod wait_queue;
+        #[cfg(feature = "wakeprof")]
+        pub mod wakeprof;
 
         #[cfg(feature = "irq")]
         mod timers;

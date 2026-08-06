@@ -29,6 +29,8 @@ sched-loadbalance-wake-affine = ["ax-task/sched-loadbalance-wake-affine"]
 # guarded by is-busy source + MIGRATION_COST horizon. See ax-task's features.
 sched-loadbalance-pull = ["ax-task/sched-loadbalance-pull"]
 sched-loadbalance-push = ["ax-task/sched-loadbalance-push"]
+# Wakeup-latency profiling exposed at /proc/wakeprof (diagnostic, off by default).
+wakeprof = ["ax-task/wakeprof"]
 memtrack = ["axbacktrace/alloc", "ax-alloc/tracking"]
 rknpu = ["ax-driver/rknpu", "dep:ax-dma"]
 jpeg = ["ax-driver/jpeg", "dep:ax-dma"]

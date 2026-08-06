@@ -1353,6 +1353,17 @@ impl AxRunQueue {
         // If the task's state matches `current_state`, set its state to `Ready` and
         // put it back to the run queue (except idle task).
         if task.transition_state(current_state, TaskState::Ready) && !task.is_idle() {
+            // Wakeup-latency profiling: stamp the wake time the moment the task
+            // becomes runnable, so the wake-to-run delta (measured at switch-in)
+            // includes any cross-core IPI + on_cpu-handshake deferral below.
+            #[cfg(feature = "wakeprof")]
+            if current_state == TaskState::Blocked {
+                #[cfg(feature = "smp")]
+                let xcore = self.cpu_id != this_cpu_id();
+                #[cfg(not(feature = "smp"))]
+                let xcore = false;
+                task.set_wake_stamp(crate::wakeprof::stamp_wake(), xcore);
+            }
             #[cfg(feature = "smp")]
             let waking_current_task = current_state == TaskState::Blocked
                 && self.cpu_id == this_cpu_id()
@@ -1373,6 +1384,10 @@ impl AxRunQueue {
             // program order when it returns.
             #[cfg(feature = "smp")]
             if current_state == TaskState::Blocked && !waking_current_task && task.on_cpu() {
+                // Wakeup-latency profiling: this cross-core wake hit the deferred
+                // on_cpu-handshake path (wakee still switching out on its owner).
+                #[cfg(feature = "wakeprof")]
+                crate::wakeprof::note_deferred();
                 // Record where the task must land, then stash a reference for the
                 // owning CPU to enqueue from `clear_prev_task_on_cpu()`.
                 task.set_cpu_id(self.cpu_id as _);
@@ -1443,6 +1458,13 @@ impl AxRunQueue {
         #[cfg(feature = "preempt")]
         next_task.set_preempt_pending(false);
         next_task.set_state(TaskState::Running);
+        // Wakeup-latency profiling: the task is now being switched onto this CPU;
+        // consume its wake stamp to record wake-to-run latency (local vs cross-core).
+        #[cfg(feature = "wakeprof")]
+        {
+            let (wns, xcore) = next_task.take_wake_ns();
+            crate::wakeprof::record_run(wns, xcore);
+        }
         // Occupancy ([`RQ_OCC`]) is intentionally NOT touched here: picking a task to
         // run (ready -> running) does not change how many tasks this CPU owns. The
         // counter moves only when a task enters (spawn/wake/migrate-in) or leaves

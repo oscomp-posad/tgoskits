@@ -128,6 +128,15 @@ pub struct TaskInner {
     #[cfg(feature = "irq")]
     timer_ticket_id: AtomicU64,
 
+    /// Wakeup-latency profiling: monotonic-ns stamp taken when this task was made
+    /// runnable (Blocked→Ready), consumed when it is next switched onto a CPU to
+    /// accumulate wake-to-run latency. `0` = no pending wake. See `wakeprof`.
+    #[cfg(feature = "wakeprof")]
+    wake_ns: AtomicU64,
+    /// Whether the pending wake crossed cores (waker CPU ≠ target CPU).
+    #[cfg(feature = "wakeprof")]
+    wake_xcore: AtomicBool,
+
     #[cfg(feature = "preempt")]
     need_resched: AtomicBool,
     #[cfg(feature = "preempt")]
@@ -402,6 +411,10 @@ impl TaskInner {
             in_wait_queue: AtomicBool::new(false),
             #[cfg(feature = "irq")]
             timer_ticket_id: AtomicU64::new(0),
+            #[cfg(feature = "wakeprof")]
+            wake_ns: AtomicU64::new(0),
+            #[cfg(feature = "wakeprof")]
+            wake_xcore: AtomicBool::new(false),
             cpu_id: AtomicU32::new(0),
             #[cfg(feature = "smp")]
             on_cpu: AtomicBool::new(false),
@@ -678,6 +691,24 @@ impl TaskInner {
     #[inline]
     pub(crate) fn set_on_cpu(&self, on_cpu: bool) {
         self.on_cpu.store(on_cpu, Ordering::SeqCst)
+    }
+
+    /// Wakeup-latency profiling: stamp this task's wake time (monotonic ns) and
+    /// whether the wake crossed cores. Consumed by [`Self::take_wake_ns`].
+    #[cfg(feature = "wakeprof")]
+    #[inline]
+    pub(crate) fn set_wake_stamp(&self, ns: u64, xcore: bool) {
+        self.wake_xcore.store(xcore, Ordering::Relaxed);
+        self.wake_ns.store(ns, Ordering::Relaxed);
+    }
+
+    /// Wakeup-latency profiling: take (and clear) the pending wake stamp. Returns
+    /// `(wake_ns, xcore)`; `wake_ns == 0` means there was no pending wake.
+    #[cfg(feature = "wakeprof")]
+    #[inline]
+    pub(crate) fn take_wake_ns(&self) -> (u64, bool) {
+        let ns = self.wake_ns.swap(0, Ordering::Relaxed);
+        (ns, self.wake_xcore.load(Ordering::Relaxed))
     }
 
     /// Monotonic time (ns) at which this task was last switched off a CPU (cache-warmth

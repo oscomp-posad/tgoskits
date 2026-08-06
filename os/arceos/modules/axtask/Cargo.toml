@@ -75,6 +75,12 @@ sched-loadbalance-pull = ["sched-loadbalance"]
 # no core is idle for pull to fire). Most opt-in; shares the pull cache-hotness guard.
 sched-loadbalance-push = ["sched-loadbalance"]
 
+# Wakeup-latency profiling (diagnostic, off by default). Instruments the wake path
+# to measure wake-to-run latency split by local vs cross-core (plus the deferred
+# on_cpu-handshake count), exposed to userspace via `/proc/wakeprof`. Used to
+# localise the ~1ms cross-core wake cost on RK3588. Zero cost when off.
+wakeprof = ["multitask"]
+
 host-test = [
   "ax-hal/host-test",
   "ax-kspin?/host-test",

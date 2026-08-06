@@ -1651,6 +1651,22 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
             Ok(format!("{:?}\n", allocator.usages()))
         }),
     );
+    // Wakeup-latency profile (diagnostic build only): wake-to-run latency split by
+    // local vs cross-core. `cat /proc/wakeprof_reset` zeroes the counters so a
+    // benchmark can snapshot a clean interval, then `cat /proc/wakeprof` reads it.
+    #[cfg(feature = "wakeprof")]
+    root.add(
+        "wakeprof",
+        SimpleFile::new_regular(fs.clone(), || Ok(ax_task::wakeprof::render())),
+    );
+    #[cfg(feature = "wakeprof")]
+    root.add(
+        "wakeprof_reset",
+        SimpleFile::new_regular(fs.clone(), || {
+            ax_task::wakeprof::reset();
+            Ok(alloc::string::String::from("reset\n"))
+        }),
+    );
     root.add(
         "instret",
         SimpleFile::new_regular(fs.clone(), || {
