@@ -76,9 +76,11 @@ impl Cat {
 
 /// Local (same-CPU) wake-to-run: the woken task lands on the waker's own CPU.
 static LOCAL: Cat = Cat::new();
-/// Cross-core wake-to-run: the woken task is enqueued on a different CPU than the
-/// waker (pays the GIC SGI + `on_cpu` switch-out handshake).
-static XCORE: Cat = Cat::new();
+/// Cross-core wake onto an IDLE target CPU. If this is still ~1 ms, the cost is in
+/// the IPI→WFI-exit→idle-pick mechanism, not run-queue queueing.
+static XCORE_IDLE: Cat = Cat::new();
+/// Cross-core wake onto a BUSY target CPU (the wakee queues behind a running task).
+static XCORE_BUSY: Cat = Cat::new();
 
 /// Of the cross-core wakes, how many took the deferred `on_cpu` stash path (the
 /// wakee was still finishing its switch-out on its owning CPU at wake time).
@@ -106,18 +108,24 @@ pub(crate) fn note_deferred() {
 /// `wake_ns` is the stamp taken at ready time; `xcore` is whether that wake
 /// crossed cores.
 #[inline]
-pub(crate) fn record_run(wake_ns: u64, xcore: bool) {
+pub(crate) fn record_run(wake_ns: u64, cat: u8) {
     if wake_ns == 0 {
         return;
     }
     let delta = now_ns().saturating_sub(wake_ns);
-    if xcore { &XCORE } else { &LOCAL }.record(delta);
+    match cat {
+        1 => &XCORE_IDLE,
+        2 => &XCORE_BUSY,
+        _ => &LOCAL,
+    }
+    .record(delta);
 }
 
 /// Zero all counters (so a benchmark can snapshot a clean interval).
 pub fn reset() {
     LOCAL.reset();
-    XCORE.reset();
+    XCORE_IDLE.reset();
+    XCORE_BUSY.reset();
     XCORE_DEFER_CNT.store(0, Relaxed);
 }
 
@@ -138,8 +146,9 @@ fn render_cat(name: &str, c: &Cat) -> String {
 /// Render the current snapshot as text for `/proc/wakeprof`.
 pub fn render() -> String {
     let mut s = String::from("wake-to-run latency profile (percentiles = bucket upper bound)\n");
-    s.push_str(&render_cat("local", &LOCAL));
-    s.push_str(&render_cat("xcore", &XCORE));
+    s.push_str(&render_cat("local     ", &LOCAL));
+    s.push_str(&render_cat("xcore_idle", &XCORE_IDLE));
+    s.push_str(&render_cat("xcore_busy", &XCORE_BUSY));
     s.push_str(&alloc::format!(
         "xcore_deferred_count={}\n",
         XCORE_DEFER_CNT.load(Relaxed)

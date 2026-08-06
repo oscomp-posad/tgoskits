@@ -133,9 +133,12 @@ pub struct TaskInner {
     /// accumulate wake-to-run latency. `0` = no pending wake. See `wakeprof`.
     #[cfg(feature = "wakeprof")]
     wake_ns: AtomicU64,
-    /// Whether the pending wake crossed cores (waker CPU ≠ target CPU).
+    /// Wake category for the pending wake: 0 = local (same CPU as waker), 1 =
+    /// cross-core onto an idle target CPU, 2 = cross-core onto a busy target CPU.
+    /// Splitting cross-core by target idleness isolates the IPI→idle-pick mechanism
+    /// cost from run-queue queueing behind a running task.
     #[cfg(feature = "wakeprof")]
-    wake_xcore: AtomicBool,
+    wake_cat: AtomicU8,
 
     #[cfg(feature = "preempt")]
     need_resched: AtomicBool,
@@ -414,7 +417,7 @@ impl TaskInner {
             #[cfg(feature = "wakeprof")]
             wake_ns: AtomicU64::new(0),
             #[cfg(feature = "wakeprof")]
-            wake_xcore: AtomicBool::new(false),
+            wake_cat: AtomicU8::new(0),
             cpu_id: AtomicU32::new(0),
             #[cfg(feature = "smp")]
             on_cpu: AtomicBool::new(false),
@@ -693,22 +696,23 @@ impl TaskInner {
         self.on_cpu.store(on_cpu, Ordering::SeqCst)
     }
 
-    /// Wakeup-latency profiling: stamp this task's wake time (monotonic ns) and
-    /// whether the wake crossed cores. Consumed by [`Self::take_wake_ns`].
+    /// Wakeup-latency profiling: stamp this task's wake time (monotonic ns) and its
+    /// wake category (0=local, 1=xcore-idle-target, 2=xcore-busy-target). Consumed
+    /// by [`Self::take_wake_ns`].
     #[cfg(feature = "wakeprof")]
     #[inline]
-    pub(crate) fn set_wake_stamp(&self, ns: u64, xcore: bool) {
-        self.wake_xcore.store(xcore, Ordering::Relaxed);
+    pub(crate) fn set_wake_stamp(&self, ns: u64, cat: u8) {
+        self.wake_cat.store(cat, Ordering::Relaxed);
         self.wake_ns.store(ns, Ordering::Relaxed);
     }
 
     /// Wakeup-latency profiling: take (and clear) the pending wake stamp. Returns
-    /// `(wake_ns, xcore)`; `wake_ns == 0` means there was no pending wake.
+    /// `(wake_ns, cat)`; `wake_ns == 0` means there was no pending wake.
     #[cfg(feature = "wakeprof")]
     #[inline]
-    pub(crate) fn take_wake_ns(&self) -> (u64, bool) {
+    pub(crate) fn take_wake_ns(&self) -> (u64, u8) {
         let ns = self.wake_ns.swap(0, Ordering::Relaxed);
-        (ns, self.wake_xcore.load(Ordering::Relaxed))
+        (ns, self.wake_cat.load(Ordering::Relaxed))
     }
 
     /// Monotonic time (ns) at which this task was last switched off a CPU (cache-warmth

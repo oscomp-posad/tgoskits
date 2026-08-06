@@ -1358,11 +1358,22 @@ impl AxRunQueue {
             // includes any cross-core IPI + on_cpu-handshake deferral below.
             #[cfg(feature = "wakeprof")]
             if current_state == TaskState::Blocked {
+                // Category: 0 = local (target == waker), 1 = cross-core onto an idle
+                // target (occ == 0), 2 = cross-core onto a busy target. `self` is the
+                // target run queue; its occ here excludes the task being enqueued.
                 #[cfg(feature = "smp")]
-                let xcore = self.cpu_id != this_cpu_id();
+                let cat = if self.cpu_id == this_cpu_id() {
+                    0u8
+                } else {
+                    #[cfg(feature = "sched-loadbalance")]
+                    let idle = self.occ() == 0;
+                    #[cfg(not(feature = "sched-loadbalance"))]
+                    let idle = false;
+                    if idle { 1u8 } else { 2u8 }
+                };
                 #[cfg(not(feature = "smp"))]
-                let xcore = false;
-                task.set_wake_stamp(crate::wakeprof::stamp_wake(), xcore);
+                let cat = 0u8;
+                task.set_wake_stamp(crate::wakeprof::stamp_wake(), cat);
             }
             #[cfg(feature = "smp")]
             let waking_current_task = current_state == TaskState::Blocked
@@ -1462,8 +1473,8 @@ impl AxRunQueue {
         // consume its wake stamp to record wake-to-run latency (local vs cross-core).
         #[cfg(feature = "wakeprof")]
         {
-            let (wns, xcore) = next_task.take_wake_ns();
-            crate::wakeprof::record_run(wns, xcore);
+            let (wns, cat) = next_task.take_wake_ns();
+            crate::wakeprof::record_run(wns, cat);
         }
         // Occupancy ([`RQ_OCC`]) is intentionally NOT touched here: picking a task to
         // run (ready -> running) does not change how many tasks this CPU owns. The
