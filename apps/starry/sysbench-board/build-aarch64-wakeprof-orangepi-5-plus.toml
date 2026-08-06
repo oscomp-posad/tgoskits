@@ -1,8 +1,6 @@
-# PLACEMENT / occ-scheduler STRETCH config (sched-loadbalance ON). Used to board-test
-# the single-atom occupancy scheduler with the per-tick self-heal + saturating dec +
-# the occ-diag logging. NOT the validated ship config — the round-robin default in
-# build-aarch64-unknown-none-softfloat.toml is (t=4=3810=0.98x, run #1). This one is
-# for cracking the multi-thread-spread unification once the board is available.
+# WAKEPROF config: cross-core wake-latency profiling. Deliberately wake_affine OFF so
+# schbench wakes SPREAD cross-core (the ~1ms path) and /proc/wakeprof captures the
+# xcore avg/max + deferred-handshake fraction. THP + LB + wakeprof.
 target = "aarch64-unknown-none-softfloat"
 features = [
   "ax-driver/rockchip-soc",
@@ -12,13 +10,6 @@ features = [
   "ax-driver/rk3588-ddr-dvfs",
   "starry-kernel/thp",
   "starry-kernel/sched-loadbalance",
-  # wake_affine (occ<=1 -> local hand-off): board-validated best wake policy on
-  # RK3588 (schbench m1t4 wakeup p50 1023us->9us, near Linux 6us; hackbench -P
-  # g2/g5 also better). The Linux-faithful variant (prefer-idle-prev +
-  # select_idle_sibling) was tried and REGRESSED (see
-  # SCHEDBENCH_BOARD_RESULTS_2026-08-06.md) because this SoC's cross-core wake is
-  # ~1ms, inverting Linux's cost model. Kept feature-gated for rollback.
-  "starry-kernel/sched-loadbalance-wake-affine",
   "starry-kernel/wakeprof",
 ]
 log = "Info"
