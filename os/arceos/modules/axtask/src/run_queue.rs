@@ -638,14 +638,21 @@ pub(crate) fn select_wake_run_queue<G: BaseGuard>(task: &AxTaskRef) -> AxRunQueu
         // until the outgoing switch-out completes, so any target CPU is race-free.
         //
         // wake_affine (step 1) is OPT-IN (`sched-loadbalance-wake-affine`, off by
-        // default). Board measurement (RK3588, hackbench) showed it REGRESSES the
-        // messaging workload it was meant to help: hackbench is not 1:1 pipe pairs but
-        // a fan-out (each sender feeds 40 fds), so co-locating every wakee on the waker
-        // over-consolidates and serializes work that should parallelize — thread-mode
-        // hackbench regressed ~1.9x at g=5 and worsened with concurrency. The default
-        // therefore keeps the run#14-validated occ-spread wake (idle prev_cpu, else
-        // spread), which is what gave sysbench t=8 = 4686. Re-enable + re-tune the
-        // `occ` gate only behind a board A/B.
+        // default) — but the default should be RE-EVALUATED. An earlier board A/B that
+        // appeared to show wake_affine regressing hackbench was later found to be
+        // CONTAMINATED by the COW-refcount fork EFAULT (fixed in `cow.rs`,
+        // FrameRefCnt u8->u32); once fork stopped failing under load, a clean RK3588
+        // A/B (2026-08-06, same kernel, only this flag differing) showed wake_affine ON
+        // is a large net win:
+        //   - schbench m1t4 wakeup p50: 1023us -> 9us  (Linux 6us) — near parity;
+        //     m2t8 wakeup p50: 25120us -> 5672us (Linux 4152us).
+        //   - hackbench -P g2/g5: 0.98/1.86s -> 0.74/1.08s (BETTER, not worse);
+        //     -T g2 better, -T g5/g10 ~flat.
+        //   - trade-off: hackbench -P g10 2.53s -> 3.17s and schbench m1t4 RPS
+        //     130 -> 122 (m2t8 RPS 85 -> 92, better). The occ<=1 gate is the crude
+        //     lever; Linux balances both by comparing load. Net: the cross-core wake
+        //     IPI + on_cpu handshake was the dominant wakeup-latency cost, and the
+        //     local hand-off removes it. See SCHEDBENCH_BOARD_RESULTS_2026-08-06.md.
         #[cfg(all(feature = "sched-loadbalance", feature = "sched-loadbalance-wake-affine"))]
         let affine: Option<usize> = {
             let waker = this_cpu_id();

@@ -1,0 +1,137 @@
+SCHEDBENCH_BEGIN
+
+SBB_UNAME Linux 10.0.0 aarch64
+
+=== HACKBENCH (Time in s, LOWER=better) ===
+
+### hackbench -p -g 2 -P
+
+Running in process mode with 2 groups using 40 file descriptors each (== 80 tasks)
+
+Each sender will pass 100 messages of 100 bytes
+
+Time: 0.741
+
+### hackbench -p -g 5 -P
+
+Running in process mode with 5 groups using 40 file descriptors each (== 200 tasks)
+
+Each sender will pass 100 messages of 100 bytes
+
+Time: 1.077
+
+### hackbench -p -g 10 -P
+
+Running in process mode with 10 groups using 40 file descriptors each (== 400 tasks)
+
+Each sender will pass 100 messages of 100 bytes
+
+Time: 3.166
+
+### hackbench -p -g 2 -T
+
+Running in threaded mode with 2 groups using 40 file descriptors each (== 80 tasks)
+
+Each sender will pass 100 messages of 100 bytes
+
+Time: 2.309
+
+### hackbench -p -g 5 -T
+
+Running in threaded mode with 5 groups using 40 file descriptors each (== 200 tasks)
+
+Each sender will pass 100 messages of 100 bytes
+
+Time: 6.863
+
+### hackbench -p -g 10 -T
+
+Running in threaded mode with 10 groups using 40 file descriptors each (== 400 tasks)
+
+Each sender will pass 100 messages of 100 bytes
+
+Time: 27.700
+
+=== SCHBENCH (latency us lower / RPS higher; 30s cap) ===
+
+### schbench -m 1 -t 4 -r 5
+
+Wakeup Latencies percentiles (usec) runtime 5 (s) (610 total samples)
+
+	  50.0th: 9          (0 samples)
+
+	  90.0th: 2900       (230 samples)
+
+	* 99.0th: 26912      (55 samples)
+
+	  99.9th: 28640      (6 samples)
+
+	  min=4, max=28621
+
+Request Latencies percentiles (usec) runtime 5 (s) (610 total samples)
+
+	  50.0th: 24608      (81 samples)
+
+	  90.0th: 49856      (246 samples)
+
+	* 99.0th: 97152      (54 samples)
+
+	  99.9th: 124544     (5 samples)
+
+	  min=24380, max=124507
+
+RPS percentiles (requests) runtime 5 (s) (6 total samples)
+
+	  20.0th: 115        (2 samples)
+
+	* 50.0th: 116        (1 samples)
+
+	  90.0th: 127        (3 samples)
+
+	  min=115, max=127
+
+average rps: 122.00
+
+sched delay: message 0 (usec) worker 0 (usec)
+
+### schbench -m 2 -t 8 -r 5
+
+Wakeup Latencies percentiles (usec) runtime 5 (s) (459 total samples)
+
+	  50.0th: 5672       (137 samples)
+
+	  90.0th: 78976      (186 samples)
+
+	* 99.0th: 164608     (39 samples)
+
+	  99.9th: 225536     (4 samples)
+
+	  min=8, max=225436
+
+Request Latencies percentiles (usec) runtime 5 (s) (459 total samples)
+
+	  50.0th: 98688      (140 samples)
+
+	  90.0th: 236288     (182 samples)
+
+	* 99.0th: 386560     (41 samples)
+
+	  99.9th: 541696     (4 samples)
+
+	  min=24417, max=541504
+
+RPS percentiles (requests) runtime 5 (s) (6 total samples)
+
+	  20.0th: 78         (2 samples)
+
+	* 50.0th: 79         (1 samples)
+
+	  90.0th: 90         (3 samples)
+
+	  min=78, max=90
+
+average rps: 91.80
+
+sched delay: message 0 (usec) worker 0 (usec)
+
+SCHEDBENCH_DONE

@@ -55,22 +55,31 @@ no-THP column is in `schedbench-baselines/starry-lb-nothp-board-2026-08-06.txt`.
 
 ## Two structural gaps (root causes)
 
-### Gap 1 — wakeup latency 1042 µs vs Linux 6 µs  *(the dominant parity blocker; OPEN)*
-schbench m1t4 wakeup p50 = 1042 µs vs Linux 6 µs. The obvious hypotheses were **checked and
-ruled out** by code trace:
-- **Not a missing wake IPI.** The cross-core wake path already sends a *targeted GIC SGI* to
-  the idle CPU: `wait_queue.rs` `notify_one` → `unblock_task` → `kick_remote_cpu` →
-  `ax_ipi::run_on_cpu` → `send_ipi(SGITarget)` (SMP+`ipi` features are on in the 8-core board
-  build). The idle loop WFIs with IRQs enabled, so the SGI wakes it at once.
-- **Not tick granularity.** The scheduler tick is **100 Hz / 10 ms** (`axruntime` `TICKS_PER_SEC
-  = 100`), so a "wait for next tick" would be ~10 ms, not ~1 ms — the number doesn't fit.
+### Gap 1 — wakeup latency 1042 µs vs Linux 6 µs  →  **ROOT-CAUSED; wake_affine reaches parity**
+The obvious hypotheses were ruled out first: it is **not** a missing wake IPI (the cross-core
+wake already fires a targeted GIC SGI via `notify_one`→`unblock_task`→`kick_remote_cpu`→
+`send_ipi`) and **not** tick granularity (tick is **100 Hz / 10 ms**, not 1 ms). The real cause:
+the default occ-spread wake places the woken worker on a **different idle core**, so every wake
+pays the **cross-core IPI + `on_cpu` handshake** (~1 ms). Enabling `wake_affine` turns a 1:1
+dispatcher→worker hand-off into a **local enqueue on the waker's core (no IPI)**.
 
-So the 1 ms is real but subtler. Remaining suspects (need on-board profiling, not yet
-confirmed): **wake placement** (`select_wake_run_queue` is occupancy-spread with `wake_affine`
-OFF by default — no Linux-style `select_idle_sibling`, so the wakee may not land on the truly
-idle sibling), **IPI coalescing** (`REMOTE_RESCHEDULE_PENDING` suppresses a 2nd kick until the
-flag clears), and the **futex→notify** hop. _(task #44 — reopened as a profiling task, not a
-one-line fix.)_
+Clean board A/B (2026-08-06, same THP+COW-fix kernel, only `sched-loadbalance-wake-affine`
+differing — the earlier "wake_affine regresses" data was corrupted by the fork EFAULT):
+
+| metric | wake_affine OFF | wake_affine ON | Linux |
+|---|---|---|---|
+| schbench m1t4 wakeup p50 | 1023 µs | **9 µs** | 6 µs |
+| schbench m2t8 wakeup p50 | 25120 µs | **5672 µs** | 4152 µs |
+| hackbench -P g2 / g5 | 0.98 / 1.86 s | **0.74 / 1.08** | 0.029 / 0.040 |
+| hackbench -P g10 | **2.53 s** | 3.17 s | 0.071 |
+| schbench m1t4 RPS | **130** | 122 | 199.6 |
+| schbench m2t8 RPS | 85 | **92** | 129.8 |
+
+**wake_affine is a large net win** — near Linux parity on m1t4 wakeup latency (9 vs 6 µs), and
+better on most hackbench too. Trade-offs remain (`-P g10` +25 %, m1t4 RPS −6 %) because the
+`occ<=1` gate is cruder than Linux's load comparison. **Recommendation: make wake_affine the
+default** (or the board config default) and tune the gate. The disproven OFF-default rationale
+in `run_queue.rs` has been corrected. _(task #44)_
 
 ### Gap 2 — fork() EFAULT at ~250 concurrent processes  →  **FIXED** (`5c18e46ab`)
 hackbench `-P g10` (400 processes) failed: `fork()` returned **EFAULT** after ~250 address
