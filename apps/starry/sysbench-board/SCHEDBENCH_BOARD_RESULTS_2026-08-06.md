@@ -20,10 +20,16 @@ no-THP column is in `schedbench-baselines/starry-lb-nothp-board-2026-08-06.txt`.
 |---|---|---|---|---|
 | -P g2 (80 tasks)  | 0.436 | 0.564 | 0.029 | 15× |
 | -P g5 (200 tasks) | 1.905 | 1.594 | 0.040 | 48× |
-| -P g10 (400 tasks)| **fork() Bad address → timeout** | **same EFAULT** | 0.071 | ✗ |
+| -P g10 (400 tasks)| ~~EFAULT~~ → **2.529** (COW fix) | ~~same EFAULT~~ | 0.071 | 36× |
 | -T g2 (80 tasks)  | 2.394 | 2.318 | 0.024 | 100× |
 | -T g5 (200 tasks) | 6.749 | 7.139 | 0.044 | 153× |
 | -T g10 (400 tasks)| 27.254 | 27.270 | 0.080 | 340× |
+
+> **`-P g10` was re-run after the COW-refcount fix (`5c18e46ab`) and now completes at
+> 2.529 s** (was `fork() Bad address → 240 s timeout`) — board-validated. Full post-fix run:
+> `schedbench-baselines/starry-thp-cowfix-board-2026-08-06.txt`. Note process mode now scales
+> cleanly (g10 -P 2.5 s) while thread mode does not (g10 -T 27 s) — the `-T` slowness is the
+> futex/wake path, the same family as Gap 1.
 
 ## schbench — wakeup/request latency + RPS (5 s runs)
 
