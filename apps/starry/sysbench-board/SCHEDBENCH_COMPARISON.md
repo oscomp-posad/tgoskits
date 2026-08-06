@@ -1,5 +1,24 @@
 # Scheduler benchmarks: hackbench + schbench — StarryOS vs Linux
 
+> **STATUS (latest):** the THP-EFAULT that broke the suite is FIXED — hackbench and
+> schbench now **run cleanly**. A per-message IPC bottleneck analysis
+> (`IPC-OPTIMIZATION-ANALYSIS.md`) drove four Tier-1 optimizations, all landed +
+> QEMU-validated for correctness:
+> - **L1** futex `WaitQueue::is_empty` O(n)→**O(1)** — removes the O(N²) held-under-the-
+>   -table-lock scan that was schbench's super-linear tail. *Isolated QEMU run: schbench
+>   m2t8 wakeup p50 12848→6408 µs.*
+> - **L2** shard the per-process futex table (64 buckets, Linux `futex_hash_bucket`) —
+>   contended-futex throughput ~1 core → ~ncpu. *+L1: m2t8 p50 → 4184 µs (~3× vs baseline).*
+> - **L3a** drop the redundant `sys_write` buffer re-validation (one fewer check_region/write).
+> - **L4** lock-free seccomp fast-path (skip lock+clone+evaluate when no filter installed).
+>
+> **Absolute throughput vs Linux is board-pending:** QEMU-TCG timing is too host-load-noisy
+> for reliable before/after (it validates correctness + algorithmic complexity, not wall-clock).
+> Board-only levers identified for the next round (invisible in TCG): lazy FP-SIMD
+> save/restore + ASID-tagged TTBR0 (per-context-switch traffic), per-task scratch buffer to
+> kill the last pipe alloc, on-stack futex wakers.
+
+
 Board-measured on OrangePi-5-Plus (RK3588). Static aarch64-musl binaries (same
 binary on both OSes). This captures the **baseline** (round-robin + occupancy
 scheduler) for a before → after → Linux comparison. The IPC/wakeup path has since
