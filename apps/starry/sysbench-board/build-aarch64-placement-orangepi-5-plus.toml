@@ -12,6 +12,13 @@ features = [
   "ax-driver/rk3588-ddr-dvfs",
   "starry-kernel/thp",
   "starry-kernel/sched-loadbalance",
+  # wake_affine (occ<=1 -> local hand-off): board-validated best wake policy on
+  # RK3588 (schbench m1t4 wakeup p50 1023us->9us, near Linux 6us; hackbench -P
+  # g2/g5 also better). The Linux-faithful variant (prefer-idle-prev +
+  # select_idle_sibling) was tried and REGRESSED (see
+  # SCHEDBENCH_BOARD_RESULTS_2026-08-06.md) because this SoC's cross-core wake is
+  # ~1ms, inverting Linux's cost model. Kept feature-gated for rollback.
+  "starry-kernel/sched-loadbalance-wake-affine",
 ]
 log = "Info"
 max_cpu_num = 8

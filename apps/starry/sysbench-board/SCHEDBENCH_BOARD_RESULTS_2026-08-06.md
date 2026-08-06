@@ -76,10 +76,32 @@ differing — the earlier "wake_affine regresses" data was corrupted by the fork
 | schbench m2t8 RPS | 85 | **92** | 129.8 |
 
 **wake_affine is a large net win** — near Linux parity on m1t4 wakeup latency (9 vs 6 µs), and
-better on most hackbench too. Trade-offs remain (`-P g10` +25 %, m1t4 RPS −6 %) because the
-`occ<=1` gate is cruder than Linux's load comparison. **Recommendation: make wake_affine the
-default** (or the board config default) and tune the gate. The disproven OFF-default rationale
-in `run_queue.rs` has been corrected. _(task #44)_
+better on most hackbench too. **Enabled by default in the placement board config**
+(`build-aarch64-placement-orangepi-5-plus.toml`).
+
+#### Attempted "proper" Linux-faithful placement — and why it was reverted
+I then tried to make the policy *more* Linux-faithful: `wake_affine_idle` (prefer an idle
+`prev_cpu` to keep the waker free) + `select_idle_sibling` (steer onto an idle sibling), so the
+`-P g10` / m1t4-RPS trade-offs would go away. A clean board A/B **disproved it**:
+
+| metric | OFF | crude wake_affine | "proper" Linux-faithful | Linux |
+|---|---|---|---|---|
+| schbench m1t4 wakeup p50 | 1023 | **9** | 9 | 6 |
+| schbench m2t8 wakeup p50 | 25120 | **5672** | 25120 ✗ | 4152 |
+| hackbench -P g5 | 1.86 | **1.08** | 3.12 ✗ | 0.040 |
+| hackbench -P g10 | 2.53 | 3.17 | 7.71 ✗ | 0.071 |
+
+The Linux-faithful version **regressed** (lost the m2t8 win, hurt hackbench badly). Root reason:
+Linux prefers spreading (idle prev / idle sibling) because its cross-core wake is ~µs; **here a
+cross-core wake is ~1 ms**, so every `prev_idle → prev` / `select_idle_sibling` decision pays
+~1 ms. Copying Linux faithfully is *counterproductive* on this SoC. Reverted (`run_queue.rs`
+back to the simple `occ<=1 → local hand-off`, which is empirically best).
+
+**The real remaining lever is the ~1 ms cross-core wake cost itself** (GIC SGI + `on_cpu`
+switch-out handshake). Fix that — via on-board profiling of the notify→enqueue→IPI→pick hops —
+and Linux-style placement (and full schbench/hackbench parity) becomes reachable. Until then,
+the aggressive local hand-off is the right policy. _(task #44 closed with this finding; a new
+"profile + fix cross-core wake latency" follow-up is the next lever.)_
 
 ### Gap 2 — fork() EFAULT at ~250 concurrent processes  →  **FIXED** (`5c18e46ab`)
 hackbench `-P g10` (400 processes) failed: `fork()` returned **EFAULT** after ~250 address
