@@ -49,19 +49,32 @@ no-THP column is in `schedbench-baselines/starry-lb-nothp-board-2026-08-06.txt`.
 
 ## Two structural gaps (root causes)
 
-### Gap 1 — wakeup latency ≈ 1 scheduler tick  *(the dominant parity blocker)*
-schbench m1t4 wakeup p50 = 1042 µs ≈ 1 ms = one tick at 1000 Hz. A woken worker placed on
-an idle CPU is not run until that CPU's next timer tick, i.e. the cross-core wake does not
-kick the idle (WFI) CPU immediately. Linux sends a reschedule IPI. **Fix direction:** send a
-reschedule SGI/IPI to the target CPU on cross-core wake so it leaves WFI at once.
-_(root-cause code path: see below / task #44)_
+### Gap 1 — wakeup latency 1042 µs vs Linux 6 µs  *(the dominant parity blocker; OPEN)*
+schbench m1t4 wakeup p50 = 1042 µs vs Linux 6 µs. The obvious hypotheses were **checked and
+ruled out** by code trace:
+- **Not a missing wake IPI.** The cross-core wake path already sends a *targeted GIC SGI* to
+  the idle CPU: `wait_queue.rs` `notify_one` → `unblock_task` → `kick_remote_cpu` →
+  `ax_ipi::run_on_cpu` → `send_ipi(SGITarget)` (SMP+`ipi` features are on in the 8-core board
+  build). The idle loop WFIs with IRQs enabled, so the SGI wakes it at once.
+- **Not tick granularity.** The scheduler tick is **100 Hz / 10 ms** (`axruntime` `TICKS_PER_SEC
+  = 100`), so a "wait for next tick" would be ~10 ms, not ~1 ms — the number doesn't fit.
 
-### Gap 2 — fork() EFAULT at ~250 concurrent processes  *(scale edge case)*
-hackbench `-P g10` (400 processes) fails: `fork()` returns **EFAULT** after ~250 address
-spaces. Thread mode (`-T g10`, shared address space) handles all 400. Reproduces WITH and
-WITHOUT THP, so it is not the THP-COW path; ASID is ruled out (StarryOS uses ASID 0 with
-global TLB flush). Some per-address-space resource is exhausted and the failure is
-mis-mapped to EFAULT (Linux would return EAGAIN/ENOMEM). _(root-cause: see below / task #45)_
+So the 1 ms is real but subtler. Remaining suspects (need on-board profiling, not yet
+confirmed): **wake placement** (`select_wake_run_queue` is occupancy-spread with `wake_affine`
+OFF by default — no Linux-style `select_idle_sibling`, so the wakee may not land on the truly
+idle sibling), **IPI coalescing** (`REMOTE_RESCHEDULE_PENDING` suppresses a 2nd kick until the
+flag clears), and the **futex→notify** hop. _(task #44 — reopened as a profiling task, not a
+one-line fix.)_
+
+### Gap 2 — fork() EFAULT at ~250 concurrent processes  →  **FIXED** (`5c18e46ab`)
+hackbench `-P g10` (400 processes) failed: `fork()` returned **EFAULT** after ~250 address
+spaces (thread mode `-T g10` handled all 400). Root cause: the per-frame COW reference count
+was a **`u8`** (`cow.rs` `FrameRefCnt`); a read-only libc/text/rodata frame shared by the
+parent plus ~254 forked children **overflowed the `u8`**, and `clone_map` returned
+`BadAddress` → EFAULT. Not THP (reproduced with THP off) and not ASID (StarryOS uses ASID 0).
+**Fix:** widened the counter to `u32` (Linux uses a 32-bit refcount; 4 B sharers ≈ unbounded)
+and made the now-unreachable overflow return `NoMemory` (ENOMEM) instead of EFAULT. Both build
+configs compile clean; board re-validation of `-P g10` pending.
 
 ## Artifacts
 - `schedbench-baselines/linux-schedbench-board-2026-08-06.txt`
