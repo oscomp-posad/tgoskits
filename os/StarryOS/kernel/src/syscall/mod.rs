@@ -750,41 +750,14 @@ pub fn handle_syscall(uctx: &mut UserContext) {
             uctx.arg4() as _,
         ),
         Sysno::sigaltstack => sys_sigaltstack(uctx.arg0() as _, uctx.arg1() as _),
-        Sysno::futex => {
-            let __fr = sys_futex(
-                uctx.arg0() as _,
-                uctx.arg1() as _,
-                uctx.arg2() as _,
-                uctx.arg3() as _,
-                uctx.arg4() as _,
-                uctx.arg5() as _,
-            );
-            // TEMP diag: schbench's "futex-FUTEX_WAIT: Bad address" is EFAULT, but the
-            // catch-all for BadAddress stayed silent — so sys_futex returns the OTHER
-            // EFAULT-mapping variant, BadState (axerrno maps `BadAddress | BadState =>
-            // EFAULT`). Log the EXACT AxError variant (excluding the benign ones the
-            // WAIT path legitimately returns) to name the real error + where. Bounded.
-            if let Err(ref __e) = __fr
-                && *__e != ax_errno::AxError::WouldBlock
-                && *__e != ax_errno::AxError::Interrupted
-                && *__e != ax_errno::AxError::TimedOut
-            {
-                static N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
-                if N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32 {
-                    error!(
-                        "FUTEX-ERR err={:?} op={:#x} uaddr={:#x} val={:#x} to={:#x} uaddr2={:#x} val3={:#x}",
-                        __e,
-                        uctx.arg1(),
-                        uctx.arg0(),
-                        uctx.arg2(),
-                        uctx.arg3(),
-                        uctx.arg4(),
-                        uctx.arg5(),
-                    );
-                }
-            }
-            __fr
-        }
+        Sysno::futex => sys_futex(
+            uctx.arg0() as _,
+            uctx.arg1() as _,
+            uctx.arg2() as _,
+            uctx.arg3() as _,
+            uctx.arg4() as _,
+            uctx.arg5() as _,
+        ),
         Sysno::get_robust_list => {
             sys_get_robust_list(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _)
         }

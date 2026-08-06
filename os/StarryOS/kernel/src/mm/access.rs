@@ -45,41 +45,14 @@ pub fn access_user_memory<R>(f: impl FnOnce() -> R) -> R {
     result
 }
 
-/// TEMP diagnostic: name which `BadAddress` guard tripped on a user access, bounded
-/// to the first `EFAULT_DIAG_MAX` hits so it cannot spam the (lossy) board serial or
-/// perturb timing. A board root-cause pass (hackbench g=10 / schbench) excluded the
-/// out-of-memory story on static grounds and narrowed the load-dependent EFAULT to one
-/// of the identity/mapping guards below (try_as_thread / is_owned_by_current /
-/// can_access_range); this log names the exact one on the first failures. Remove once
-/// the branch is identified.
-const EFAULT_DIAG_MAX: usize = 64;
-#[inline]
-fn efault_diag(site: &str, start: usize, len: usize, flags: MappingFlags) {
-    use core::sync::atomic::{AtomicUsize, Ordering};
-    static N: AtomicUsize = AtomicUsize::new(0);
-    let n = N.fetch_add(1, Ordering::Relaxed);
-    if n < EFAULT_DIAG_MAX {
-        let curr = current();
-        // error! (not warn!) so it survives a busy log level and stands out; bounded so
-        // it can't spam. Best read via a LOW-NOISE isolated repro (schbench -m1 -t4)
-        // where the serial isn't saturated by a 400-task storm.
-        error!(
-            "EFAULT-diag[{n}] site={site} task={} start={start:#x} len={len} flags={flags:#x?}",
-            curr.id_name()
-        );
-    }
-}
-
 fn check_region(start: VirtAddr, layout: Layout, access_flags: MappingFlags) -> AxResult<()> {
     let align = layout.align();
     if start.as_usize() & (align - 1) != 0 {
-        efault_diag("check_region:align", start.as_usize(), layout.size(), access_flags);
         return Err(AxError::BadAddress);
     }
 
     let curr = current();
     let Some(thr) = curr.try_as_thread() else {
-        efault_diag("check_region:not_thread", start.as_usize(), layout.size(), access_flags);
         warn!(
             "reject user region check outside thread context: task={}, start={:#x}, len={}",
             curr.id_name(),
@@ -90,13 +63,11 @@ fn check_region(start: VirtAddr, layout: Layout, access_flags: MappingFlags) -> 
     };
     let aspace_arc = thr.proc_data.aspace();
     if unsafe { aspace_arc.raw() }.is_owned_by_current() {
-        efault_diag("check_region:owned_by_current", start.as_usize(), layout.size(), access_flags);
         return Err(AxError::BadAddress);
     }
     let mut aspace = aspace_arc.lock();
 
     if !aspace.can_access_range(start, layout.size(), access_flags) {
-        efault_diag("check_region:cant_access", start.as_usize(), layout.size(), access_flags);
         return Err(AxError::BadAddress);
     }
 
@@ -346,7 +317,6 @@ pub fn check_access(start: usize, len: usize) -> VmResult {
     const USER_SPACE_END: usize = USER_SPACE_BASE + USER_SPACE_SIZE;
     let ok = (USER_SPACE_BASE..USER_SPACE_END).contains(&start) && (USER_SPACE_END - start) >= len;
     if unlikely(!ok) {
-        efault_diag("check_access:out_of_range", start, len, MappingFlags::empty());
         Err(VmError::AccessDenied)
     } else {
         Ok(())
@@ -358,7 +328,6 @@ fn ensure_thread_context(op: &str, start: usize, len: usize) -> VmResult {
     if curr.try_as_thread().is_some() {
         Ok(())
     } else {
-        efault_diag("ensure_thread_context:not_thread", start, len, MappingFlags::empty());
         warn!(
             "reject user memory {op} outside thread context: task={}, start={start:#x}, len={len}",
             curr.id_name()
@@ -380,37 +349,27 @@ fn prepare_user_memory(op: &str, start: usize, len: usize, access_flags: Mapping
     let page_end = end.align_up_4k();
 
     let curr = current();
-    let Some(thr) = curr.try_as_thread() else {
-        efault_diag("prepare:not_thread", start.as_usize(), len, access_flags);
-        return Err(VmError::AccessDenied);
-    };
+    let thr = curr.try_as_thread().ok_or(VmError::AccessDenied)?;
     let aspace_arc = thr.proc_data.aspace();
     if unsafe { aspace_arc.raw() }.is_owned_by_current() {
-        efault_diag("prepare:owned_by_current", start.as_usize(), len, access_flags);
         return Err(VmError::AccessDenied);
     }
 
     let mut aspace = aspace_arc.lock();
     if !aspace.can_access_range(start, len, access_flags) {
-        efault_diag("prepare:cant_access", start.as_usize(), len, access_flags);
         return Err(VmError::AccessDenied);
     }
 
     // Preserve the real fault-in error instead of collapsing everything to
     // AccessDenied (which maps to EFAULT). In particular a genuine out-of-frames
-    // must surface as ENOMEM, not a misleading "Bad address" on a valid pointer —
-    // this is what made a memory-pressure failure at high task count (hackbench
-    // g=10 / schbench: `fork()`/`futex` "Bad address") impossible to diagnose. The
-    // `check_region` (UserPtr) path already propagates this via `?`; keep the
+    // must surface as ENOMEM, not a misleading "Bad address" on a valid pointer.
+    // The `check_region` (UserPtr) path already propagates this via `?`; keep the
     // vm_read/vm_write path consistent.
     aspace
         .populate_area(page_start, page_end - page_start, access_flags)
         .map_err(|e| match e {
             AxError::NoMemory => VmError::NoMemory,
-            _ => {
-                efault_diag("prepare:populate_err", start.as_usize(), len, access_flags);
-                VmError::AccessDenied
-            }
+            _ => VmError::AccessDenied,
         })
 }
 
@@ -429,10 +388,6 @@ unsafe impl VmIo for Vm {
             user_copy(buf.as_mut_ptr() as *mut _, start as _, buf.len())
         });
         if unlikely(failed_at != 0) {
-            // The page was just populated by prepare_user_memory yet the copy still
-            // faulted — logged here (not `prepare`'s guards) so the EFAULT-diag names
-            // this site and the faulting address for a stale-TLB / fault-handler bug.
-            efault_diag("Vm::read:user_copy_fault", failed_at, buf.len(), MappingFlags::READ);
             Err(VmError::AccessDenied)
         } else {
             Ok(())
@@ -448,7 +403,6 @@ unsafe impl VmIo for Vm {
             user_copy(start as _, buf.as_ptr() as *const _, buf.len())
         });
         if unlikely(failed_at != 0) {
-            efault_diag("Vm::write:user_copy_fault", failed_at, buf.len(), MappingFlags::WRITE);
             Err(VmError::AccessDenied)
         } else {
             Ok(())

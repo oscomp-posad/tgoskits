@@ -168,19 +168,6 @@ fn futex_wait_timeout(op: &ParsedFutexOp, timeout: *const timespec) -> AxResult<
     Ok(Some(timeout.saturating_sub(now)))
 }
 
-/// TEMP diag: name which `?` in the futex WAIT branch produces the non-benign error
-/// that maps to EFAULT (BadState). Bounded. Remove once pinned.
-#[inline]
-fn futex_err_src(site: &str, e: &AxError) {
-    use core::sync::atomic::{AtomicUsize, Ordering};
-    static N: AtomicUsize = AtomicUsize::new(0);
-    let benign =
-        *e == AxError::WouldBlock || *e == AxError::Interrupted || *e == AxError::TimedOut;
-    if !benign && N.fetch_add(1, Ordering::Relaxed) < 32 {
-        error!("FUTEX-SRC site={site} err={e:?}");
-    }
-}
-
 pub fn sys_futex(
     uaddr: *const u32,
     futex_op: u32,
@@ -212,13 +199,12 @@ pub fn sys_futex(
 
     match op.command {
         FutexCommand::Wait | FutexCommand::WaitBitset => {
-            // Fast path (vm_read is separately instrumented in mm/access.rs)
+            // Fast path
             if uaddr.vm_read()? != value {
                 return Err(AxError::WouldBlock);
             }
 
-            let timeout = futex_wait_timeout(&op, timeout)
-                .inspect_err(|e| futex_err_src("wait:timeout", e))?;
+            let timeout = futex_wait_timeout(&op, timeout)?;
 
             let futex = futex_table.get_or_insert(&key);
             let cleanup = futex_table.cleanup_for(&key);
@@ -233,8 +219,7 @@ pub fn sys_futex(
                 .wq
                 .wait_if_with_cleanup(bitset, timeout, Some(cleanup), || {
                     uaddr.vm_read() == Ok(value)
-                })
-                .inspect_err(|e| futex_err_src("wait:wait_if", e))?
+                })?
             {
                 return Err(AxError::WouldBlock);
             }

@@ -231,12 +231,23 @@ impl AddrSpace {
                 let Some(area) = self.areas.find(start) else {
                     break;
                 };
-                let range = VirtAddrRange::new(start, area.end().min(end));
+                let page_size = area.backend().page_size();
+                // Align the fill range to the AREA's page size, not the caller's. The
+                // demand path (`prepare_user_memory` for a small user access such as a
+                // 4-byte futex word) hands us a 4 KiB-aligned range, but a THP (2 MiB)
+                // backend's `populate` requires a 2 MiB-aligned range (`pages_in`) and
+                // otherwise faults `InvalidInput` — which surfaced to userspace as a
+                // spurious EFAULT ("Bad address") on a valid pointer. Widen to the
+                // containing large page, clamped to the area bounds (first touch fills
+                // the whole huge page, which is exactly the THP intent). For a 4 KiB
+                // area this is a no-op since `start`/`end` are already 4 KiB-aligned.
+                let range = VirtAddrRange::new(
+                    start.align_down(page_size).max(area.start()),
+                    area.end().min(end.align_up(page_size)),
+                );
                 let flags = area.flags();
                 #[cfg(feature = "thp")]
                 let area_start = area.start();
-                #[cfg(feature = "thp")]
-                let page_size = area.backend().page_size();
                 match area.backend().populate(
                     range,
                     flags,
@@ -725,23 +736,7 @@ impl AddrSpace {
     /// Returns `true` if the page fault is handled successfully (not a real
     /// fault).
     pub fn handle_page_fault(&mut self, vaddr: VirtAddr, access_flags: PageFaultFlags) -> bool {
-        // TEMP diag: the three silent `false` returns below are the leading suspects for
-        // the schbench/hackbench "Bad address" (a fault during `user_copy` that the
-        // handler declines, surfacing as EFAULT on a valid pointer). Bounded so it can't
-        // spam. Remove once the branch is identified.
-        fn pf_diag(site: &str, vaddr: VirtAddr, access_flags: PageFaultFlags, area_flags: usize) {
-            use core::sync::atomic::{AtomicUsize, Ordering};
-            static N: AtomicUsize = AtomicUsize::new(0);
-            let n = N.fetch_add(1, Ordering::Relaxed);
-            if n < 48 {
-                error!(
-                    "PF-diag[{n}] site={site} vaddr={:#x} access={access_flags:#x?} area_flags={area_flags:#x}",
-                    vaddr.as_usize()
-                );
-            }
-        }
         if !self.va_range.contains(vaddr) {
-            pf_diag("va_range", vaddr, access_flags, 0);
             return false;
         }
         let Some((flags, page_size, _area_start)) = self
@@ -749,11 +744,9 @@ impl AddrSpace {
             .find(vaddr)
             .map(|area| (area.flags(), area.backend().page_size(), area.start()))
         else {
-            pf_diag("no_area", vaddr, access_flags, 0);
             return false;
         };
         if !flags.contains(access_flags) {
-            pf_diag("flags_mismatch", vaddr, access_flags, flags.bits());
             return false;
         }
 
