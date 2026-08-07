@@ -203,6 +203,15 @@ latency-critical 1:1 case by avoiding the cross-core wake entirely. Remaining po
 window à la Linux `haltpoll`, and whether to default it on for the board) is a follow-up.
 Artifacts: `schedbench-baselines/wakeprof-idlepoll-{200us,50us}-board-2026-08-07.txt`.
 
+**Adaptive window attempted + reverted (negative result).** A `haltpoll`-style per-CPU adaptive
+window (grow when a task appears during WFI, shrink on spurious wake) did **not** beat fixed 50 µs:
+schbench m1t4 xcore_idle p50 regressed back to 1048 µs (the window collapses during schbench's idle
+gaps before its active wakes) while hackbench recovered to 1.31 s. The tension is fundamental on
+this SoC — the standard `haltpoll` signal (halt duration) is confounded by the SGI-doesn't-wake-WFI
+quirk (halt is always ~1–2 ms via the timer). Fixed 50 µs remains the validated-best; a proper
+adaptive would need a busy-fraction signal, not halt duration (deferred). Artifact:
+`wakeprof-adaptive-NOWIN-board-2026-08-07.txt`.
+
 ### Gap 2 — fork() EFAULT at ~250 concurrent processes  →  **FIXED** (`5c18e46ab`)
 hackbench `-P g10` (400 processes) failed: `fork()` returned **EFAULT** after ~250 address
 spaces (thread mode `-T g10` handled all 400). Root cause: the per-frame COW reference count
