@@ -624,6 +624,14 @@ pub fn run_idle() -> ! {
         }
         trace!("idle task: waiting for IRQs...");
         #[cfg(all(feature = "irq", not(feature = "host-test")))]
-        ax_hal::asm::wait_for_irqs();
+        {
+            // wakeprof: mark this CPU as halted in WFI so a cross-core waker can see
+            // whether its reschedule SGI targets a genuinely-halted CPU.
+            #[cfg(all(feature = "wakeprof", feature = "smp"))]
+            crate::wakeprof::wfi_enter(ax_hal::percpu::this_cpu_id());
+            ax_hal::asm::wait_for_irqs();
+            #[cfg(all(feature = "wakeprof", feature = "smp"))]
+            crate::wakeprof::wfi_exit(ax_hal::percpu::this_cpu_id());
+        }
     }
 }

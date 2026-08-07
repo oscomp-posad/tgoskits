@@ -102,6 +102,30 @@ static XCORE_DEFER_CNT: AtomicU64 = AtomicU64::new(0);
 static IPI_SENT: AtomicU64 = AtomicU64::new(0);
 static IPI_SUPPRESSED: AtomicU64 = AtomicU64::new(0);
 
+/// Per-CPU flag: is CPU `i` currently halted in WFI in the idle loop?
+static IN_WFI: [core::sync::atomic::AtomicBool; NCPU] =
+    [const { core::sync::atomic::AtomicBool::new(false) }; NCPU];
+/// Of the reschedule SGIs sent, how many targeted a CPU that was in WFI vs awake.
+/// If most target WFI CPUs *and* `ipi_deliver` is ~1 ms, the SGI genuinely fails to
+/// wake WFI (hardware). If most target awake CPUs, the "idle" target was actually
+/// busy/transitioning → placement/queueing, which wake_affine already addresses.
+static SGI_TO_WFI: AtomicU64 = AtomicU64::new(0);
+static SGI_TO_AWAKE: AtomicU64 = AtomicU64::new(0);
+
+/// Idle loop entering/leaving WFI on CPU `cpu`.
+#[inline]
+pub(crate) fn wfi_enter(cpu: usize) {
+    if cpu < NCPU {
+        IN_WFI[cpu].store(true, Relaxed);
+    }
+}
+#[inline]
+pub(crate) fn wfi_exit(cpu: usize) {
+    if cpu < NCPU {
+        IN_WFI[cpu].store(false, Relaxed);
+    }
+}
+
 /// Per-CPU kick timestamp: set when a reschedule SGI is sent to CPU `i`, read (and
 /// cleared) when CPU `i`'s IPI handler runs → measures IPI delivery latency.
 static KICK_TS: [AtomicU64; NCPU] = [const { AtomicU64::new(0) }; NCPU];
@@ -133,6 +157,11 @@ pub(crate) fn note_ipi_kick(cpu: usize) {
     IPI_SENT.fetch_add(1, Relaxed);
     if cpu < NCPU {
         KICK_TS[cpu].store(now_ns().max(1), Relaxed);
+        if IN_WFI[cpu].load(Relaxed) {
+            SGI_TO_WFI.fetch_add(1, Relaxed);
+        } else {
+            SGI_TO_AWAKE.fetch_add(1, Relaxed);
+        }
     }
 }
 
@@ -200,6 +229,8 @@ pub fn reset() {
     XCORE_DEFER_CNT.store(0, Relaxed);
     IPI_SENT.store(0, Relaxed);
     IPI_SUPPRESSED.store(0, Relaxed);
+    SGI_TO_WFI.store(0, Relaxed);
+    SGI_TO_AWAKE.store(0, Relaxed);
     for i in 0..NCPU {
         KICK_TS[i].store(0, Relaxed);
         HANDLER_TS[i].store(0, Relaxed);
@@ -229,10 +260,12 @@ pub fn render() -> String {
     s.push_str(&render_cat("ipi_deliver ", &IPI_DELIVERY));
     s.push_str(&render_cat("pick_after_h", &PICK_AFTER_HANDLER));
     s.push_str(&alloc::format!(
-        "ipi_sent={} ipi_suppressed={} xcore_deferred={}\n",
+        "ipi_sent={} ipi_suppressed={} xcore_deferred={} sgi_to_wfi={} sgi_to_awake={}\n",
         IPI_SENT.load(Relaxed),
         IPI_SUPPRESSED.load(Relaxed),
         XCORE_DEFER_CNT.load(Relaxed),
+        SGI_TO_WFI.load(Relaxed),
+        SGI_TO_AWAKE.load(Relaxed),
     ));
     s
 }

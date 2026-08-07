@@ -168,6 +168,18 @@ diagnostic run, not a blind change):
 **Conclusion: the fix is not an obvious source change — it needs the on-board GIC register check
 above to distinguish runtime-enable vs affinity-routing before touching the GIC.**
 
+#### Deeper GIC read (2026-08-07 cont.) — routing REFUTED; GIC path verified correct for RK3588
+Reading the actual mapping settles it: `current_cpu_idx()` = `cpu_id_to_idx(MPIDR & MASK)` and
+`cpu_idx_to_id()` = `__cpu_id_list().nth(idx)` are **exact FDT inverses**, so the SGI targets logical
+CPU N's real MPIDR by construction; the MASK covers all four affinity levels (Aff0–3); and
+`TargetList` builds the ICC_SGI1R within-cluster bitmap as `1<<aff0`. For RK3588 each core is its own
+Aff1 (0–7) with Aff0=0, so the SGI correctly targets exactly core N. **The IPI-SGI enable, routing,
+and target-list are all verified correct — the ~1 ms is not a GIC config bug.** The remaining
+distinction (a genuine hardware SGI-doesn't-wake-WFI issue vs the "idle" target actually being
+awake/transitioning = placement/queueing) is being measured with a per-CPU in-WFI counter; if the
+target is not truly halted, wake_affine (local hand-off) is already the correct fix and there is no
+separate GIC defect to chase.
+
 ### Gap 2 — fork() EFAULT at ~250 concurrent processes  →  **FIXED** (`5c18e46ab`)
 hackbench `-P g10` (400 processes) failed: `fork()` returned **EFAULT** after ~250 address
 spaces (thread mode `-T g10` handled all 400). Root cause: the per-frame COW reference count
