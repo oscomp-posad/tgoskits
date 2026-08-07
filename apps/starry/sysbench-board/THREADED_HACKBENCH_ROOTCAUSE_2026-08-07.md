@@ -60,3 +60,29 @@ This is the biggest remaining threaded-IPC lever but touches the correctness-cri
 path — it needs careful design + adversarial review + board A/B, so it is filed as a follow-up
 rather than changed blindly. (Note: poll-idle already cut the *wake* half of each contention event
 from ~1 ms to µs; this fix removes the *serialization* itself.)
+
+## Attempt 1 — `demand-fault-copy` (drop pre-populate): board-tested, REVERTED (negative)
+Tried the lowest-risk option (#1): keep `can_access_range` but drop `populate_area` from the hot
+path, relying on demand-fault (Linux demand paging), feature-gated. Board A/B (hackbench):
+
+| | -P g2 / g5 / g10 | -T g2 / g5 / g10 |
+|---|---|---|
+| baseline | 0.44 / 1.9 / 2.5 | 2.4 / 6.7 / 27 |
+| demand-fault | **1.77** / 1.9 / 4.3 | 2.4 / 6.2 / 25.8 |
+
+**Net negative** — it *regressed process mode* (-P g2 0.44→1.77 s) with only a marginal -T gain.
+Process mode has no aspace contention (private locks), so pre-populate was cheap; demand-faulting
+each first-touch page just adds per-fault lock+handler overhead everywhere. And the marginal -T
+improvement confirms the bottleneck is the **serialization (concurrency), not the hold time** —
+shortening the critical section doesn't help when all N threads still funnel through the one
+exclusive lock. Reverted.
+
+## Conclusion: the fix is concurrency (RwLock), not hold-time or fault-model
+Two simpler approaches are now empirically ruled out (adaptive-poll for wake latency; demand-fault
+for -T). The only thing that removes the -T serialization is **letting threads validate/copy
+concurrently** — i.e. option #2: `RwLock<AddrSpace>` with a shared read lock on the present-page
+hot path (`can_access_range` + a new read-only `is_populated` check), escalating to the write lock
+only to fault a page in; every other aspace op keeps an exclusive `.write()`. That's a ~98-lock-site
+type conversion **plus** a hot-path read/write split — a substantial, correctness-critical refactor
+that must be done in its own focused pass with adversarial review + full board A/B, not rushed.
+Filed as task #49.
