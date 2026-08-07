@@ -11,6 +11,7 @@ features = [
   "starry-kernel/thp",
   "starry-kernel/sched-loadbalance",
   "starry-kernel/wakeprof",
+  "starry-kernel/idle-wake-recheck",
 ]
 log = "Info"
 max_cpu_num = 8

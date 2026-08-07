@@ -247,6 +247,15 @@ fn get_run_queue(index: usize) -> &'static mut AxRunQueue {
     unsafe { RUN_QUEUES[index].assume_init_mut() }
 }
 
+/// Lock-free: does the current CPU's run queue hold a ready (runnable) task? Used by
+/// the idle loop (`idle-wake-recheck`) to avoid halting in WFI right after a
+/// cross-core waker enqueued a task, which would otherwise stall the wakee until the
+/// next timer (board-measured ~1ms cross-core wake floor).
+#[cfg(all(feature = "smp", feature = "sched-loadbalance", feature = "idle-wake-recheck"))]
+pub(crate) fn current_cpu_has_ready() -> bool {
+    get_run_queue(this_cpu_id()).load() > 0
+}
+
 #[cfg(all(feature = "smp", feature = "ipi"))]
 #[cfg_attr(all(test, feature = "host-test"), allow(dead_code))]
 fn request_current_reschedule() {
