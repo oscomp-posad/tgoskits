@@ -81,13 +81,6 @@ sched-loadbalance-push = ["sched-loadbalance"]
 # localise the ~1ms cross-core wake cost on RK3588. Zero cost when off.
 wakeprof = ["multitask"]
 
-# Close the idle-loop cross-core wake race: before halting in WFI, re-check the run
-# queue (IRQs disabled) and skip WFI if a task was enqueued after the last yield, so
-# a cross-core waker's task is picked up at once instead of waiting for the next
-# timer (board-measured ~1ms cross-core wake floor). WFI still runs with IRQs masked
-# so it wakes on a pending SGI. Requires sched-loadbalance (uses the runnable count).
-idle-wake-recheck = ["sched-loadbalance"]
-
 host-test = [
   "ax-hal/host-test",
   "ax-kspin?/host-test",

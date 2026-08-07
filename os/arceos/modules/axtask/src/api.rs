@@ -623,36 +623,7 @@ pub fn run_idle() -> ! {
             continue;
         }
         trace!("idle task: waiting for IRQs...");
-        // `idle-wake-recheck`: close the cross-core wake race. A cross-core waker
-        // enqueues its task and then sends a reschedule SGI; board profiling showed
-        // that SGI takes ~1ms to actually wake this CPU from WFI, so the wakee stalls
-        // until the next timer. Disable IRQs and skip WFI if the run queue already has
-        // a task (enqueued after the `yield` above) — the next loop's `yield` runs it
-        // immediately. If none, WFI still runs with IRQs *masked*, so it wakes on the
-        // pending SGI; dropping the guard then takes it. Bounds cross-core wake latency
-        // to a loop iteration instead of a timer period.
-        #[cfg(all(
-            feature = "irq",
-            not(feature = "host-test"),
-            feature = "smp",
-            feature = "sched-loadbalance",
-            feature = "idle-wake-recheck"
-        ))]
-        {
-            let _guard = ax_kernel_guard::IrqSave::new();
-            if !crate::run_queue::current_cpu_has_ready() {
-                ax_hal::asm::wait_for_irqs();
-            }
-        }
-        #[cfg(all(
-            feature = "irq",
-            not(feature = "host-test"),
-            not(all(
-                feature = "smp",
-                feature = "sched-loadbalance",
-                feature = "idle-wake-recheck"
-            ))
-        ))]
+        #[cfg(all(feature = "irq", not(feature = "host-test")))]
         ax_hal::asm::wait_for_irqs();
     }
 }

@@ -31,8 +31,6 @@ sched-loadbalance-pull = ["ax-task/sched-loadbalance-pull"]
 sched-loadbalance-push = ["ax-task/sched-loadbalance-push"]
 # Wakeup-latency profiling exposed at /proc/wakeprof (diagnostic, off by default).
 wakeprof = ["ax-task/wakeprof"]
-# Idle-loop cross-core wake-race fix (see ax-task's `idle-wake-recheck`).
-idle-wake-recheck = ["ax-task/idle-wake-recheck"]
 memtrack = ["axbacktrace/alloc", "ax-alloc/tracking"]
 rknpu = ["ax-driver/rknpu", "dep:ax-dma"]
 jpeg = ["ax-driver/jpeg", "dep:ax-dma"]
