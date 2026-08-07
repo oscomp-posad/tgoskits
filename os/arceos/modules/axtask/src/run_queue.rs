@@ -250,6 +250,10 @@ fn get_run_queue(index: usize) -> &'static mut AxRunQueue {
 #[cfg(all(feature = "smp", feature = "ipi"))]
 #[cfg_attr(all(test, feature = "host-test"), allow(dead_code))]
 fn request_current_reschedule() {
+    // Wakeup-latency profiling: this CPU's reschedule IPI handler is running now —
+    // closes the IPI-delivery interval, opens the handler→pick interval.
+    #[cfg(all(feature = "wakeprof", not(all(test, feature = "host-test"))))]
+    crate::wakeprof::note_ipi_handler(this_cpu_id());
     clear_remote_reschedule_pending_for_current_cpu();
     #[cfg(all(feature = "preempt", feature = "host-test"))]
     if let Some(curr) = crate::current_may_uninit() {
@@ -284,14 +288,18 @@ pub(crate) fn clear_remote_reschedule_pending_for_current_cpu() {
     REMOTE_RESCHEDULE_PENDING.store(false, Ordering::Release);
 }
 
+/// Returns `true` if the reschedule request was actually issued (the pending flag
+/// flipped false→true), `false` if it was coalesced away (already pending).
 #[cfg(all(feature = "smp", feature = "ipi"))]
-fn request_remote_reschedule_if_not_pending<F>(pending: &AtomicBool, request: F)
+fn request_remote_reschedule_if_not_pending<F>(pending: &AtomicBool, request: F) -> bool
 where
     F: FnOnce(),
 {
-    if !pending.swap(true, Ordering::AcqRel) {
+    let sent = !pending.swap(true, Ordering::AcqRel);
+    if sent {
         request();
     }
+    sent
 }
 
 #[cfg(all(feature = "smp", feature = "ipi"))]
@@ -309,9 +317,15 @@ where
     not(all(test, feature = "host-test"))
 ))]
 fn request_remote_reschedule(cpu_id: usize) {
-    request_remote_reschedule_if_not_pending(&REMOTE_RESCHEDULE_PENDING[cpu_id], || {
+    let _sent = request_remote_reschedule_if_not_pending(&REMOTE_RESCHEDULE_PENDING[cpu_id], || {
+        #[cfg(feature = "wakeprof")]
+        crate::wakeprof::note_ipi_kick(cpu_id);
         ax_ipi::run_on_cpu(cpu_id, request_current_reschedule);
     });
+    #[cfg(feature = "wakeprof")]
+    if !_sent {
+        crate::wakeprof::note_ipi_suppressed();
+    }
 }
 
 #[cfg(all(
@@ -1475,6 +1489,8 @@ impl AxRunQueue {
         {
             let (wns, cat) = next_task.take_wake_ns();
             crate::wakeprof::record_run(wns, cat);
+            #[cfg(feature = "smp")]
+            crate::wakeprof::note_pick(this_cpu_id());
         }
         // Occupancy ([`RQ_OCC`]) is intentionally NOT touched here: picking a task to
         // run (ready -> running) does not change how many tasks this CPU owns. The

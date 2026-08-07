@@ -1,23 +1,36 @@
 //! Wakeup-latency profiling (feature `wakeprof`).
 //!
-//! Measures **wake-to-run latency**: from the moment a blocked task is made
-//! runnable (`put_task_with_state` Blocked→Ready) to the moment it is actually
-//! switched onto a CPU. Split by whether the wake crossed cores, because a board
-//! A/B showed a cross-core wake costs ~1 ms on RK3588 while a local hand-off is
-//! ~9 µs, and we need to localise where that ~1 ms goes.
+//! Decomposes the cross-core wake path end to end so one board run localises the
+//! ~1 ms cross-core wake cost on RK3588:
 //!
-//! All counters are process-global relaxed atoms — this is a diagnostic build,
-//! not a production path, and the feature is off by default (zero cost). Read the
-//! rendered snapshot from userspace via `/proc/wakeprof`.
+//! ```text
+//!  waker: ready(stamp) ── enqueue+kick ──▶ IPI send ─┐
+//!                                                     │  IPI_DELIVERY (kick→handler)
+//!  target(idle,WFI): SGI ─▶ ipi handler(clear+resched)┘
+//!                          │  PICK_AFTER_HANDLER (handler→switch-in)
+//!  target: idle loop yield ─▶ switch_to(consume stamp) = wake-to-run total
+//! ```
+//!
+//! - `LOCAL` / `XCORE_IDLE` / `XCORE_BUSY`: wake-to-run (ready→run), split by whether
+//!   the target was the waker's CPU, a cross-core idle CPU, or a cross-core busy CPU.
+//! - `IPI_DELIVERY`: reschedule SGI send → the target's IPI handler runs (delivery +
+//!   WFI-exit).
+//! - `PICK_AFTER_HANDLER`: IPI handler ran → the woken task is actually switched in.
+//! - `ipi_sent` / `ipi_suppressed`: whether the kick actually sent an SGI, or was
+//!   coalesced away because `REMOTE_RESCHEDULE_PENDING` was already set.
+//!
+//! All counters are process-global relaxed atoms (diagnostic build only; feature off
+//! by default = zero cost). Read the rendered snapshot from `/proc/wakeprof`.
 
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
 use alloc::string::String;
 
-/// log2 latency buckets: bucket `k` holds wakes with `delta_ns` in `[2^(k-1), 2^k)`
-/// (bucket 0 = 0 ns). 32 buckets cover up to ~2.1 s, enough for the oversubscription
-/// tail. Percentiles are read out of the cumulative histogram in [`render`].
+/// log2 latency buckets: bucket `k` holds samples with `delta_ns` in `[2^(k-1), 2^k)`
+/// (bucket 0 = 0 ns). 32 buckets cover up to ~2.1 s. Percentiles are read out of the
+/// cumulative histogram in [`Cat::pctl_ns`].
 const NUM_BUCKETS: usize = 32;
+const NCPU: usize = crate::build_info::CPU_CAPACITY;
 
 struct Cat {
     sum_ns: AtomicU64,
@@ -54,8 +67,8 @@ impl Cat {
             h.store(0, Relaxed);
         }
     }
-    /// Percentile latency estimate (ns) = upper bound of the bucket the given
-    /// fraction falls in. `pct` is 0..=100.
+    /// Percentile latency estimate (ns) = upper bound of the bucket the fraction
+    /// falls in. `pct` is 0..=100.
     fn pctl_ns(&self, pct: u64) -> u64 {
         let total = self.cnt.load(Relaxed);
         if total == 0 {
@@ -66,7 +79,6 @@ impl Cat {
         for (k, h) in self.hist.iter().enumerate() {
             cum += h.load(Relaxed);
             if cum >= target {
-                // bucket k upper bound = 2^k ns (bucket 0 = ~0)
                 return if k == 0 { 0 } else { 1u64 << k };
             }
         }
@@ -74,39 +86,92 @@ impl Cat {
     }
 }
 
-/// Local (same-CPU) wake-to-run: the woken task lands on the waker's own CPU.
+/// Wake-to-run, split by target relative to the waker.
 static LOCAL: Cat = Cat::new();
-/// Cross-core wake onto an IDLE target CPU. If this is still ~1 ms, the cost is in
-/// the IPI→WFI-exit→idle-pick mechanism, not run-queue queueing.
 static XCORE_IDLE: Cat = Cat::new();
-/// Cross-core wake onto a BUSY target CPU (the wakee queues behind a running task).
 static XCORE_BUSY: Cat = Cat::new();
 
-/// Of the cross-core wakes, how many took the deferred `on_cpu` stash path (the
-/// wakee was still finishing its switch-out on its owning CPU at wake time).
+/// Reschedule-SGI send → target IPI handler runs.
+static IPI_DELIVERY: Cat = Cat::new();
+/// Target IPI handler ran → the woken task is switched in.
+static PICK_AFTER_HANDLER: Cat = Cat::new();
+
+/// Cross-core wakes that took the deferred `on_cpu` stash path.
 static XCORE_DEFER_CNT: AtomicU64 = AtomicU64::new(0);
+/// Reschedule kicks that actually sent an SGI vs were coalesced away.
+static IPI_SENT: AtomicU64 = AtomicU64::new(0);
+static IPI_SUPPRESSED: AtomicU64 = AtomicU64::new(0);
+
+/// Per-CPU kick timestamp: set when a reschedule SGI is sent to CPU `i`, read (and
+/// cleared) when CPU `i`'s IPI handler runs → measures IPI delivery latency.
+static KICK_TS: [AtomicU64; NCPU] = [const { AtomicU64::new(0) }; NCPU];
+/// Per-CPU handler timestamp: set when CPU `i`'s IPI handler runs, read (and cleared)
+/// at the next switch-in on CPU `i` → measures handler→pick latency.
+static HANDLER_TS: [AtomicU64; NCPU] = [const { AtomicU64::new(0) }; NCPU];
 
 #[inline]
 fn now_ns() -> u64 {
     ax_hal::time::monotonic_time_nanos()
 }
 
-/// Stamp the wake time on a task that just became runnable. Returns the timestamp
-/// to store on the task (0 is used as "no pending wake", so bump a zero to 1 ns).
+/// Stamp the wake time on a task that just became runnable (0 is "no pending wake",
+/// so floor at 1 ns).
 #[inline]
 pub(crate) fn stamp_wake() -> u64 {
     now_ns().max(1)
 }
 
-/// Record that a cross-core wake took the deferred (`on_cpu` still set) path.
+/// A cross-core wake took the deferred (`on_cpu` still set) path.
 #[inline]
 pub(crate) fn note_deferred() {
     XCORE_DEFER_CNT.fetch_add(1, Relaxed);
 }
 
-/// Called when a task with a pending wake stamp is switched onto a CPU.
-/// `wake_ns` is the stamp taken at ready time; `xcore` is whether that wake
-/// crossed cores.
+/// A reschedule SGI was actually sent to `cpu` (pending flag flipped false→true).
+#[inline]
+pub(crate) fn note_ipi_kick(cpu: usize) {
+    IPI_SENT.fetch_add(1, Relaxed);
+    if cpu < NCPU {
+        KICK_TS[cpu].store(now_ns().max(1), Relaxed);
+    }
+}
+
+/// A reschedule kick was coalesced away (pending flag already set → no new SGI).
+#[inline]
+pub(crate) fn note_ipi_suppressed() {
+    IPI_SUPPRESSED.fetch_add(1, Relaxed);
+}
+
+/// CPU `cpu`'s reschedule IPI handler is running now. Closes the IPI-delivery
+/// interval and opens the handler→pick interval.
+#[inline]
+pub(crate) fn note_ipi_handler(cpu: usize) {
+    if cpu >= NCPU {
+        return;
+    }
+    let now = now_ns();
+    let kick = KICK_TS[cpu].swap(0, Relaxed);
+    if kick != 0 {
+        IPI_DELIVERY.record(now.saturating_sub(kick));
+    }
+    HANDLER_TS[cpu].store(now, Relaxed);
+}
+
+/// A task is being switched onto `cpu`. Closes the handler→pick interval (if this
+/// pick followed an IPI handler).
+#[inline]
+pub(crate) fn note_pick(cpu: usize) {
+    if cpu >= NCPU {
+        return;
+    }
+    let h = HANDLER_TS[cpu].swap(0, Relaxed);
+    if h != 0 {
+        PICK_AFTER_HANDLER.record(now_ns().saturating_sub(h));
+    }
+}
+
+/// A task with a pending wake stamp is switched onto a CPU; record wake-to-run by
+/// category (0=local, 1=xcore-idle, 2=xcore-busy).
 #[inline]
 pub(crate) fn record_run(wake_ns: u64, cat: u8) {
     if wake_ns == 0 {
@@ -123,16 +188,27 @@ pub(crate) fn record_run(wake_ns: u64, cat: u8) {
 
 /// Zero all counters (so a benchmark can snapshot a clean interval).
 pub fn reset() {
-    LOCAL.reset();
-    XCORE_IDLE.reset();
-    XCORE_BUSY.reset();
+    for c in [
+        &LOCAL,
+        &XCORE_IDLE,
+        &XCORE_BUSY,
+        &IPI_DELIVERY,
+        &PICK_AFTER_HANDLER,
+    ] {
+        c.reset();
+    }
     XCORE_DEFER_CNT.store(0, Relaxed);
+    IPI_SENT.store(0, Relaxed);
+    IPI_SUPPRESSED.store(0, Relaxed);
+    for i in 0..NCPU {
+        KICK_TS[i].store(0, Relaxed);
+        HANDLER_TS[i].store(0, Relaxed);
+    }
 }
 
 fn render_cat(name: &str, c: &Cat) -> String {
     let cnt = c.cnt.load(Relaxed);
     let avg = if cnt > 0 { c.sum_ns.load(Relaxed) / cnt } else { 0 };
-    // Percentiles in µs (bucket upper bounds → coarse but distribution-true).
     alloc::format!(
         "{name}  count={cnt} avg_us={} p50_us={} p90_us={} p99_us={} max_us={}\n",
         avg / 1000,
@@ -146,12 +222,17 @@ fn render_cat(name: &str, c: &Cat) -> String {
 /// Render the current snapshot as text for `/proc/wakeprof`.
 pub fn render() -> String {
     let mut s = String::from("wake-to-run latency profile (percentiles = bucket upper bound)\n");
-    s.push_str(&render_cat("local     ", &LOCAL));
-    s.push_str(&render_cat("xcore_idle", &XCORE_IDLE));
-    s.push_str(&render_cat("xcore_busy", &XCORE_BUSY));
+    s.push_str(&render_cat("local       ", &LOCAL));
+    s.push_str(&render_cat("xcore_idle  ", &XCORE_IDLE));
+    s.push_str(&render_cat("xcore_busy  ", &XCORE_BUSY));
+    s.push_str("cross-core hop breakdown:\n");
+    s.push_str(&render_cat("ipi_deliver ", &IPI_DELIVERY));
+    s.push_str(&render_cat("pick_after_h", &PICK_AFTER_HANDLER));
     s.push_str(&alloc::format!(
-        "xcore_deferred_count={}\n",
-        XCORE_DEFER_CNT.load(Relaxed)
+        "ipi_sent={} ipi_suppressed={} xcore_deferred={}\n",
+        IPI_SENT.load(Relaxed),
+        IPI_SUPPRESSED.load(Relaxed),
+        XCORE_DEFER_CNT.load(Relaxed),
     ));
     s
 }
