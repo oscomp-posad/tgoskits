@@ -31,6 +31,8 @@ sched-loadbalance-pull = ["ax-task/sched-loadbalance-pull"]
 sched-loadbalance-push = ["ax-task/sched-loadbalance-push"]
 # Wakeup-latency profiling exposed at /proc/wakeprof (diagnostic, off by default).
 wakeprof = ["ax-task/wakeprof"]
+# Poll-idle (spin before WFI) — fixes RK3588 ~1ms cross-core wake floor. See ax-task.
+idle-poll = ["ax-task/idle-poll"]
 memtrack = ["axbacktrace/alloc", "ax-alloc/tracking"]
 rknpu = ["ax-driver/rknpu", "dep:ax-dma"]
 jpeg = ["ax-driver/jpeg", "dep:ax-dma"]

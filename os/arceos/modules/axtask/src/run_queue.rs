@@ -247,6 +247,15 @@ fn get_run_queue(index: usize) -> &'static mut AxRunQueue {
     unsafe { RUN_QUEUES[index].assume_init_mut() }
 }
 
+/// Lock-free: does the current CPU's run queue hold a ready (runnable) task? Used by
+/// the poll-idle loop (`idle-poll`) to pick up a cross-core-enqueued task by spinning,
+/// instead of depending on the reschedule SGI to wake this CPU from WFI (board-measured
+/// ~1ms SGI-to-WFI latency on RK3588).
+#[cfg(all(feature = "smp", feature = "sched-loadbalance", feature = "idle-poll"))]
+pub(crate) fn current_cpu_has_ready() -> bool {
+    get_run_queue(this_cpu_id()).load() > 0
+}
+
 #[cfg(all(feature = "smp", feature = "ipi"))]
 #[cfg_attr(all(test, feature = "host-test"), allow(dead_code))]
 fn request_current_reschedule() {

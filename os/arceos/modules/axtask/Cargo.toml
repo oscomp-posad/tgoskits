@@ -81,6 +81,14 @@ sched-loadbalance-push = ["sched-loadbalance"]
 # localise the ~1ms cross-core wake cost on RK3588. Zero cost when off.
 wakeprof = ["multitask"]
 
+# Poll-idle (Linux `poll_idle`): before deep WFI, spin-check the run queue for a
+# bounded window and run a task the moment it's enqueued. Fixes the board-measured
+# ~1ms cross-core wake floor on RK3588, where the reschedule SGI does not promptly
+# wake a WFI CPU (confirmed: 87% of SGIs target a halted CPU yet delivery is ~1ms) —
+# spinning picks the task up directly without relying on the SGI waking WFI. Falls
+# back to WFI when genuinely idle (power). Requires sched-loadbalance (runnable count).
+idle-poll = ["sched-loadbalance"]
+
 host-test = [
   "ax-hal/host-test",
   "ax-kspin?/host-test",

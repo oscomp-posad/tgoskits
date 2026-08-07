@@ -622,6 +622,38 @@ pub fn run_idle() -> ! {
         if crate::run_queue::idle_pull_once() {
             continue;
         }
+        // Poll-idle (Linux `poll_idle`): spin-check the run queue for a bounded window
+        // before deep WFI. On RK3588 the reschedule SGI does not promptly wake a WFI
+        // CPU (board-measured ~1ms; 87% of SGIs target a genuinely-halted CPU), so a
+        // cross-core waker's task would otherwise stall ~1ms. Spinning picks it up
+        // directly — no dependence on the SGI waking WFI — bounding the latency to the
+        // poll granularity. When the window expires with no work, fall through to WFI
+        // to save power. Off by default (spins burn cycles); enable via `idle-poll`.
+        #[cfg(all(
+            feature = "smp",
+            feature = "sched-loadbalance",
+            feature = "idle-poll",
+            not(feature = "host-test")
+        ))]
+        {
+            // ~200 µs poll window: well under the ~1 ms WFI-exit latency, so active
+            // cross-core wakes are caught by the spin; genuinely-idle CPUs still halt.
+            const IDLE_POLL_NANOS: u64 = 200_000;
+            let deadline = ax_hal::time::monotonic_time_nanos() + IDLE_POLL_NANOS;
+            let mut picked = false;
+            while ax_hal::time::monotonic_time_nanos() < deadline {
+                if crate::run_queue::current_cpu_has_ready() {
+                    picked = true;
+                    break;
+                }
+                core::hint::spin_loop();
+            }
+            if picked {
+                // A task was enqueued during the poll — loop back to `yield` and run it
+                // without ever entering the slow WFI path.
+                continue;
+            }
+        }
         trace!("idle task: waiting for IRQs...");
         #[cfg(all(feature = "irq", not(feature = "host-test")))]
         {
