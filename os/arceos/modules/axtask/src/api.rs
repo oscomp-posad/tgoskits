@@ -622,20 +622,13 @@ pub fn run_idle() -> ! {
         if crate::run_queue::idle_pull_once() {
             continue;
         }
-        // Adaptive poll-idle (Linux `haltpoll` governor): spin-check the run queue for a
-        // per-CPU adaptive window before deep WFI. On RK3588 the reschedule SGI does not
-        // promptly wake a WFI CPU (board-measured ~1ms; 87% of SGIs target a genuinely-
-        // halted CPU), so a cross-core waker's task would otherwise stall ~1ms — spinning
-        // picks it up directly, no dependence on the SGI waking WFI.
-        //
-        // The window adapts on a signal that is NOT confounded by the broken SGI wake:
-        // whether a task appeared *during* the WFI. If it did, the poll gave up too early
-        // (a real wake landed just after) → GROW. If the CPU woke with nothing runnable
-        // (a spurious/timer wake, i.e. genuinely idle) → SHRINK toward 0. So an actively-
-        // woken CPU converges to a poll long enough to catch its wakes (µs latency), while
-        // a genuinely-idle CPU converges to WFI-only (no wasted spin — this is what keeps
-        // fan-out throughput, e.g. hackbench, from paying the fixed-window spin cost).
-        // Off by default (enable via `idle-poll`).
+        // Poll-idle (Linux `poll_idle`): spin-check the run queue for a bounded window
+        // before deep WFI. On RK3588 the reschedule SGI does not promptly wake a WFI
+        // CPU (board-measured ~1ms; 87% of SGIs target a genuinely-halted CPU), so a
+        // cross-core waker's task would otherwise stall ~1ms. Spinning picks it up
+        // directly — no dependence on the SGI waking WFI — bounding the latency to the
+        // poll granularity. When the window expires with no work, fall through to WFI
+        // to save power. Off by default (spins burn cycles); enable via `idle-poll`.
         #[cfg(all(
             feature = "smp",
             feature = "sched-loadbalance",
@@ -643,46 +636,26 @@ pub fn run_idle() -> ! {
             not(feature = "host-test")
         ))]
         {
-            const MAX_POLL_NS: u64 = 200_000; // cap: ~1/5 of the WFI-exit latency
-            const BASE_POLL_NS: u64 = 10_000; // bootstrap step when growing from 0
-            let cpu = ax_hal::percpu::this_cpu_id();
-            let poll_ns = IDLE_POLL_NS[cpu].load(core::sync::atomic::Ordering::Relaxed);
+            // ~200 µs poll window: well under the ~1 ms WFI-exit latency, so active
+            // cross-core wakes are caught by the spin; genuinely-idle CPUs still halt.
+            const IDLE_POLL_NANOS: u64 = 50_000;
+            let deadline = ax_hal::time::monotonic_time_nanos() + IDLE_POLL_NANOS;
             let mut picked = false;
-            if poll_ns > 0 {
-                let deadline = ax_hal::time::monotonic_time_nanos() + poll_ns;
-                while ax_hal::time::monotonic_time_nanos() < deadline {
-                    if crate::run_queue::current_cpu_has_ready() {
-                        picked = true;
-                        break;
-                    }
-                    core::hint::spin_loop();
+            while ax_hal::time::monotonic_time_nanos() < deadline {
+                if crate::run_queue::current_cpu_has_ready() {
+                    picked = true;
+                    break;
                 }
+                core::hint::spin_loop();
             }
             if picked {
-                continue; // caught a wake in the spin — run it, no WFI
+                // A task was enqueued during the poll — loop back to `yield` and run it
+                // without ever entering the slow WFI path.
+                continue;
             }
-            // Poll missed: halt. Then adapt from whether a wake landed during the halt.
-            #[cfg(feature = "wakeprof")]
-            crate::wakeprof::wfi_enter(cpu);
-            ax_hal::asm::wait_for_irqs();
-            #[cfg(feature = "wakeprof")]
-            crate::wakeprof::wfi_exit(cpu);
-            let woke_with_work = crate::run_queue::current_cpu_has_ready();
-            let next = if woke_with_work {
-                // A real wake arrived during WFI that a longer poll would have caught.
-                if poll_ns == 0 { BASE_POLL_NS } else { (poll_ns * 2).min(MAX_POLL_NS) }
-            } else {
-                poll_ns / 2 // spurious/timer wake → genuinely idle → poll less
-            };
-            IDLE_POLL_NS[cpu].store(next, core::sync::atomic::Ordering::Relaxed);
-            continue;
         }
         trace!("idle task: waiting for IRQs...");
-        #[cfg(all(
-            feature = "irq",
-            not(feature = "host-test"),
-            not(all(feature = "smp", feature = "sched-loadbalance", feature = "idle-poll"))
-        ))]
+        #[cfg(all(feature = "irq", not(feature = "host-test")))]
         {
             // wakeprof: mark this CPU as halted in WFI so a cross-core waker can see
             // whether its reschedule SGI targets a genuinely-halted CPU.
@@ -694,9 +667,3 @@ pub fn run_idle() -> ! {
         }
     }
 }
-
-/// Per-CPU adaptive poll-idle window (ns), tuned by the `haltpoll`-style feedback loop
-/// in [`run_idle`]. See the `idle-poll` feature.
-#[cfg(all(feature = "smp", feature = "sched-loadbalance", feature = "idle-poll"))]
-static IDLE_POLL_NS: [core::sync::atomic::AtomicU64; crate::build_info::CPU_CAPACITY] =
-    [const { core::sync::atomic::AtomicU64::new(0) }; crate::build_info::CPU_CAPACITY];
