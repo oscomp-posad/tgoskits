@@ -33,6 +33,10 @@ sched-loadbalance-push = ["ax-task/sched-loadbalance-push"]
 wakeprof = ["ax-task/wakeprof"]
 # Poll-idle (spin before WFI) — fixes RK3588 ~1ms cross-core wake floor. See ax-task.
 idle-poll = ["ax-task/idle-poll"]
+# Linux demand-paging on the user-copy hot path: drop pre-populate_area under the
+# exclusive aspace lock (rely on demand-fault) so CLONE_VM threads stop serializing
+# the page walk. See THREADED_HACKBENCH_ROOTCAUSE. Diagnostic/experimental.
+demand-fault-copy = []
 memtrack = ["axbacktrace/alloc", "ax-alloc/tracking"]
 rknpu = ["ax-driver/rknpu", "dep:ax-dma"]
 jpeg = ["ax-driver/jpeg", "dep:ax-dma"]

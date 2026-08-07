@@ -360,11 +360,28 @@ fn prepare_user_memory(op: &str, start: usize, len: usize, access_flags: Mapping
         return Err(VmError::AccessDenied);
     }
 
+    // `demand-fault-copy` (Linux demand-paging model): don't pre-populate the range
+    // under the exclusive aspace lock. `can_access_range` above has already validated
+    // the mapping+permissions (unchanged, all-or-nothing); population happens on
+    // demand — a missing page faults during the copy and `handle_page_fault` (the
+    // verified security boundary: rejects out-of-range/no-VMA/wrong-perm, else
+    // populates) resolves it, and the copy (access_user_memory + user_copy fixup)
+    // retries. This drops the per-copy page-table walk from the critical section, so
+    // CLONE_VM threads sharing one aspace stop serializing the walk on the pipe
+    // read/write hot path — the threaded-hackbench bottleneck (task #48/#49). For
+    // already-present pages (steady-state IPC) the fault path is never entered.
+    #[cfg(feature = "demand-fault-copy")]
+    {
+        let _ = (&mut aspace, page_start, page_end);
+        return Ok(());
+    }
+
     // Preserve the real fault-in error instead of collapsing everything to
     // AccessDenied (which maps to EFAULT). In particular a genuine out-of-frames
     // must surface as ENOMEM, not a misleading "Bad address" on a valid pointer.
     // The `check_region` (UserPtr) path already propagates this via `?`; keep the
     // vm_read/vm_write path consistent.
+    #[cfg(not(feature = "demand-fault-copy"))]
     aspace
         .populate_area(page_start, page_end - page_start, access_flags)
         .map_err(|e| match e {
