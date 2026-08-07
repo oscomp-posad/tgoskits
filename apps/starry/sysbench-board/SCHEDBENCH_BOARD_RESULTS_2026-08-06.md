@@ -122,12 +122,31 @@ Findings, in order of how they overturned each hypothesis:
    the 8–54 ms local *tail* is the waker NOT yielding (hackbench), a separate preemption issue.
 
 **Conclusion: the ~1 ms is the cross-core-wake-to-idle-CPU IPI mechanism itself** (an idle CPU
-takes ~1 ms to pick up a task after the reschedule SGI), not placement/queueing/tick. This
-cleanly explains schbench: wake_affine ON → local hand-off (2–9 µs); OFF → cross-core → the
-~1 ms floor (1023 µs). **Next: hop-level split** (stamp kick-time per CPU, read in the IPI
-handler `request_current_reschedule`) to separate IPI-delivery latency from idle-pick latency —
-suspects are the `REMOTE_RESCHEDULE_PENDING` IPI coalescing (`run_queue.rs`) and whether the SGI
-actually wakes the WFI idle CPU promptly. Artifacts: `schedbench-baselines/wakeprof-*board*.txt`.
+takes ~1 ms to pick up a task after the reschedule SGI), not placement/queueing/tick.
+
+#### Hop-level breakdown (2026-08-07) — the ~1 ms is IPI *delivery*, and it's the SGI-not-waking-WFI
+I extended `wakeprof` to stamp the kick-time per CPU (`request_remote_reschedule`) and read it in
+the IPI handler (`request_current_reschedule`), splitting the cross-core wake into **IPI-delivery**
+(SGI send → handler runs) and **pick-after-handler** (handler → task switched in). Board result
+(schbench m1t4): `ipi_deliver` p50 **~1 ms** (p90 2 ms, max 2.4 ms) vs `pick_after_h` p50 **2 µs**.
+So the *entire* ~1 ms is between sending the reschedule SGI and the target's IPI handler firing;
+once it fires, `force_resched_from_irq` reschedules inline in 2 µs. `ipi_deliver` max ≈ 2.4 ms
+(never the 10 ms tick) ⇒ the idle CPU wakes on the ~1–2 ms *oneshot timer*, not the SGI.
+
+**Attempted fix `idle-wake-recheck` (reverted, `54549a805`) — NO effect.** I closed the idle-loop
+wake window: before WFI, re-check the run queue with IRQs disabled and skip WFI if a task is
+ready; WFI runs IRQs-masked so it should wake on a pending SGI. Board A/B: `xcore_idle` p50 stayed
+1048 µs, `ipi_deliver` unchanged. This is itself decisive — **WFI-under-IRQs-masked did not wake on
+the SGI either**, proving the reschedule SGI never becomes a pending wake event at the idle CPU;
+the CPU only advances when the timer fires.
+
+**Root cause (definitive):** the reschedule SGI does not wake an idle (WFI) CPU on RK3588 — it is
+processed only when the CPU next wakes for a timer (~1–2 ms). This is a **GIC SGI-delivery-to-idle-
+CPU issue** (candidates: per-redistributor SGI enable on secondaries, `GICR_WAKER`/group config, or
+the `affinity_from_mpidr`/`hardware_cpu_id` SGI target routing in `gic/v3.rs`). The fix is at the
+GIC layer, not the scheduler — a deeper, board-gated change. wake_affine (local hand-off) remains
+the right mitigation until then. Artifacts: `schedbench-baselines/wakeprof-hopbreakdown-board-2026-08-07.txt`,
+`wakeprof-idlefix-NOEFFECT-board-2026-08-07.txt`.
 
 ### Gap 2 — fork() EFAULT at ~250 concurrent processes  →  **FIXED** (`5c18e46ab`)
 hackbench `-P g10` (400 processes) failed: `fork()` returned **EFAULT** after ~250 address
