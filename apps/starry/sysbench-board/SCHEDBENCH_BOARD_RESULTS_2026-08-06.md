@@ -180,6 +180,29 @@ awake/transitioning = placement/queueing) is being measured with a per-CPU in-WF
 target is not truly halted, wake_affine (local hand-off) is already the correct fix and there is no
 separate GIC defect to chase.
 
+#### FIXED (2026-08-07) — `idle-poll`, root cause confirmed = SGI-doesn't-wake-WFI, latency 1048→4 µs
+The in-WFI counter settled it: **87 % of reschedule SGIs target a genuinely WFI-halted CPU
+(`sgi_to_wfi=1205` vs `sgi_to_awake=187`) yet IPI delivery is still ~1 ms** — the RK3588 SGI does
+not promptly wake a WFI CPU (GIC enable/routing/target-list all verified correct). Fix = **poll-idle**
+(Linux `poll_idle`, feature `idle-poll`): before deep WFI, spin-check the run queue for a bounded
+window so a cross-core-enqueued task is picked up directly, without depending on the SGI to wake WFI.
+
+Board A/B (schbench m1t4 cross-core-to-idle wake p50):
+
+| | pre-fix | idle-poll 200 µs | idle-poll 50 µs |
+|---|---|---|---|
+| xcore_idle wake p50 | **1048 µs** | 2 µs | **4 µs** |
+| schbench m2t8 idle p50 | 1048 µs | 2 µs | 1 µs |
+| hackbench g5 Time | ~1.14 s | 2.43 s | **1.38 s** |
+
+**The ~1 ms cross-core wake floor is beaten — ~250× at the median (1048→4 µs).** The 50 µs window
+keeps the latency win while limiting the spin-under-load throughput cost to ~20 % (vs 2× at 200 µs).
+`idle-poll` is feature-gated **off by default** (spinning burns power/throughput); it's the opt-in
+lever for latency-sensitive *spread* workloads, while wake_affine (default-on) already covers the
+latency-critical 1:1 case by avoiding the cross-core wake entirely. Remaining polish (adaptive
+window à la Linux `haltpoll`, and whether to default it on for the board) is a follow-up.
+Artifacts: `schedbench-baselines/wakeprof-idlepoll-{200us,50us}-board-2026-08-07.txt`.
+
 ### Gap 2 — fork() EFAULT at ~250 concurrent processes  →  **FIXED** (`5c18e46ab`)
 hackbench `-P g10` (400 processes) failed: `fork()` returned **EFAULT** after ~250 address
 spaces (thread mode `-T g10` handled all 400). Root cause: the per-frame COW reference count
