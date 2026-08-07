@@ -1,0 +1,29 @@
+WAKEPROF_BEGIN
+
+WP_UNAME Linux 10.0.0 aarch64
+
+=== schbench -m 1 -t 4 (1:1-ish, should be mostly local) ===
+
+	  50.0th: 1118       (159 samples)
+
+	  50.0th: 24416      (262 samples)
+
+	* 50.0th: 123        (1 samples)
+
+average rps: 127.20
+
+--- /proc/wakeprof after schbench_m1t4 ---
+
+wake-to-run latency profile (percentiles = bucket upper bound)
+
+local       count=1336 avg_us=2051 p50_us=2 p90_us=8388 p99_us=33554 max_us=54501
+
+xcore_idle  count=1469 avg_us=561 p50_us=1048 p90_us=2097 p99_us=2097 max_us=1593
+
+xcore_busy  count=295 avg_us=724 p50_us=1048 p90_us=1048 p99_us=2097 max_us=1536
+
+xcore_deferred_count=180
+
+=== schbench -m 2 -t 8 (more threads -> more cross-core) ===
+
+Error: kernel boot timed out after 600s

@@ -103,6 +103,32 @@ and Linux-style placement (and full schbench/hackbench parity) becomes reachable
 the aggressive local hand-off is the right policy. _(task #44 closed with this finding; a new
 "profile + fix cross-core wake latency" follow-up is the next lever.)_
 
+#### wakeprof: the ~1 ms cross-core cost is the idle-wake MECHANISM (measured, `wakeprof` feature)
+I added `/proc/wakeprof` (feature `wakeprof`): wake-to-run latency split by category, read by
+`wakeprof-run.sh`. Board result (schbench m1t4, wake_affine OFF so wakes spread cross-core):
+
+| category | count | p50 | p90 | max |
+|---|---|---|---|---|
+| local (waker's CPU) | 1336 | **2 µs** | 8 ms | 54 ms |
+| **cross-core → IDLE target** | 1469 | **~1 ms** | 2 ms | 1.6 ms |
+| cross-core → busy target | 295 | ~1 ms | 1 ms | 1.5 ms |
+
+Findings, in order of how they overturned each hypothesis:
+1. **Not queueing.** A cross-core wake onto a genuinely *idle* CPU still takes ~1 ms — identical
+   to the busy-target case. If it were run-queue queueing, idle-target wakes would be fast.
+2. **Not the tick.** The timer is 100 Hz (10 ms); ~1 ms is tick-independent and far tighter.
+3. **Not deferral.** Only ~12 % took the `on_cpu` deferred path; the ~1 ms is uniform.
+4. **Local is 2 µs** (p50) — when the waker yields (schbench dispatcher), the wakee runs at once;
+   the 8–54 ms local *tail* is the waker NOT yielding (hackbench), a separate preemption issue.
+
+**Conclusion: the ~1 ms is the cross-core-wake-to-idle-CPU IPI mechanism itself** (an idle CPU
+takes ~1 ms to pick up a task after the reschedule SGI), not placement/queueing/tick. This
+cleanly explains schbench: wake_affine ON → local hand-off (2–9 µs); OFF → cross-core → the
+~1 ms floor (1023 µs). **Next: hop-level split** (stamp kick-time per CPU, read in the IPI
+handler `request_current_reschedule`) to separate IPI-delivery latency from idle-pick latency —
+suspects are the `REMOTE_RESCHEDULE_PENDING` IPI coalescing (`run_queue.rs`) and whether the SGI
+actually wakes the WFI idle CPU promptly. Artifacts: `schedbench-baselines/wakeprof-*board*.txt`.
+
 ### Gap 2 — fork() EFAULT at ~250 concurrent processes  →  **FIXED** (`5c18e46ab`)
 hackbench `-P g10` (400 processes) failed: `fork()` returned **EFAULT** after ~250 address
 spaces (thread mode `-T g10` handled all 400). Root cause: the per-frame COW reference count
