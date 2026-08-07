@@ -1,0 +1,12 @@
+### hackbench -p -g 2 -P
+Time: 1.765
+### hackbench -p -g 5 -P
+Time: 1.854
+### hackbench -p -g 10 -P
+Time: 4.252
+### hackbench -p -g 2 -T
+Time: 2.377
+### hackbench -p -g 5 -T
+Time: 6.188
+### hackbench -p -g 10 -T
+Time: 25.844
