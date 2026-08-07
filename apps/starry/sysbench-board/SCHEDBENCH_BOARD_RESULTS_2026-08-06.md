@@ -141,12 +141,32 @@ the SGI either**, proving the reschedule SGI never becomes a pending wake event 
 the CPU only advances when the timer fires.
 
 **Root cause (definitive):** the reschedule SGI does not wake an idle (WFI) CPU on RK3588 — it is
-processed only when the CPU next wakes for a timer (~1–2 ms). This is a **GIC SGI-delivery-to-idle-
-CPU issue** (candidates: per-redistributor SGI enable on secondaries, `GICR_WAKER`/group config, or
-the `affinity_from_mpidr`/`hardware_cpu_id` SGI target routing in `gic/v3.rs`). The fix is at the
-GIC layer, not the scheduler — a deeper, board-gated change. wake_affine (local hand-off) remains
-the right mitigation until then. Artifacts: `schedbench-baselines/wakeprof-hopbreakdown-board-2026-08-07.txt`,
+processed only when the CPU next wakes for a timer (~1–2 ms). This is a **GIC SGI-delivery-to-idle-CPU issue**. wake_affine (local hand-off) remains the right
+mitigation until it's fixed. Artifacts: `schedbench-baselines/wakeprof-hopbreakdown-board-2026-08-07.txt`,
 `wakeprof-idlefix-NOEFFECT-board-2026-08-07.txt`.
+
+#### Read-only GIC inspection (2026-08-07) — no obvious static defect; needs on-board register check
+I traced the reschedule-SGI enable path end to end (`arm-gic-driver` + `irq-framework`, both in-tree):
+- `gicr::init_sgi_ppi` **disables** all SGIs/PPIs (`ICENABLER0 = u32::MAX`) and only sets groups
+  (Group1) + priorities. Enables come later, individually.
+- `request_percpu_irq(ipi_irq(), all_cpus)` runs **only on the BSP**; for not-yet-online secondaries
+  the enable is queued as *pending*.
+- Each secondary, in `rust_main_secondary`, runs GIC per-CPU init (`init_later_secondary`, which
+  disables all) **first**, then `init_percpu_irq` → `cpu_online(N)` → `Registry::cpu_online` →
+  `apply_line_state` enables the pending per-CPU IRQs (timer **and** IPI SGI) on CPU N's redistributor.
+
+So the IPI SGI is enabled on secondaries through the **same mechanism, in the same order, as the
+timer PPI that demonstrably works** — no obvious enable/disable/ordering bug in the source. The
+remaining suspects can't be resolved by reading code and must be checked **on-board** (one small
+diagnostic run, not a blind change):
+1. Read `GICR_ISENABLER0` on a secondary at runtime to confirm the IPI SGI bit is actually set.
+2. **Affinity routing** — a timer PPI is CPU-local and works regardless of routing, but an SGI is
+   routed by `ICC_SGI1R` affinity (`cpu_idx_to_id` → `affinity_from_mpidr`); a wrong logical→MPIDR
+   map would misroute the SGI while the timer keeps working — exactly this symptom.
+3. A "target-was-in-WFI-when-SGI-sent" counter to confirm the target is genuinely halted.
+
+**Conclusion: the fix is not an obvious source change — it needs the on-board GIC register check
+above to distinguish runtime-enable vs affinity-routing before touching the GIC.**
 
 ### Gap 2 — fork() EFAULT at ~250 concurrent processes  →  **FIXED** (`5c18e46ab`)
 hackbench `-P g10` (400 processes) failed: `fork()` returned **EFAULT** after ~250 address
