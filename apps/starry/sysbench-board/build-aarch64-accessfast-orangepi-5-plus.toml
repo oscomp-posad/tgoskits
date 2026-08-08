@@ -1,0 +1,24 @@
+# ACCESS-FASTPATH A/B config: identical to the ship placement config plus the
+# lock-free user-copy fast path (starry-kernel/user-access-fastpath). Isolates
+# exactly one variable vs build-aarch64-placement-orangepi-5-plus.toml so a board
+# A/B measures the fast path's effect on threaded (-T / CLONE_VM) hackbench —
+# which serializes on the shared Arc<Mutex<AddrSpace>> on every user copy — vs
+# process (-P / fork) hackbench, which must stay neutral. See
+# ACCESS_FASTPATH_DESIGN_2026-08-08.md.
+target = "aarch64-unknown-none-softfloat"
+features = [
+  "ax-driver/rockchip-soc",
+  "ax-driver/rockchip-sdhci",
+  "ax-driver/rockchip-dwmmc",
+  "ax-driver/rk3588-cpufreq",
+  "ax-driver/rk3588-ddr-dvfs",
+  "starry-kernel/thp",
+  "starry-kernel/sched-loadbalance",
+  "starry-kernel/sched-loadbalance-wake-affine",
+  # Lock-free HW page-table probe (aarch64 AT S1E0R/W) on the user-copy hot
+  # path: present pages skip the aspace lock entirely, removing the CLONE_VM
+  # (-T) user-copy serialization. Misses fall to the unchanged locked slow path.
+  "starry-kernel/user-access-fastpath",
+]
+log = "Info"
+max_cpu_num = 8

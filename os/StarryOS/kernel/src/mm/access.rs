@@ -11,6 +11,8 @@ use core::{
 use ax_errno::{AxError, AxResult};
 use ax_io::prelude::*;
 use ax_memory_addr::{MemoryAddr, VirtAddr};
+#[cfg(feature = "user-access-fastpath")]
+use ax_memory_addr::PAGE_SIZE_4K;
 use ax_runtime::hal::{
     cpu::{asm::user_copy, trap::page_fault_handler},
     paging::MappingFlags,
@@ -45,6 +47,73 @@ pub fn access_user_memory<R>(f: impl FnOnce() -> R) -> R {
     result
 }
 
+/// Maximum range (in 4 KiB pages) eligible for the lock-free fast path. Bounds
+/// the IRQs-off window of the page-by-page hardware probe. Pipe IPC messages and
+/// syscall-argument structs are far smaller than this; larger transfers take the
+/// slow path, where the aspace lock is amortized over a large copy anyway.
+#[cfg(feature = "user-access-fastpath")]
+const FASTPATH_MAX_PAGES: usize = 16;
+
+/// Lock-free check that every page of `[start, start+len)` is already present
+/// with the requested EL0 permission, using a hardware page-table probe and no
+/// address-space lock (the Linux `access_ok` model).
+///
+/// Returns `true` only when the whole range is fast-path eligible and every page
+/// is present+permitted, in which case the caller may skip the aspace
+/// lock+`populate_area` entirely: a present, EL0-permitted page is by
+/// construction one the user could access itself, so the copy/dereference is
+/// legitimate and will not fault. Returns `false` — deferring to the unchanged
+/// locked slow path — when the range is empty or too large, when any page is not
+/// present or lacks the permission (cold, unmapped, or copy-on-write read-only),
+/// or on architectures without a probe.
+#[cfg(feature = "user-access-fastpath")]
+fn user_range_fast_ok(start: VirtAddr, len: usize, access_flags: MappingFlags) -> bool {
+    if len == 0 {
+        return false;
+    }
+    // Checked arithmetic, mirroring the slow path's `VirtAddrRange::try_from_start_size`
+    // + page rounding: reject to the slow path on any address-space overflow rather
+    // than relying on wrap semantics. `check_region` reaches this with a fully
+    // caller-controlled `start` and no prior range bound, so a hostile top-of-space
+    // pointer must not overflow here (which would panic under an overflow-checks
+    // build); it simply falls through to `can_access_range`, which rejects it.
+    let start = start.as_usize();
+    let Some(end) = start.checked_add(len) else {
+        return false;
+    };
+    let page_start = start & !(PAGE_SIZE_4K - 1);
+    let Some(page_end) = end
+        .checked_add(PAGE_SIZE_4K - 1)
+        .map(|v| v & !(PAGE_SIZE_4K - 1))
+    else {
+        return false;
+    };
+    // `end >= start` and both are rounded the same way, so `page_end >= page_start`.
+    let pages = (page_end - page_start) / PAGE_SIZE_4K;
+    if pages == 0 || pages > FASTPATH_MAX_PAGES {
+        return false;
+    }
+    // A write access requires the page to be present *and* EL0-writable; a
+    // copy-on-write page is present-read-only, so a write probe correctly misses
+    // and routes to the slow path where `populate_area` performs the COW copy.
+    let write = access_flags.contains(MappingFlags::WRITE);
+
+    // IRQs off across the whole probe: `PAR_EL1` is a per-CPU scratch register
+    // shared with any interrupt handler that also executes an `AT`. Disabling
+    // IRQs guarantees no other `AT` runs on this CPU between our `AT` and the
+    // `mrs` that reads the result. The range is capped, so the window is a
+    // handful of instructions.
+    let _guard = ax_kernel_guard::NoPreemptIrqSave::new();
+    let mut page = page_start;
+    while page < page_end {
+        if !ax_runtime::hal::cpu::asm::user_access_ok_page(page, write) {
+            return false;
+        }
+        page += PAGE_SIZE_4K;
+    }
+    true
+}
+
 fn check_region(start: VirtAddr, layout: Layout, access_flags: MappingFlags) -> AxResult<()> {
     let align = layout.align();
     if start.as_usize() & (align - 1) != 0 {
@@ -65,6 +134,15 @@ fn check_region(start: VirtAddr, layout: Layout, access_flags: MappingFlags) -> 
     if unsafe { aspace_arc.raw() }.is_owned_by_current() {
         return Err(AxError::BadAddress);
     }
+
+    // Lock-free fast path: if every page is already present with the requested
+    // permission, the later dereference will not fault, so skip the aspace lock
+    // and `populate_area`. Misses fall through to the locked slow path.
+    #[cfg(feature = "user-access-fastpath")]
+    if user_range_fast_ok(start, layout.size(), access_flags) {
+        return Ok(());
+    }
+
     let mut aspace = aspace_arc.lock();
 
     if !aspace.can_access_range(start, layout.size(), access_flags) {
@@ -353,6 +431,15 @@ fn prepare_user_memory(op: &str, start: usize, len: usize, access_flags: Mapping
     let aspace_arc = thr.proc_data.aspace();
     if unsafe { aspace_arc.raw() }.is_owned_by_current() {
         return Err(VmError::AccessDenied);
+    }
+
+    // Lock-free fast path: if every page is already present with the requested
+    // permission, the copy will not fault, so skip the aspace lock and
+    // `populate_area`. Misses fall through to the locked slow path (which also
+    // preserves the ENOMEM-vs-EFAULT distinction on a genuine out-of-frames).
+    #[cfg(feature = "user-access-fastpath")]
+    if user_range_fast_ok(start, len, access_flags) {
+        return Ok(());
     }
 
     let mut aspace = aspace_arc.lock();

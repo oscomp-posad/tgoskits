@@ -37,6 +37,9 @@ stack-protector = ["ax-std/stack-protector", "starry-kernel/stack-protector"]
 # Transparent 2 MiB huge pages for private anon memory. Opt-in, OFF by default
 # (not in `default`); build with `FEATURES=thp`. See starry-kernel/thp.
 thp = ["starry-kernel/thp"]
+# Lock-free user-copy fast path (Linux access_ok model). Opt-in, OFF by default;
+# build with `FEATURES=user-access-fastpath`. See starry-kernel/user-access-fastpath.
+user-access-fastpath = ["starry-kernel/user-access-fastpath"]
 
 [[bin]]
 name = "starryos"

@@ -33,6 +33,13 @@ sched-loadbalance-push = ["ax-task/sched-loadbalance-push"]
 wakeprof = ["ax-task/wakeprof"]
 # Poll-idle (spin before WFI) — fixes RK3588 ~1ms cross-core wake floor. See ax-task.
 idle-poll = ["ax-task/idle-poll"]
+# Lock-free user-copy fast path: probe the HW page table (aarch64 `AT S1E0R/W`)
+# for present+permitted before taking the shared Arc<Mutex<AddrSpace>> on the
+# user-copy/pointer-validation hot path; present pages skip the lock entirely
+# (Linux access_ok model), removing the CLONE_VM/-T serialization. Off by
+# default; misses fall to the unchanged locked slow path. The probe itself is
+# always compiled (rides ax-cpu `uspace`); this gate only enables its use.
+user-access-fastpath = []
 memtrack = ["axbacktrace/alloc", "ax-alloc/tracking"]
 rknpu = ["ax-driver/rknpu", "dep:ax-dma"]
 jpeg = ["ax-driver/jpeg", "dep:ax-dma"]
