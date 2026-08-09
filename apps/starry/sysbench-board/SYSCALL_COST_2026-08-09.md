@@ -58,12 +58,24 @@ cost is the **clock read + per-transition accounting**, ×2 per syscall.
 once per tick), not on every user/kernel transition. StarryOS's per-transition model is more precise
 but pays a clock read + poll on every syscall.
 
-**Fix direction (task #60, correctness-sensitive — not yet done):** move to tick-based accounting —
-`set_timer_state` on a syscall boundary just records the current state cheaply (one field write, no
-clock read, no poll), and the timer tick attributes its interval to utime/stime by the sampled state
-and checks the interval timers. Interval timers (ITIMER_VIRTUAL/PROF) become tick-granularity, which
-is their intended resolution and matches Linux. Verify the `monotonic_time_nanos()` read cost while
-here — if it is itself slow (not a bare `CNTVCT` read + shift), that is a broadly useful fix.
+**Two follow-up measurements (board):**
+- **The clock read is NOT the cost.** Swapping `poll()`'s `monotonic_time_nanos()` for a bare
+  `mrs cntpct_el0` moved getpid only ~900→~868 ns (~30 ns). So `monotonic_time_nanos()` is already a
+  cheap `CNTPCT` read; the ~250 ns is the **`poll()` accounting work itself**, run twice per syscall
+  (RefCell borrow + arithmetic + the 2 field writes + `set_state`), not the timer source.
+- **Context switch does NOT account CPU time.** `set_timer_state` is called *only* at the two
+  syscall boundaries; `switch_to` has no time accounting. utime/stime are accumulated at (a) syscall
+  boundaries via `poll()` and (b) timer ticks via `tick()`.
+
+**So the fix is correctness-sensitive and cross-crate (task #60, scoped, not rushed):** to stop
+`poll()`-ing on every syscall, CPU time must instead be accounted **on context switch** (attribute
+the outgoing task's time-since-last-tick to its state) — otherwise a task that blocks between ticks
+(exactly hackbench's tasks) loses its CPU time and utime/stime under-count. That means adding a
+time-accounting hook to `axtask::switch_to` (e.g. via the existing `on_sched_switch` tracepoint) and
+then reducing `set_timer_state` to a cheap `set_state` on the syscall boundary (full `poll()` only
+when an interval timer is armed). This touches the scheduler hot path and time-accounting semantics,
+so it needs its own focused pass with a utime/stime-accuracy test + board A/B — not a tail-of-session
+edit.
 
 ## Remaining layers after that
 
