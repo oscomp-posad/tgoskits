@@ -1,0 +1,36 @@
+/dts-v1/;
+
+/ {
+	description = "StarryOS aarch64 (raw kernel + orangepi-5-plus dtb)";
+	#address-cells = <1>;
+
+	images {
+		kernel {
+			description = "StarryOS kernel";
+			data = /incbin/("./starryos.bin");
+			type = "kernel";
+			arch = "arm64";
+			os = "linux";
+			compression = "none";
+			load = <0x02000000>;
+			entry = <0x02000000>;
+		};
+		fdt {
+			description = "OrangePi-5-Plus device tree";
+			data = /incbin/("./orangepi-5-plus.dtb");
+			type = "flat_dt";
+			arch = "arm64";
+			compression = "none";
+			load = <0x12000000>;
+		};
+	};
+
+	configurations {
+		default = "conf";
+		conf {
+			description = "StarryOS";
+			kernel = "kernel";
+			fdt = "fdt";
+		};
+	};
+};
