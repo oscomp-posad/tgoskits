@@ -1,0 +1,19 @@
+# Cliff A/B candidate B: ship placement config + wake-affine-loaded (relaxed
+# wake_affine gate = load compare vs the wakee's previous CPU). Tests whether
+# keeping sync ping-pong pairs CPU-local under oversubscription collapses the K=8
+# scaling cliff (ship: ~174us/pair at K=8).
+target = "aarch64-unknown-none-softfloat"
+features = [
+  "ax-driver/rockchip-soc",
+  "ax-driver/rockchip-sdhci",
+  "ax-driver/rockchip-dwmmc",
+  "ax-driver/rk3588-cpufreq",
+  "ax-driver/rk3588-ddr-dvfs",
+  "starry-kernel/thp",
+  "starry-kernel/sched-loadbalance",
+  "starry-kernel/sched-loadbalance-wake-affine",
+  "starry-kernel/user-access-fastpath",
+  "starry-kernel/wake-affine-loaded",
+]
+log = "Info"
+max_cpu_num = 8

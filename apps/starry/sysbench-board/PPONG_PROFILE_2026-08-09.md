@@ -50,3 +50,34 @@ A/B toggling the load-balancer, tick rate, and preemption behavior.
 
 Artifacts: `ppong.c`, `uboot-pipe-short.toml`, `uboot-ppongscale-short.toml`; logs
 `/tmp/ppong-starry.log`, `/tmp/ppongscale.log`.
+
+## Fix attempt — relaxed wake_affine gate (`wake-affine-loaded`): clean 2:1 win, hackbench INCONCLUSIVE
+
+Root cause of the cliff (confirmed via wakeprof under K=8): the wake_affine gate is
+`occ(waker) <= 1`, so under oversubscription (occ ≥ 2 on every CPU) it is **always false** →
+sync ping-pong wakes fall through to `select_least_loaded` (cross-core spread) → the ~1 ms SGI
+tail (wakeprof at K=8: `local` 395k p50 8 µs, but `xcore_busy` 70k with **p90 2097 µs / p99 4194 µs**,
+`ipi_deliver` p50 1048 µs, `sgi_to_wfi` 13140 — cores flicker idle as tasks block on `read()`).
+
+**Fix (`wake-affine-loaded`, feature-gated, OFF):** relax the gate to a Linux `wake_affine_weight`-
+style load compare — hand off to the waker whenever it is no more loaded than the wakee's previous
+CPU (`occ(waker) <= occ(prev)`, keeping the cheap `occ<=1` when prev is idle so fan-outs still
+spread). A ping-pong PAIR then coalesces onto one CPU.
+
+**Results:**
+- **ppong K=8 (2:1 oversubscription): CLEAN 3.4× win** — per-pair 174 µs → ~52 µs (reproducible,
+  low variance). The cliff root cause is real and this addresses it.
+- **hackbench -g10 (50:1 oversubscription): INCONCLUSIVE.** Run-to-run variance is enormous
+  (waloaded Pg10 across 3 iters: 1.74 / 3.28 / 6.08 s — 3.5× spread for the *same kernel*), which
+  swamps any effect; the 6 s outlier suggests aggressive co-location can occasionally cause bad
+  pileups at extreme load. Medians ≈ accessfast. **Not a confirmed win → not promoted.**
+- **idle-poll (candidate A) rejected:** only ~4% on the K=8 cliff (cores are busy, not deep-idle;
+  the 50 µs poll window rarely engages).
+- schbench: m1t4 (light 1→N fan-out) slightly worse (wakeup 8→14 µs); m2t8 noisy.
+
+**Takeaways:** (1) the 2:1 cliff is genuinely the `occ<=1` gate and is fixable; (2) but hackbench's
+gap lives at *extreme* oversubscription where the dominant issue is **huge scheduler variance /
+instability under load** (1.7–6 s for one kernel), a different problem than the clean 2:1 cliff.
+The relaxed gate is kept feature-gated (a lever for moderate-oversubscription workloads); the next
+real target is the **hackbench variance/instability at 50:1**, which the ppong 2:1 microbench does
+not capture.

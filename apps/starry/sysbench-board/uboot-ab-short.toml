@@ -1,0 +1,12 @@
+# Multi-run A/B (warmup + 3 iterations) for a reliable median — single-run
+# hackbench has ~2x run-to-run variance (DVFS ramp + cold caches), too noisy to
+# compare configs. Decisive metrics: hackbench -P g10 + -T g10 (the oversubscribed
+# cliff) and schbench m1t4 (the light-load fan-out the relaxed gate may regress).
+serial = "/dev/cu.usbserial-AQ03MLX2"
+baud_rate = "1500000"
+dtb_file = "os/StarryOS/configs/board/orangepi-5-plus.dtb"
+shell_prefix = "root@starry:/root #"
+shell_init_cmd = "HB=/home/orangepi/hackbench; SB=/home/orangepi/schbench; $HB -p -g 4 -P >/dev/null 2>&1; echo AB_BEGIN; for i in 1 2 3; do echo ITER $i; printf 'Pg10 '; $HB -p -g 10 -P 2>&1 | grep Time; printf 'Tg10 '; $HB -p -g 10 -T 2>&1 | grep Time; done; echo SCHB_M1T4; $SB -m 1 -t 4 -r 5 2>&1 | grep -E '50.0th|average rps' | head -3; echo FULL_RUN_DONE; sleep 2; sync; reboot -f"
+success_regex = ["(?m)^FULL_RUN_DONE\\s*$"]
+fail_regex = ["panicked at", "(?i)error while loading"]
+timeout = 400

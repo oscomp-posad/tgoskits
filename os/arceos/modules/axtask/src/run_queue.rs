@@ -679,8 +679,36 @@ pub(crate) fn select_wake_run_queue<G: BaseGuard>(task: &AxTaskRef) -> AxRunQueu
         #[cfg(all(feature = "sched-loadbalance", feature = "sched-loadbalance-wake-affine"))]
         let affine: Option<usize> = {
             let waker = this_cpu_id();
-            (cpumask.get(waker) && is_online(waker) && get_run_queue(waker).occ() <= 1)
-                .then_some(waker)
+            let waker_ok = cpumask.get(waker) && is_online(waker);
+            // The default gate `occ(waker) <= 1` disables the cache-local hand-off
+            // under oversubscription (occ >= 2 on every CPU), which forces sync
+            // ping-pong wakes onto the ~1 ms cross-core path — a scaling cliff at
+            // >1:1 load (board: ppong per-pair 26 µs at 8 procs/8 cores -> 174 µs at
+            // 16, a 7x jump; hackbench is heavily oversubscribed so this IS the gap).
+            //
+            // `wake-affine-loaded` relaxes the gate to a Linux `wake_affine_weight`-
+            // style load compare: hand off to the waker whenever it is no more loaded
+            // than where the wakee would otherwise land (its previous CPU). A
+            // ping-pong PAIR then coalesces onto one CPU (both ends alternate, so it
+            // is inherently serial anyway) with zero cross-core wakes; an independent
+            // burst — where the waker's occ climbs above its peers — still spreads.
+            #[cfg(feature = "wake-affine-loaded")]
+            let gate = waker_ok && {
+                let base = if last_ok { get_run_queue(last_cpu).occ() } else { 0 };
+                // Two regimes:
+                //  * prev CPU idle (base == 0): a fan-out wakeup (1 waker -> N workers,
+                //    e.g. schbench m1t4) or a fresh task — keep the cheap `occ<=1` gate so
+                //    the wakee SPREADS onto the idle prev rather than piling on the waker.
+                //  * prev CPU busy (base >= 1): under contention spreading would just pay
+                //    the ~1ms cross-core wake, so co-locate whenever the waker is no more
+                //    loaded than prev. A steady sync ping-pong sees prev == the partner's
+                //    (busy) CPU, so the pair stays local; that is where the cliff lives.
+                let occ = get_run_queue(waker).occ();
+                if base == 0 { occ <= 1 } else { occ <= base }
+            };
+            #[cfg(not(feature = "wake-affine-loaded"))]
+            let gate = waker_ok && get_run_queue(waker).occ() <= 1;
+            gate.then_some(waker)
         };
         #[cfg(all(feature = "sched-loadbalance", not(feature = "sched-loadbalance-wake-affine")))]
         let affine: Option<usize> = None;

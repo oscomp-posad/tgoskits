@@ -25,6 +25,9 @@ loongarch64-low-va = []
 sched-loadbalance = ["ax-task/sched-loadbalance"]
 # Opt-in wake_affine (OFF by default — board-measured to regress hackbench). See ax-task.
 sched-loadbalance-wake-affine = ["ax-task/sched-loadbalance-wake-affine"]
+# Relaxed wake_affine gate (load compare vs prev CPU) — fixes the oversubscription
+# hackbench scaling cliff by keeping sync ping-pong pairs CPU-local under load.
+wake-affine-loaded = ["ax-task/wake-affine-loaded"]
 # Opt-in runtime migration on top of placement (Linux newidle + periodic balance),
 # guarded by is-busy source + MIGRATION_COST horizon. See ax-task's features.
 sched-loadbalance-pull = ["ax-task/sched-loadbalance-pull"]

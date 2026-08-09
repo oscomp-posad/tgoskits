@@ -62,6 +62,14 @@ sched-loadbalance = ["smp"]
 # board A/B on a workload with genuine 1:1 producer→consumer pairs.
 sched-loadbalance-wake-affine = ["sched-loadbalance"]
 
+# Relax the wake_affine gate from `occ(waker) <= 1` to a load compare against the
+# wakee's previous CPU (Linux `wake_affine_weight`). The `<= 1` gate disables the
+# cache-local hand-off under oversubscription (occ >= 2 everywhere), forcing sync
+# ping-pong wakes onto the ~1 ms cross-core path — a hackbench scaling cliff at
+# >1:1 load. With this, a ping-pong PAIR coalesces onto one CPU (zero cross-core
+# wakes) while independent bursts still spread. See select_wake_run_queue.
+wake-affine-loaded = ["sched-loadbalance-wake-affine"]
+
 # Newidle work-stealing: an idle CPU pulls one genuinely-excess Ready task off the
 # busiest remote before halting (Linux `newidle_balance`). Guarded by an is-busy
 # source gate + a MIGRATION_COST cache-hotness horizon so a briefly-blocked task is
