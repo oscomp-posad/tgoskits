@@ -190,11 +190,13 @@ restores the exact split *and* freshens getrusage/times readers). One MEDIUM res
 **pre-existing** cross-CPU `RefCell` race on `thr.time` that tickacct *widens* — is a documented
 **prerequisite before default-on** (task #62); it is not triggered by the A/B workloads.
 
-**Honest verdict:** correct + gated + low-risk, but a *modest* perf lever — `tick()` retains the
-clock read, so only the itimer scan + closure are removed (tens of ns, not 210). The real syscall
-gap lives in the layers below (check_signals, dispatch, the SVC round-trip, the ~5 µs pipe path).
-Board A/B (`uboot-tickacct-short.toml`: syscost + rusage_acct accuracy oracle) pending a board.
-Full write-up: `TICKACCT_2026-08-09.md`.
+**Board A/B (2026-08-09, same HEAD, only `tickacct`):** getpid **1050.7→934.8 ns (−11%)**, pipe_wr
+−70 ns, and **accounting EXACT** — rusage_acct identical to OFF and matching Linux (s_frac 0.72 =
+Linux 0.72, cpu/wall 1.00, verdict PASS). ON ran *second*, so the speedup survives thermal drift.
+**Honest verdict:** correct + gated + low-risk + validated, but a *modest* lever — the real syscall
+gap (935 vs 152 ns) lives in the layers below (check_signals, dispatch, the SVC round-trip, the ~5 µs
+pipe path). Ships OFF by default pending the SMP-safety prerequisite (task #62). Full write-up:
+`TICKACCT_2026-08-09.md`; raw `scripts/profile/results/tickacct_ab_2026-08-09.log`.
 
 ---
 
