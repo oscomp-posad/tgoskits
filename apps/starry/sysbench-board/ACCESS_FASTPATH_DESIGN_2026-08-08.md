@@ -135,3 +135,25 @@ One **real HIGH finding** (feature-ON build only; never in the default-shipped k
   neutral (unlike `demand-fault-copy`, which regressed `-P` by adding faults). This is the key
   difference from the reverted attempt: cold pages still get **bulk-populated once** on the slow
   path; only the *lock* is skipped for warm pages.
+
+## Board A/B result (RK3588, 2026-08-09) — VALIDATED, feature promoted
+
+Clean same-HEAD A/B: placement ship config with vs without `user-access-fastpath` (only that feature
+differs). ostool serial flash + `sched-bench.sh` (hackbench `-p -g{2,5,10}` `-P`/`-T`, schbench).
+Raw: `schedbench-baselines/starry-{accessfast,placement}-board-2026-08-09.txt`.
+
+| hackbench (Time s, lower=better) | placement (off) | accessfast (on) | speedup |
+|---|---|---|---|
+| -P g2  | 2.073  | 1.372 | 1.51× |
+| -P g5  | 1.815  | 0.902 | 2.01× |
+| -P g10 | 6.835  | 3.955 | 1.73× |
+| -T g2  | 2.304  | 1.633 | 1.41× |
+| -T g5  | 6.535  | 1.045 | **6.25×** |
+| -T g10 | 28.541 | 2.784 | **10.25×** |
+
+**The `-T` serialization is removed.** `-T/-P` ratio collapsed from **3.6–4.2×** (placement, g5/g10 —
+the "opposite of Linux" pathology) to **~1** (accessfast; g10 even 0.70×) — Linux-like. `-P` *also*
+improved 1.5–2× (skipping the lock+`populate_area` walk helps even uncontended). schbench roughly
+neutral (m1t4 wakeup p50 9→14 µs, m2t8 5.3→8.7 ms — noise-level; the fast path does not touch the
+wake path). Net: unambiguous win, no regression → **enabled in
+`build-aarch64-placement-orangepi-5-plus.toml`** (the board ship config).

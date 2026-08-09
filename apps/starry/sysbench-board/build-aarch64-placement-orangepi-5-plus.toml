@@ -19,6 +19,14 @@ features = [
   # SCHEDBENCH_BOARD_RESULTS_2026-08-06.md) because this SoC's cross-core wake is
   # ~1ms, inverting Linux's cost model. Kept feature-gated for rollback.
   "starry-kernel/sched-loadbalance-wake-affine",
+  # Lock-free user-copy fast path (Linux access_ok model, aarch64 AT S1E0R/W
+  # probe): present pages skip the shared Arc<Mutex<AddrSpace>> entirely,
+  # removing the CLONE_VM (-T) user-copy serialization. Board A/B 2026-08-09
+  # (same HEAD, only this feature differing): hackbench -T g10 28.54s->2.78s
+  # (10.2x), -T g5 6.54s->1.05s (6.2x), -T/-P ratio 3.6-4.2x -> ~1 (Linux-like);
+  # -P also 1.5-2x better. Security-reviewed (5-lens + adversarial verify, no
+  # bypass). See ACCESS_FASTPATH_DESIGN_2026-08-08.md.
+  "starry-kernel/user-access-fastpath",
 ]
 log = "Info"
 max_cpu_num = 8
