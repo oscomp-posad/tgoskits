@@ -190,12 +190,18 @@ restores the exact split *and* freshens getrusage/times readers). One MEDIUM res
 **pre-existing** cross-CPU `RefCell` race on `thr.time` that tickacct *widens* — is a documented
 **prerequisite before default-on** (task #62); it is not triggered by the A/B workloads.
 
-**Board A/B (2026-08-09, same HEAD, only `tickacct`):** getpid **1050.7→934.8 ns (−11%)**, pipe_wr
-−70 ns, and **accounting EXACT** — rusage_acct identical to OFF and matching Linux (s_frac 0.72 =
-Linux 0.72, cpu/wall 1.00, verdict PASS). ON ran *second*, so the speedup survives thermal drift.
-**Honest verdict:** correct + gated + low-risk + validated, but a *modest* lever — the real syscall
-gap (935 vs 152 ns) lives in the layers below (check_signals, dispatch, the SVC round-trip, the ~5 µs
-pipe path). Ships OFF by default pending the SMP-safety prerequisite (task #62). Full write-up:
+**Board A/B + SMP-safety (2026-08-09).** First A/B (feature-gated, pre-SMP-safe) showed getpid
+1050.7→934.8 ns (−11%) with **accounting EXACT** (rusage_acct matches Linux, s_frac 0.72, PASS). Then
+the SMP-safety prerequisite (task #62) was **fixed**: `thr.time` was a non-atomic
+`AssumeSync<RefCell>` raced across CPUs (alarm task / `getrusage` / `/proc` vs the task's own
+IRQ/switch accounting) — converted to a real `SpinNoIrq` lock (try_lock in IRQ/switch paths, `poll()`
+returns signals so the lock is never held across signal delivery; 7-agent deadlock review = 0 bugs;
+board-validated no deadlock). **That refactor changed the perf story honestly:** tickacct's −116 ns
+was the per-boundary emitter-*closure* in the old `poll(emitter)`; the SMP-safe `poll()` (no closure)
+gave that saving to the OFF path too, and the lock costs ~96 ns/syscall — so post-fix getpid is
+~1026 (OFF) ≈ 1031 (ON). **tickacct is now perf-neutral; its value is correct uniform all-CPU
+accounting**, and the real syscall gap (≈1030 vs 152 ns) lives in the layers below (check_signals,
+dispatch, SVC round-trip, ~5 µs pipe path). Accounting stays exact both ways. Full write-up:
 `TICKACCT_2026-08-09.md`; raw `scripts/profile/results/tickacct_ab_2026-08-09.log`.
 
 ---

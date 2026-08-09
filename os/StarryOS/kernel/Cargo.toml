@@ -48,12 +48,13 @@ user-access-fastpath = []
 # emission, twice per syscall) onto the timer tick (`TaskExt::on_tick`, every
 # CPU) and context switch (`on_leave`/`on_enter`). `set_timer_state` then only
 # flips the User/Kernel state at syscall boundaries, running the full `poll()`
-# only when an interval timer is armed. Off by default; enable for a board A/B
-# (modest syscall saving — tick() retains the clock read, so only the itimer
-# scan + closure are removed; main value is uniform all-CPU accounting + exact
-# split). PREREQUISITE before default-on: the cross-CPU RefCell race on
-# `thr.time` (alarm_task/reader vs on_tick/on_leave) must be made SMP-safe; the
-# race is pre-existing but tickacct widens it. See TICKACCT_2026-08-09.md.
+# only when an interval timer is armed. Off by default. Value is correct uniform
+# all-CPU accounting (secondary CPUs otherwise get no periodic tick accounting);
+# board-measured perf-neutral on syscalls (the pre-SMP-safe -116ns win was the
+# emitter closure in the old poll(), now removed for everyone by the SMP-safe
+# poll() that returns signals). The cross-CPU thr.time race is resolved (thr.time
+# is now a SpinNoIrq lock, not RefCell), so this is safe to enable. See
+# TICKACCT_2026-08-09.md.
 tickacct = ["ax-task/task-tick-hook"]
 memtrack = ["axbacktrace/alloc", "ax-alloc/tracking"]
 rknpu = ["ax-driver/rknpu", "dep:ax-dma"]
