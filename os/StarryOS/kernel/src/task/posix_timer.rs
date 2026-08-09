@@ -2,7 +2,7 @@
 
 use alloc::collections::BTreeMap;
 use core::{
-    sync::atomic::{AtomicI32, Ordering},
+    sync::atomic::{AtomicI32, AtomicUsize, Ordering},
     time::Duration,
 };
 
@@ -46,6 +46,13 @@ pub struct TimerSpec {
 pub struct PosixTimerTable {
     next_id: AtomicI32,
     timers: Mutex<BTreeMap<i32, PosixTimer>>,
+    /// Lock-free count of live timers in `timers`, so the per-syscall
+    /// `poll_process_timer` fast path can skip the global process lookup + the
+    /// `timers` lock entirely when a process has no POSIX timers (the common
+    /// case). Relaxed: a stale 0 only defers a redundant poll to the next
+    /// syscall boundary — the alarm task fires timers at their real deadline
+    /// regardless.
+    count: AtomicUsize,
 }
 
 impl Default for PosixTimerTable {
@@ -53,6 +60,7 @@ impl Default for PosixTimerTable {
         Self {
             next_id: AtomicI32::new(0),
             timers: Mutex::new(BTreeMap::new()),
+            count: AtomicUsize::new(0),
         }
     }
 }
@@ -124,18 +132,36 @@ impl PosixTimerTable {
             interval_ns: 0,
             deadline_ns: 0,
         };
-        self.timers.lock().insert(id, timer);
+        if self.timers.lock().insert(id, timer).is_none() {
+            self.count.fetch_add(1, Ordering::Relaxed);
+        }
         Ok(id)
     }
 
     /// Delete a timer. Returns true if it existed.
     pub fn delete(&self, id: i32) -> bool {
-        self.timers.lock().remove(&id).is_some()
+        let removed = self.timers.lock().remove(&id).is_some();
+        if removed {
+            self.count.fetch_sub(1, Ordering::Relaxed);
+        }
+        removed
     }
 
     /// Clear all timers. Used on execve.
     pub fn clear(&self) {
-        self.timers.lock().clear();
+        let mut timers = self.timers.lock();
+        self.count.store(0, Ordering::Relaxed);
+        timers.clear();
+    }
+
+    /// Lock-free hint: could this process have any POSIX timer to poll?
+    ///
+    /// Used by the per-syscall `poll_process_timer` fast path to avoid the
+    /// global process-table lookup and the `timers` lock when a process has no
+    /// timers (almost always). Conservative: returns `true` whenever any timer
+    /// exists, armed or not.
+    pub fn maybe_has_timers(&self) -> bool {
+        self.count.load(Ordering::Relaxed) != 0
     }
 
     /// Set (arm/disarm) a timer. Returns the old (interval, remaining) in nanos.

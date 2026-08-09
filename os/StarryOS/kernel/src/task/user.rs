@@ -36,7 +36,7 @@ pub fn new_user_task(name: &str, mut uctx: UserContext, set_child_tid: usize) ->
                 let tid = thr.tid();
                 let is_ptraced =
                     thr.proc_data.is_ptrace_traceme() || thr.proc_data.is_ptrace_attached();
-                if thr.proc_data.is_ptrace_singlestep_for(tid) && is_ptraced {
+                if is_ptraced && thr.proc_data.is_ptrace_singlestep_for(tid) {
                     #[cfg(any(
                         target_arch = "riscv64",
                         target_arch = "aarch64",
@@ -315,8 +315,14 @@ pub fn new_user_task(name: &str, mut uctx: UserContext, set_child_tid: usize) ->
                 if !unblock_next_signal() {
                     // POSIX timers are also driven by the alarm task, but polling
                     // here closes the window where an expired timer is only noticed
-                    // after the current syscall returns to userspace.
-                    poll_process_timer(thr.proc_data.proc.pid());
+                    // after the current syscall returns to userspace. Fast path:
+                    // skip the global process-table lookup + the timers lock
+                    // entirely when this process has no POSIX timers (almost
+                    // always) — the alarm task still fires any armed timer at its
+                    // real deadline. Linux does not poll timers on syscall return.
+                    if thr.proc_data.posix_timers.maybe_has_timers() {
+                        poll_process_timer(thr.proc_data.proc.pid());
+                    }
 
                     let eintr_code = -(ax_errno::LinuxError::EINTR.code() as isize);
                     let restart = if is_syscall
