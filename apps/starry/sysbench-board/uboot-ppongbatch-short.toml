@@ -1,0 +1,12 @@
+# Windowed ping-pong batch sweep (single pair). Probes over-context-switching:
+# per-msg cost vs window B. Linux drops 12.3->1.87us (6.6x, batches). If StarryOS
+# stays flat (~24us) it switches per-message (synchronous wake handoff) = the
+# hackbench over-switch hypothesis.
+serial = "/dev/cu.usbserial-AQ03MLX2"
+baud_rate = "1500000"
+dtb_file = "os/StarryOS/configs/board/orangepi-5-plus.dtb"
+shell_prefix = "root@starry:/root #"
+shell_init_cmd = "echo BATCH_BEGIN; for b in 1 4 16 64; do /home/orangepi/ppong -P 100000 $b; done; echo FULL_RUN_DONE; sleep 2; sync; reboot -f"
+success_regex = ["(?m)^FULL_RUN_DONE\\s*$"]
+fail_regex = ["panicked at", "(?i)error while loading"]
+timeout = 300

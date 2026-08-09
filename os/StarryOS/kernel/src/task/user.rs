@@ -70,51 +70,63 @@ pub fn new_user_task(name: &str, mut uctx: UserContext, set_child_tid: usize) ->
 
                 match reason {
                     ReturnReason::Syscall => {
-                        let tid = thr.tid();
-                        let trace_state = thr.proc_data.take_ptrace_syscall_trace_for(tid);
-                        if matches!(trace_state, SyscallTraceState::Entry)
-                            && ptrace_syscall_stop_current(thr, Signo::SIGTRAP, &mut uctx).is_some()
-                        {
-                            match thr.proc_data.take_ptrace_syscall_trace_for(tid) {
-                                SyscallTraceState::Entry | SyscallTraceState::Exit => {
-                                    thr.proc_data.set_ptrace_syscall_trace_state_for(
-                                        tid,
-                                        SyscallTraceState::Exit,
-                                    )
+                        // Fast path: with no debugger attached (the overwhelmingly common
+                        // case) skip the per-syscall ptrace trace-state machinery entirely.
+                        // Each of these checks is a spinlock + BTreeMap op and there were
+                        // 3-4 per syscall — pure overhead when untraced, a large fraction
+                        // of StarryOS's syscall-entry cost. `is_ptraced` is two cheap atomic
+                        // loads already computed once per loop iteration above (Linux gates
+                        // the same work behind TIF_SYSCALL_WORK).
+                        if is_ptraced {
+                            let trace_state = thr.proc_data.take_ptrace_syscall_trace_for(tid);
+                            if matches!(trace_state, SyscallTraceState::Entry)
+                                && ptrace_syscall_stop_current(thr, Signo::SIGTRAP, &mut uctx)
+                                    .is_some()
+                            {
+                                match thr.proc_data.take_ptrace_syscall_trace_for(tid) {
+                                    SyscallTraceState::Entry | SyscallTraceState::Exit => {
+                                        thr.proc_data.set_ptrace_syscall_trace_state_for(
+                                            tid,
+                                            SyscallTraceState::Exit,
+                                        )
+                                    }
+                                    SyscallTraceState::None => {}
                                 }
-                                SyscallTraceState::None => {}
+                            }
+
+                            if let Some(exit_code) = ptrace_exit_event_code(saved_sysno, saved_a0)
+                                && crate::syscall::ptrace_notify_exit(
+                                    thr.proc_data.proc.pid(),
+                                    exit_code,
+                                )
+                            {
+                                let _ = ptrace_stop_current(thr, Signo::SIGTRAP, &mut uctx);
                             }
                         }
 
-                        if let Some(exit_code) = ptrace_exit_event_code(saved_sysno, saved_a0)
-                            && crate::syscall::ptrace_notify_exit(
-                                thr.proc_data.proc.pid(),
-                                exit_code,
-                            )
-                        {
-                            let _ = ptrace_stop_current(thr, Signo::SIGTRAP, &mut uctx);
-                        }
-
                         handle_syscall(&mut uctx);
-                        if thr.proc_data.has_ptrace_pending_event_for(tid)
-                            && let Some(_resume_sig) =
-                                ptrace_stop_current(thr, Signo::SIGTRAP, &mut uctx)
-                        {
-                            continue;
-                        }
-                        if matches!(
-                            thr.proc_data.take_ptrace_syscall_trace_for(tid),
-                            SyscallTraceState::Exit
-                        ) {
-                            let _ = ptrace_syscall_stop_current(thr, Signo::SIGTRAP, &mut uctx);
-                        }
-                        if thr.proc_data.take_ptrace_exec_stop_pending() {
-                            let _is_event =
-                                crate::syscall::ptrace_notify_exec(thr.proc_data.proc.pid());
-                            if let Some(_resume_sig) =
-                                ptrace_stop_current(thr, Signo::SIGTRAP, &mut uctx)
+
+                        if is_ptraced {
+                            if thr.proc_data.has_ptrace_pending_event_for(tid)
+                                && let Some(_resume_sig) =
+                                    ptrace_stop_current(thr, Signo::SIGTRAP, &mut uctx)
                             {
                                 continue;
+                            }
+                            if matches!(
+                                thr.proc_data.take_ptrace_syscall_trace_for(tid),
+                                SyscallTraceState::Exit
+                            ) {
+                                let _ = ptrace_syscall_stop_current(thr, Signo::SIGTRAP, &mut uctx);
+                            }
+                            if thr.proc_data.take_ptrace_exec_stop_pending() {
+                                let _is_event =
+                                    crate::syscall::ptrace_notify_exec(thr.proc_data.proc.pid());
+                                if let Some(_resume_sig) =
+                                    ptrace_stop_current(thr, Signo::SIGTRAP, &mut uctx)
+                                {
+                                    continue;
+                                }
                             }
                         }
                     }

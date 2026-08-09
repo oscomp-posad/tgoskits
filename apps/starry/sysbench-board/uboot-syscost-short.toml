@@ -1,0 +1,10 @@
+# Raw syscall-cost decomposition (getpid entry/exit vs pipe write+read data path)
+# to localize StarryOS's ~7x batched-pipe gap. Linux: getpid 134ns, pipe_wr 558ns.
+serial = "/dev/cu.usbserial-AQ03MLX2"
+baud_rate = "1500000"
+dtb_file = "os/StarryOS/configs/board/orangepi-5-plus.dtb"
+shell_prefix = "root@starry:/root #"
+shell_init_cmd = "echo SYSCOST_BEGIN; /home/orangepi/syscost 500000; /home/orangepi/syscost 500000; echo FULL_RUN_DONE; sleep 2; sync; reboot -f"
+success_regex = ["(?m)^FULL_RUN_DONE\\s*$"]
+fail_regex = ["panicked at", "(?i)error while loading"]
+timeout = 300
