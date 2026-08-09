@@ -1,0 +1,17 @@
+# tickacct A/B: raw syscall cost (syscost getpid — expect ~200 ns cut with the
+# per-syscall poll() gone) + getrusage accuracy (rusage_acct — utime/stime must
+# still track wall CPU time, cpu/wall in [0.80,1.20]).  Run this config on BOTH
+# the tickacct build and the placement (OFF) build at the same HEAD; the syscost
+# number should drop and the rusage_acct verdict must stay PASS.
+#
+# One-time on the board's Linux before the first run:
+#   scp apps/starry/sysbench-board/rusage_acct.c orangepi@<board>:/home/orangepi/
+#   ssh orangepi@<board> 'cd /home/orangepi && gcc -O2 -static -o rusage_acct rusage_acct.c'
+serial = "/dev/cu.usbserial-AQ03MLX2"
+baud_rate = "1500000"
+dtb_file = "os/StarryOS/configs/board/orangepi-5-plus.dtb"
+shell_prefix = "root@starry:/root #"
+shell_init_cmd = "echo TICKACCT_BEGIN; /home/orangepi/syscost 500000; /home/orangepi/rusage_acct 2; echo FULL_RUN_DONE; sleep 2; sync; reboot -f"
+success_regex = ["(?m)^FULL_RUN_DONE\\s*$"]
+fail_regex = ["panicked at", "(?i)error while loading"]
+timeout = 300

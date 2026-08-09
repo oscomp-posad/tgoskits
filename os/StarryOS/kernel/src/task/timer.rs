@@ -243,6 +243,28 @@ impl TimeManager {
         self.state = state;
     }
 
+    /// Resets the tick baseline to the current time without accumulating any
+    /// CPU time.
+    ///
+    /// Called when a task is switched back onto a CPU (`TaskExt::on_enter`):
+    /// the interval it spent descheduled must not be billed to it, so the next
+    /// `tick()` counts only from this resume point. Leaves `last_wall_ns`
+    /// (the itimer baseline) untouched, exactly like `tick()`.
+    #[cfg(feature = "tickacct")]
+    pub fn retick(&mut self) {
+        self.last_tick_ns = monotonic_time_nanos() as usize;
+    }
+
+    /// Returns whether any interval timer is currently armed.
+    ///
+    /// When none is armed, a syscall boundary can skip the full `poll()` (a
+    /// clock read + itimer scan + signal emission) and rely on tick/switch
+    /// accounting for utime/stime — there is no itimer deadline to service.
+    #[cfg(feature = "tickacct")]
+    pub fn has_armed_itimer(&self) -> bool {
+        self.itimers.iter().any(|it| it.remained_ns > 0)
+    }
+
     /// Sets the interval timer of the specified type with the given interval
     /// and remaining time.
     pub fn set_itimer(
@@ -251,6 +273,24 @@ impl TimeManager {
         interval_ns: usize,
         remained_ns: usize,
     ) -> (TimeValue, TimeValue) {
+        // Re-baseline the itimer clock on the disarmed->armed transition. Under
+        // `tickacct`, `poll()` — the only writer of `last_wall_ns` — is skipped
+        // at syscall boundaries while no itimer is armed, so `last_wall_ns` can
+        // be stale by seconds (or still 0 from `new()`). Without this reset the
+        // first `poll()` after arming would compute `itimer_delta = now -
+        // last_wall_ns` as that whole stale span and fire the freshly-armed
+        // ITIMER_REAL/PROF immediately. Re-baselining makes the first post-arm
+        // delta measure only from the arm point. Guard on `!has_armed_itimer()`
+        // (tested before the replace, i.e. the pre-arm state): while any itimer
+        // was already armed, poll() ran every boundary and kept last_wall_ns
+        // fresh, so re-basing then would drop this syscall's own kernel window
+        // from the already-running timer. No-op semantically without `tickacct`
+        // (poll runs every boundary there), so gated to keep that path
+        // byte-identical.
+        #[cfg(feature = "tickacct")]
+        if remained_ns > 0 && !self.has_armed_itimer() {
+            self.last_wall_ns = monotonic_time_nanos() as usize;
+        }
         let old = mem::replace(
             &mut self.itimers[ty as usize],
             ITimer::new(interval_ns, remained_ns),

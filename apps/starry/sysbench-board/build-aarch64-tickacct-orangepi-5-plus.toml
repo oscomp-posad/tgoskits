@@ -1,0 +1,25 @@
+# TICKACCT config = the promoted `placement` baseline + `tickacct`.
+# A/B ON leg for the CPU-time accounting refactor: utime/stime move off the
+# per-syscall poll() onto the timer tick (TaskExt::on_tick, every CPU) + context
+# switch (on_leave/on_enter); set_timer_state only flips User/Kernel state at
+# syscall boundaries (full poll only when an itimer is armed). Board A/B vs the
+# placement config (identical HEAD, only `starry-kernel/tickacct` differing):
+# syscost getpid + pipe_wr (expect ~200 ns/syscall cut) and hackbench, plus a
+# getrusage/times accuracy check (rusage_acct) that utime/stime stay Linux-like.
+target = "aarch64-unknown-none-softfloat"
+features = [
+  "ax-driver/rockchip-soc",
+  "ax-driver/rockchip-sdhci",
+  "ax-driver/rockchip-dwmmc",
+  "ax-driver/rk3588-cpufreq",
+  "ax-driver/rk3588-ddr-dvfs",
+  "starry-kernel/thp",
+  "starry-kernel/sched-loadbalance",
+  "starry-kernel/sched-loadbalance-wake-affine",
+  "starry-kernel/user-access-fastpath",
+  # The refactor under test: per-tick + per-switch CPU-time accounting, strips
+  # the per-syscall poll(). See starry-kernel/tickacct + JOURNEY.md.
+  "starry-kernel/tickacct",
+]
+log = "Info"
+max_cpu_num = 8

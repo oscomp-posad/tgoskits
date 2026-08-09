@@ -35,6 +35,12 @@ lockdep = [
   "ax-lockdep/task-context",
 ]
 task-ext = ["dep:extern-trait"]
+# Per-tick CPU-time accounting hook. When enabled, `on_timer_irq` calls
+# `TaskExt::on_tick` on the task running on each CPU once per scheduler tick, so
+# the OS layer can advance utime/stime without a syscall boundary (Linux
+# `TICK_CPU_ACCOUNTING`). Requires `task-ext` (the hook is a `TaskExt` method).
+# Off by default: pure ArceOS unikernels pay nothing.
+task-tick-hook = ["task-ext"]
 tls = ["ax-hal/tls"]
 # Cross-crate tracepoint hook for the scheduler context switch.
 # Enabling this exposes a `SchedTracepoint` interface (via `ax-crate-interface`)

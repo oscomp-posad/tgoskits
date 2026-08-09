@@ -167,7 +167,38 @@ StarryOS-specific pathologies, each since fixed:
 
 ---
 
-## 7. What's next
+## 7. Syscall-entry cost → the `tickacct` accounting refactor (2026-08-09)
+
+After the `-T` fix closed the CLONE_VM gap, the residual hackbench gap decomposed to **syscall-entry
+cost** (getpid 900 ns vs Linux 134 ns, ~7× batched-pipe floor) — not the scheduler. Bisecting the
+900 ns: the ptrace machinery (landed, −25%) and then the per-syscall `TimeManager::poll()`
+(~210 ns of the remainder, run twice per syscall for utime/stime accounting).
+
+`poll()` at every syscall boundary is StarryOS's *only* CPU-time accounting on secondary CPUs (the
+per-tick `tick_cpu_time` callback is registered **boot-CPU-only**). Linux accounts on the timer tick
+(`TICK_CPU_ACCOUNTING`), not per transition. So: `tickacct` (feature-gated, off by default) moves
+utime/stime onto (1) a new all-CPU `TaskExt::on_tick` hook, (2) context switch (`on_leave` tick /
+`on_enter` retick), and (3) a cheap `tick()` (not `poll()`) at the syscall boundary, keeping the full
+`poll()` only when an itimer is armed. `TimeManager`'s pre-existing dual baselines
+(`last_tick_ns`/`last_wall_ns`) already made tick+poll coexist — the math was proven; this wired the
+call sites.
+
+**Adversarially reviewed (15-agent workflow → 5 confirmed bugs; 4-agent re-verify).** Two HIGH bugs
+fixed: a freshly-armed `setitimer`/`alarm()` firing immediately (stale `last_wall_ns` → re-baseline
+on arm), and pre-syscall user compute mis-billed to stime (boundary `tick()` before `set_state`
+restores the exact split *and* freshens getrusage/times readers). One MEDIUM residual — a
+**pre-existing** cross-CPU `RefCell` race on `thr.time` that tickacct *widens* — is a documented
+**prerequisite before default-on** (task #62); it is not triggered by the A/B workloads.
+
+**Honest verdict:** correct + gated + low-risk, but a *modest* perf lever — `tick()` retains the
+clock read, so only the itimer scan + closure are removed (tens of ns, not 210). The real syscall
+gap lives in the layers below (check_signals, dispatch, the SVC round-trip, the ~5 µs pipe path).
+Board A/B (`uboot-tickacct-short.toml`: syscost + rusage_acct accuracy oracle) pending a board.
+Full write-up: `TICKACCT_2026-08-09.md`.
+
+---
+
+## 8. What's next
 
 1. **Attack the absolute hackbench gap** (the per-message IPC/context-switch/wake cost) — the genuine
    remaining Linux-parity lever. Starts with a profiling pass: where does one pipe ping-pong spend
@@ -176,7 +207,7 @@ StarryOS-specific pathologies, each since fixed:
 
 ---
 
-## 8. Artifacts
+## 9. Artifacts
 
 - **Branch:** `combined-perf` (local, unpushed). Key commits: COW-EFAULT `5c18e46ab`; wake_affine
   `65db277f4`; `-T` fast path `52569c749` + board-validation/promotion `228706d2c`; SD-boot

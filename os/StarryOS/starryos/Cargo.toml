@@ -40,6 +40,9 @@ thp = ["starry-kernel/thp"]
 # Lock-free user-copy fast path (Linux access_ok model). Opt-in, OFF by default;
 # build with `FEATURES=user-access-fastpath`. See starry-kernel/user-access-fastpath.
 user-access-fastpath = ["starry-kernel/user-access-fastpath"]
+# Tick/switch CPU-time accounting (Linux TICK_CPU_ACCOUNTING) — strips the
+# per-syscall poll(). Opt-in, OFF by default. See starry-kernel/tickacct.
+tickacct = ["starry-kernel/tickacct"]
 
 [[bin]]
 name = "starryos"

@@ -187,6 +187,19 @@ pub fn on_timer_irq(scheduler_tick: bool) {
     use ax_kernel_guard::NoOp;
     crate::timers::check_events(scheduler_tick);
     if scheduler_tick {
+        // Periodic CPU-time accounting for the running task, on every CPU
+        // (Linux `TICK_CPU_ACCOUNTING`). The `on_tick` task-ext hook lets the OS
+        // layer (e.g. starry-kernel) advance the current task's utime/stime
+        // without waiting for a syscall boundary. Runs before the scheduler tick
+        // so the elapsed slice is billed to the task that actually ran it, not
+        // to whichever task the tick may pick next. Idle/kernel tasks have no
+        // task-ext and are skipped.
+        #[cfg(feature = "task-tick-hook")]
+        if let Some(curr) = current_may_uninit()
+            && let Some(ext) = curr.task_ext()
+        {
+            ext.on_tick();
+        }
         // Since irq and preemption are both disabled here,
         // we can get current run queue with the default `ax_kernel_guard::NoOp`.
         current_run_queue::<NoOp>().scheduler_timer_tick();

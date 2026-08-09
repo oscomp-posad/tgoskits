@@ -519,6 +519,14 @@ impl Thread {
 #[extern_trait]
 impl TaskExt for Box<Thread> {
     fn on_enter(&self) {
+        // Reset the CPU-time tick baseline to the resume point so the interval
+        // this thread spent descheduled is not billed to it on the next tick.
+        // Skip on a re-entrant borrow (mid state-transition); losing one
+        // baseline reset is harmless. See `set_timer_state` for the model.
+        #[cfg(feature = "tickacct")]
+        if let Ok(mut time) = self.time.try_borrow_mut() {
+            time.retick();
+        }
         let scope = self.proc_data.scope.read();
         unsafe { ActiveScope::set(&scope) };
         core::mem::forget(scope);
@@ -530,12 +538,32 @@ impl TaskExt for Box<Thread> {
     }
 
     fn on_leave(&self) {
+        // Account this thread's CPU slice before it leaves the CPU, so a task
+        // that blocks or yields between ticks still records the time it ran.
+        // `tick()` bills [last_tick, now] to utime/stime by the current
+        // TimerState and advances last_tick; the matching `on_enter` retick
+        // discards the descheduled gap.
+        #[cfg(feature = "tickacct")]
+        if let Ok(mut time) = self.time.try_borrow_mut() {
+            time.tick();
+        }
         // Fold this slice's per-task perf counter deltas and stop the counters
         // before the scope is torn down. Same hot-path constraints as on_enter.
         #[cfg(target_arch = "aarch64")]
         crate::perf::task::perf_sched_out(self);
         ActiveScope::set_global();
         unsafe { self.proc_data.scope.force_read_decrement() };
+    }
+
+    fn on_tick(&self) {
+        // Periodic per-tick CPU-time accounting (all CPUs). Advances utime/stime
+        // by the elapsed slice, attributed to the current TimerState (User or
+        // Kernel), matching Linux `TICK_CPU_ACCOUNTING`. Skip on a re-entrant
+        // borrow (the thread is mid state-transition), matching `tick_cpu_time`.
+        #[cfg(feature = "tickacct")]
+        if let Ok(mut time) = self.time.try_borrow_mut() {
+            time.tick();
+        }
     }
 }
 

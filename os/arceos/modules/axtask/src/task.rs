@@ -69,6 +69,15 @@ pub trait TaskExt {
     fn on_enter(&self) {}
     /// Called when the task is switched out.
     fn on_leave(&self) {}
+    /// Called once per scheduler tick on the CPU currently running this task
+    /// (gated by the `task-tick-hook` feature at the call site).
+    ///
+    /// Lets the OS layer advance periodic CPU-time accounting (utime/stime) for
+    /// a task that neither makes syscalls nor deschedules, matching Linux's
+    /// `TICK_CPU_ACCOUNTING`. Runs in timer-IRQ context with IRQs disabled:
+    /// implementors must not sleep and should treat a re-entrant borrow of
+    /// their per-task state as "skip this tick".
+    fn on_tick(&self) {}
 }
 
 /// The inner task structure.

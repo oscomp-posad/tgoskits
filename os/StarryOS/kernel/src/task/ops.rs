@@ -378,11 +378,37 @@ pub fn set_timer_state(task: &TaskInner, state: TimerState) {
         // reentrant borrow, likely IRQ
         return;
     };
-    let emitter = |signo| {
-        send_signal_thread_inner(task, thr, SignalInfo::new_kernel(signo));
-    };
-    time.poll(emitter);
-    time.set_state(state);
+    // With tick/switch CPU-time accounting (`tickacct`), utime/stime are also
+    // advanced on every timer tick and context switch. The expensive part of
+    // the per-syscall `poll()` — the itimer scan + signal-emission closure —
+    // is pure overhead unless an interval timer is armed. So bill the outgoing
+    // state's slice with a cheap `tick()` (one clock read + a state match, no
+    // itimer work) before flipping the state, keeping the FULL `poll()` only
+    // when an itimer is armed. tick() before set_state preserves the exact
+    // user/kernel boundary split (the pre-entry user slice is billed to utime
+    // while state is still User) and freshens the current thread's counters for
+    // getrusage/times/clock_gettime readers — matching the non-tickacct path's
+    // precision, minus the itimer overhead.
+    #[cfg(feature = "tickacct")]
+    {
+        if time.has_armed_itimer() {
+            let emitter = |signo| {
+                send_signal_thread_inner(task, thr, SignalInfo::new_kernel(signo));
+            };
+            time.poll(emitter);
+        } else {
+            time.tick();
+        }
+        time.set_state(state);
+    }
+    #[cfg(not(feature = "tickacct"))]
+    {
+        let emitter = |signo| {
+            send_signal_thread_inner(task, thr, SignalInfo::new_kernel(signo));
+        };
+        time.poll(emitter);
+        time.set_state(state);
+    }
 }
 
 #[repr(C)]
