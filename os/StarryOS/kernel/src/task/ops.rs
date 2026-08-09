@@ -3,7 +3,7 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
-use core::ffi::c_long;
+use core::{ffi::c_long, sync::atomic::Ordering};
 
 use ax_errno::{AxError, AxResult};
 use ax_kspin::SpinRwLock as RwLock;
@@ -327,12 +327,13 @@ pub fn tick_cpu_time(task: &TaskInner) {
     let Some(thr) = task.try_as_thread() else {
         return;
     };
+    let state = TimerState::from_u8(thr.timer_state.load(Ordering::Relaxed));
     let Some(mut time) = thr.time.try_lock() else {
         // Lock contended (mid state-transition, or a cross-CPU reader/alarm);
         // skip. Runs from IRQ context, so it must never block.
         return;
     };
-    time.tick();
+    time.tick(state);
 }
 
 /// Returns the accumulated `(utime, stime)` for a task without side effects.
@@ -357,7 +358,8 @@ pub fn poll_timer(task: &TaskInner) {
     // CPU than the target). Hold the lock only for the poll; emit the returned
     // itimer signals after releasing it — signal delivery must not run under the
     // IRQ-disabling time lock.
-    let fired = thr.time.lock().poll();
+    let state = TimerState::from_u8(thr.timer_state.load(Ordering::Relaxed));
+    let fired = thr.time.lock().poll(state);
     for signo in fired.into_iter().flatten() {
         send_signal_thread_inner(task, thr, SignalInfo::new_kernel(signo));
     }
@@ -372,41 +374,35 @@ pub fn poll_process_timer(pid: Pid) {
     }
 }
 
-/// Sets the timer state.
+/// Sets the timer state at a User/Kernel boundary (syscall entry/return).
 pub fn set_timer_state(task: &TaskInner, state: TimerState) {
     let Some(thr) = task.try_as_thread() else {
         return;
     };
-    // Hold the (IRQ-disabling) lock only for the accounting update + state flip;
-    // collect any itimer signals and emit them after unlocking — signal delivery
-    // must not run under the time lock. Called at syscall boundaries (task
-    // context, the thread's own CPU), so it can block briefly on the rare
-    // cross-CPU contention without reentrancy.
-    let fired = {
-        let mut time = thr.time.lock();
-        // With tick/switch CPU-time accounting (`tickacct`), utime/stime are also
-        // advanced on every timer tick and context switch. The expensive part of
-        // the per-syscall `poll()` — the itimer scan — is pure overhead unless an
-        // interval timer is armed. So bill the outgoing state's slice with a
-        // cheap `tick()` (one clock read + a state match, no itimer work) before
-        // flipping the state, keeping the FULL `poll()` only when an itimer is
-        // armed. tick() before set_state preserves the exact user/kernel boundary
-        // split (the pre-entry user slice is billed to utime while state is still
-        // User) and freshens the current thread's counters for
-        // getrusage/times/clock_gettime readers — matching the non-tickacct
-        // path's precision, minus the itimer overhead.
-        #[cfg(feature = "tickacct")]
-        let fired = if time.has_armed_itimer() {
-            time.poll()
-        } else {
-            time.tick();
-            [None; 3]
-        };
-        #[cfg(not(feature = "tickacct"))]
-        let fired = time.poll();
-        time.set_state(state);
-        fired
-    };
+
+    // Coarse Linux `TICK_CPU_ACCOUNTING` (tickacct): the common syscall boundary
+    // just flips the lock-free User/Kernel state — NO lock, NO accounting. The
+    // utime/stime totals advance purely on the timer tick (`on_tick`, every CPU)
+    // and the context switch (`on_leave`), which sample this state. Only when an
+    // interval timer is armed do we fall through to take the lock, account
+    // precisely, and service ITIMER_VIRTUAL/PROF. Removing the SMP `time` lock
+    // from the syscall hot path is the whole point — it is ~300 ns/syscall.
+    #[cfg(feature = "tickacct")]
+    if !thr.itimer_armed.load(Ordering::Relaxed) {
+        thr.timer_state.store(state as u8, Ordering::Relaxed);
+        return;
+    }
+
+    // Exact per-boundary accounting (non-tickacct build), or the rare
+    // armed-itimer path under tickacct: bill the OUTGOING state's slice under the
+    // lock, then flip the state. The lock is IRQ-disabling; collect any itimer
+    // signals and emit them AFTER unlocking — signal delivery must not run under
+    // the time lock. Called at syscall boundaries (task context, the thread's
+    // own CPU), so it can block briefly on rare cross-CPU contention without
+    // reentrancy.
+    let old = TimerState::from_u8(thr.timer_state.load(Ordering::Relaxed));
+    let fired = thr.time.lock().poll(old);
+    thr.timer_state.store(state as u8, Ordering::Relaxed);
     for signo in fired.into_iter().flatten() {
         send_signal_thread_inner(task, thr, SignalInfo::new_kernel(signo));
     }

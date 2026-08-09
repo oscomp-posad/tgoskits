@@ -137,14 +137,31 @@ pub fn register_alarm_for(deadline: Duration, target: AlarmTarget) {
 }
 
 /// Represents the state of the timer.
-#[derive(Debug)]
+///
+/// Stored lock-free in `Thread::timer_state` (as `u8`) so the syscall boundary
+/// can flip User/Kernel without taking the `time` lock; the tick/switch
+/// accounting reads it back via [`TimerState::from_u8`].
+#[repr(u8)]
+#[derive(Debug, Clone, Copy)]
 pub enum TimerState {
     /// Fallback state.
-    None,
+    None   = 0,
     /// The timer is running in user space.
-    User,
+    User   = 1,
     /// The timer is running in kernel space.
-    Kernel,
+    Kernel = 2,
+}
+
+impl TimerState {
+    /// Decodes the discriminant stored in the `Thread::timer_state` atomic.
+    /// Any unknown value maps to `None` (accounts nothing).
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => TimerState::User,
+            2 => TimerState::Kernel,
+            _ => TimerState::None,
+        }
+    }
 }
 
 /// A manager for time-related operations.
@@ -157,7 +174,6 @@ pub struct TimeManager {
     /// Baseline for tick-based CPU time accumulation.
     /// Updated by `tick()` and synced to `last_wall_ns` at the end of `poll()`.
     last_tick_ns: usize,
-    state: TimerState,
     itimers: [ITimer; 3],
 }
 
@@ -174,7 +190,6 @@ impl TimeManager {
             stime_ns: 0,
             last_wall_ns: 0,
             last_tick_ns: 0,
-            state: TimerState::None,
             itimers: Default::default(),
         }
     }
@@ -194,10 +209,13 @@ impl TimeManager {
     /// Uses `last_tick_ns` as the exclusive baseline so that `poll()`'s
     /// itimer accounting (which uses the independent `last_wall_ns`) is not
     /// affected.
-    pub fn tick(&mut self) {
+    ///
+    /// `state` is the User/Kernel mode to attribute the elapsed slice to,
+    /// supplied by the caller from the lock-free `Thread::timer_state` atomic.
+    pub fn tick(&mut self, state: TimerState) {
         let now_ns = monotonic_time_nanos() as usize;
         let delta = now_ns.saturating_sub(self.last_tick_ns);
-        match self.state {
+        match state {
             TimerState::User => self.utime_ns += delta,
             TimerState::Kernel => self.stime_ns += delta,
             TimerState::None => {}
@@ -217,7 +235,7 @@ impl TimeManager {
     /// window and risk a lock-ordering deadlock. Returning the signals keeps
     /// the locked region free of any nested lock.
     #[must_use = "the returned itimer signals must be emitted after unlocking"]
-    pub fn poll(&mut self) -> [Option<Signo>; 3] {
+    pub fn poll(&mut self, state: TimerState) -> [Option<Signo>; 3] {
         let now_ns = monotonic_time_nanos() as usize;
         // itimer_delta: full wall-clock time since the last poll() call.
         // Used for interval-timer accounting so they fire at the right time
@@ -229,7 +247,7 @@ impl TimeManager {
         let remaining = now_ns.saturating_sub(self.last_tick_ns);
         // Fixed slots so no `n` counter is needed: 0=Virtual, 1=Prof, 2=Real.
         let mut fired = [None; 3];
-        match self.state {
+        match state {
             TimerState::User => {
                 self.utime_ns += remaining;
                 if self.itimers[ITimerType::Virtual as usize].update(itimer_delta) {
@@ -255,11 +273,6 @@ impl TimeManager {
         // from a clean slate.
         self.last_tick_ns = now_ns;
         fired
-    }
-
-    /// Updates the timer state.
-    pub fn set_state(&mut self, state: TimerState) {
-        self.state = state;
     }
 
     /// Resets the tick baseline to the current time without accumulating any

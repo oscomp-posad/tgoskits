@@ -121,11 +121,17 @@ pub fn sys_setitimer(
 
     debug!("sys_setitimer <= type: {ty:?}, interval: {interval:?}, remained: {remained:?}");
 
-    let old = curr
-        .as_thread()
-        .time
-        .lock()
-        .set_itimer(ty, interval, remained);
+    let thr = curr.as_thread();
+    let old = {
+        let mut time = thr.time.lock();
+        let old = time.set_itimer(ty, interval, remained);
+        // Keep the lock-free `itimer_armed` hint (read by `set_timer_state` to
+        // stay off the lock in the common case) exact under the lock.
+        #[cfg(feature = "tickacct")]
+        thr.itimer_armed
+            .store(time.has_armed_itimer(), core::sync::atomic::Ordering::Relaxed);
+        old
+    };
 
     if let Some(old_value) = old_value.nullable() {
         old_value.vm_write(itimerval {

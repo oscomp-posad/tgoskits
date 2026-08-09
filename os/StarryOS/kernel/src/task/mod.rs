@@ -122,6 +122,25 @@ pub struct Thread {
     /// and cannot deadlock. IRQ paths use `try_lock` and skip on contention.
     pub time: SpinNoIrq<TimeManager>,
 
+    /// Lock-free User/Kernel accounting state (a [`TimerState`] discriminant).
+    ///
+    /// Held outside the `time` lock so a syscall boundary can flip it with a
+    /// single Relaxed store — no lock, no accounting. The tick/switch accounting
+    /// (`on_tick`/`on_leave`/`tick_cpu_time`) and the itimer poll read it back to
+    /// attribute the elapsed slice (Linux `TICK_CPU_ACCOUNTING`). Relaxed is
+    /// sufficient: it is only a per-CPU sampling hint for the accounting, which
+    /// is itself serialized by the `time` lock.
+    pub timer_state: AtomicU8,
+
+    /// Lock-free hint: does this thread have any interval timer armed?
+    ///
+    /// Lets `set_timer_state` (tickacct) decide between the lock-free common
+    /// path and the itimer-servicing poll without taking the `time` lock. Kept
+    /// exact by `sys_setitimer` under the lock; may lag `true` briefly after a
+    /// one-shot itimer fires (harmless — only costs a redundant lock+poll).
+    #[cfg(feature = "tickacct")]
+    pub itimer_armed: AtomicBool,
+
     /// The OOM score adjustment value.
     oom_score_adj: AtomicI32,
 
@@ -226,6 +245,9 @@ impl Thread {
             clear_child_tid: AtomicUsize::new(0),
             robust_list_head: AtomicUsize::new(0),
             time: SpinNoIrq::new(TimeManager::new()),
+            timer_state: AtomicU8::new(TimerState::None as u8),
+            #[cfg(feature = "tickacct")]
+            itimer_armed: AtomicBool::new(false),
             exit: Arc::new(AtomicBool::new(false)),
             oom_score_adj: AtomicI32::new(200),
             accessing_user_memory: AtomicBool::new(false),
@@ -536,8 +558,11 @@ impl TaskExt for Box<Thread> {
         // discards the descheduled gap. Skip on lock contention (never block
         // the context switch); the lost slice is at most one tick and rare.
         #[cfg(feature = "tickacct")]
-        if let Some(mut time) = self.time.try_lock() {
-            time.tick();
+        {
+            let state = TimerState::from_u8(self.timer_state.load(Ordering::Relaxed));
+            if let Some(mut time) = self.time.try_lock() {
+                time.tick(state);
+            }
         }
         // Fold this slice's per-task perf counter deltas and stop the counters
         // before the scope is torn down. Same hot-path constraints as on_enter.
@@ -554,8 +579,11 @@ impl TaskExt for Box<Thread> {
         // context: use `try_lock` and skip on contention (a cross-CPU reader or
         // the thread mid state-transition), matching `tick_cpu_time`.
         #[cfg(feature = "tickacct")]
-        if let Some(mut time) = self.time.try_lock() {
-            time.tick();
+        {
+            let state = TimerState::from_u8(self.timer_state.load(Ordering::Relaxed));
+            if let Some(mut time) = self.time.try_lock() {
+                time.tick(state);
+            }
         }
     }
 }
