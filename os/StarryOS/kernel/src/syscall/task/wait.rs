@@ -286,7 +286,7 @@ pub fn sys_waitpid(pid: i32, exit_code: *mut i32, options: u32) -> AxResult<isiz
             for tid in child.threads() {
                 if let Ok(task) = get_task(tid) {
                     let thr = task.as_thread();
-                    let (utime, stime) = thr.time.borrow().output();
+                    let (utime, stime) = thr.time.lock().output();
                     proc_data.add_child_cpu_time(utime, stime);
                 }
             }
@@ -449,7 +449,7 @@ pub fn sys_waitid(
                 for tid in child.threads() {
                     if let Ok(task) = get_task(tid) {
                         let thr = task.as_thread();
-                        let (utime, stime) = thr.time.borrow().output();
+                        let (utime, stime) = thr.time.lock().output();
                         proc_data.add_child_cpu_time(utime, stime);
                     }
                 }

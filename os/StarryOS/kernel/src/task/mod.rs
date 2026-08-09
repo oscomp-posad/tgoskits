@@ -13,9 +13,7 @@ mod user;
 
 use alloc::{boxed::Box, collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 use core::{
-    cell::RefCell,
     future::poll_fn,
-    ops::Deref,
     sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicUsize, Ordering},
     task::Poll,
 };
@@ -65,20 +63,6 @@ struct PtracePendingEvent {
 }
 use crate::mm::AddrSpace;
 
-///  A wrapper type that assumes the inner type is `Sync`.
-#[repr(transparent)]
-pub struct AssumeSync<T>(pub T);
-
-unsafe impl<T> Sync for AssumeSync<T> {}
-
-impl<T> Deref for AssumeSync<T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
 /// A one-shot flag that suppresses exactly one signal check.
 struct NextSignalCheckBlock(AtomicBool);
 
@@ -127,11 +111,16 @@ pub struct Thread {
     /// The thread-level signal manager
     pub signal: Arc<ThreadSignalManager>,
 
-    /// Time manager
+    /// Time manager.
     ///
-    /// This is assumed to be `Sync` because it's only borrowed mutably during
-    /// context switches, which is exclusive to the current thread.
-    pub time: AssumeSync<RefCell<TimeManager>>,
+    /// An IRQ-disabling spinlock (not a `RefCell`): CPU-time accounting borrows
+    /// this from the timer IRQ / context switch on the thread's own CPU, while
+    /// the alarm task and cross-CPU readers (`getrusage`, `/proc`) borrow it
+    /// from other CPUs. The lock is only ever held for a handful of field
+    /// updates with no nested lock (interval-timer signals are returned from
+    /// `poll()` and emitted after unlocking), so critical sections are short
+    /// and cannot deadlock. IRQ paths use `try_lock` and skip on contention.
+    pub time: SpinNoIrq<TimeManager>,
 
     /// The OOM score adjustment value.
     oom_score_adj: AtomicI32,
@@ -236,7 +225,7 @@ impl Thread {
             proc_data,
             clear_child_tid: AtomicUsize::new(0),
             robust_list_head: AtomicUsize::new(0),
-            time: AssumeSync(RefCell::new(TimeManager::new())),
+            time: SpinNoIrq::new(TimeManager::new()),
             exit: Arc::new(AtomicBool::new(false)),
             oom_score_adj: AtomicI32::new(200),
             accessing_user_memory: AtomicBool::new(false),
@@ -521,10 +510,12 @@ impl TaskExt for Box<Thread> {
     fn on_enter(&self) {
         // Reset the CPU-time tick baseline to the resume point so the interval
         // this thread spent descheduled is not billed to it on the next tick.
-        // Skip on a re-entrant borrow (mid state-transition); losing one
-        // baseline reset is harmless. See `set_timer_state` for the model.
+        // Skip on lock contention (cross-CPU reader/alarm holds it, or a
+        // re-entrant IRQ path); losing one baseline reset is harmless. Never
+        // block here — this runs inside the context switch. See
+        // `set_timer_state` for the model.
         #[cfg(feature = "tickacct")]
-        if let Ok(mut time) = self.time.try_borrow_mut() {
+        if let Some(mut time) = self.time.try_lock() {
             time.retick();
         }
         let scope = self.proc_data.scope.read();
@@ -542,9 +533,10 @@ impl TaskExt for Box<Thread> {
         // that blocks or yields between ticks still records the time it ran.
         // `tick()` bills [last_tick, now] to utime/stime by the current
         // TimerState and advances last_tick; the matching `on_enter` retick
-        // discards the descheduled gap.
+        // discards the descheduled gap. Skip on lock contention (never block
+        // the context switch); the lost slice is at most one tick and rare.
         #[cfg(feature = "tickacct")]
-        if let Ok(mut time) = self.time.try_borrow_mut() {
+        if let Some(mut time) = self.time.try_lock() {
             time.tick();
         }
         // Fold this slice's per-task perf counter deltas and stop the counters
@@ -558,10 +550,11 @@ impl TaskExt for Box<Thread> {
     fn on_tick(&self) {
         // Periodic per-tick CPU-time accounting (all CPUs). Advances utime/stime
         // by the elapsed slice, attributed to the current TimerState (User or
-        // Kernel), matching Linux `TICK_CPU_ACCOUNTING`. Skip on a re-entrant
-        // borrow (the thread is mid state-transition), matching `tick_cpu_time`.
+        // Kernel), matching Linux `TICK_CPU_ACCOUNTING`. Runs in timer-IRQ
+        // context: use `try_lock` and skip on contention (a cross-CPU reader or
+        // the thread mid state-transition), matching `tick_cpu_time`.
         #[cfg(feature = "tickacct")]
-        if let Ok(mut time) = self.time.try_borrow_mut() {
+        if let Some(mut time) = self.time.try_lock() {
             time.tick();
         }
     }
