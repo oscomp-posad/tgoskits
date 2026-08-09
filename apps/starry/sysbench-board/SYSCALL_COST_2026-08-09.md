@@ -67,15 +67,28 @@ but pays a clock read + poll on every syscall.
   syscall boundaries; `switch_to` has no time accounting. utime/stime are accumulated at (a) syscall
   boundaries via `poll()` and (b) timer ticks via `tick()`.
 
-**So the fix is correctness-sensitive and cross-crate (task #60, scoped, not rushed):** to stop
-`poll()`-ing on every syscall, CPU time must instead be accounted **on context switch** (attribute
-the outgoing task's time-since-last-tick to its state) — otherwise a task that blocks between ticks
-(exactly hackbench's tasks) loses its CPU time and utime/stime under-count. That means adding a
-time-accounting hook to `axtask::switch_to` (e.g. via the existing `on_sched_switch` tracepoint) and
-then reducing `set_timer_state` to a cheap `set_state` on the syscall boundary (full `poll()` only
-when an interval timer is armed). This touches the scheduler hot path and time-accounting semantics,
-so it needs its own focused pass with a utime/stime-accuracy test + board A/B — not a tail-of-session
-edit.
+**Deeper measurement — `poll()` is the cost, and the accounting model is entirely syscall-driven.**
+Isolating `poll()` (keep `set_state`, skip only the poll) put getpid at ~690 ns, so **`poll()` itself
+is ~210 ns/syscall** and the `try_as_thread`/RefCell overhead is only ~40 ns. And critically:
+**StarryOS has no periodic per-tick CPU-time accounting** — `axtask::on_timer_tick` only runs the
+scheduler tick and timed events; it never accounts CPU time. All utime/stime accumulation happens at
+`set_timer_state`'s `poll()` (syscall boundaries), plus on-demand `/proc` reads (`tick_cpu_time`) and
+alarm deadlines (`poll_timer`).
+
+**So removing per-syscall `poll()` is a 3-part cross-crate subsystem refactor (its own focused pass):**
+1. **Add periodic tick accounting** — hook `axtask::on_timer_tick` → `tick_cpu_time(current())` so a
+   CPU-bound task's utime/stime advance without syscalls.
+2. **Add context-switch accounting** — in `switch_to` (or the existing `on_sched_switch` crate
+   interface, where `current()` is still the outgoing task) → `tick_cpu_time(prev)` so a task that
+   blocks between ticks doesn't lose its time.
+3. **Cheapen `set_timer_state`** to a bare `set_state` on syscall boundaries; run the full `poll()`
+   only when an interval timer is armed (so ITIMER_VIRTUAL/PROF stay precise in task context).
+
+This touches the scheduler hot path (tick + switch) and time-accounting semantics (utime/stime become
+tick+switch-granular, matching Linux `TICK_CPU_ACCOUNTING`), so it needs a **getrusage/`/proc/stat`
+utime-vs-stime accuracy test** + board A/B (syscost getpid + hackbench), and should be
+**feature-gated** for a safe rollout. Correct, high-value (~210 ns off *every* syscall), but a
+deliberate refactor — not rushed. Scoped with hard data; landing it is task #60's continuation.
 
 ## Remaining layers after that
 
