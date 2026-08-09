@@ -48,13 +48,15 @@ user-access-fastpath = []
 # emission, twice per syscall) onto the timer tick (`TaskExt::on_tick`, every
 # CPU) and context switch (`on_leave`/`on_enter`). `set_timer_state` then only
 # flips the User/Kernel state at syscall boundaries, running the full `poll()`
-# only when an interval timer is armed. Off by default. Value is correct uniform
-# all-CPU accounting (secondary CPUs otherwise get no periodic tick accounting);
-# board-measured perf-neutral on syscalls (the pre-SMP-safe -116ns win was the
-# emitter closure in the old poll(), now removed for everyone by the SMP-safe
-# poll() that returns signals). The cross-CPU thr.time race is resolved (thr.time
-# is now a SpinNoIrq lock, not RefCell), so this is safe to enable. See
-# TICKACCT_2026-08-09.md.
+# Coarse Linux TICK_CPU_ACCOUNTING via a lock-free timer state: utime/stime
+# advance only on the timer tick (on_tick, every CPU) + context switch, sampling
+# the lock-free Thread::timer_state. The syscall boundary is then just a Relaxed
+# store (no lock, no accounting) unless an interval timer is armed. Takes the SMP
+# time lock off the syscall hot path: board getpid 853 -> 495.7 ns (-42%), while
+# keeping accounting correct (rusage cpu/wall=1.00, split s_frac 0.71 ~ Linux
+# 0.72). Trade-off vs the non-tickacct default: getrusage/times become
+# tick-granular (coarse) like Linux, not exact. Enabled in the ship config. See
+# SYSCALL_PROFILE_2026-08-09.md.
 tickacct = ["ax-task/task-tick-hook"]
 memtrack = ["axbacktrace/alloc", "ax-alloc/tracking"]
 rknpu = ["ax-driver/rknpu", "dep:ax-dma"]

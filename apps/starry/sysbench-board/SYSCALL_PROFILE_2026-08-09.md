@@ -35,7 +35,29 @@ Linux does NOT account CPU time at syscall boundaries — it samples user/kernel
 mode on the timer tick (`TICK_CPU_ACCOUNTING`). StarryOS's per-boundary
 lock+account is exactly why its syscalls run ~3× the trap floor.
 
-## Next lever — "Tier 2": lock-free state (est. getpid ~500–600 ns)
+## Tier 2 — DONE + validated (2026-08-10): lock-free state, getpid −42%
+
+Implemented + board-validated + adversarially reviewed (0 bugs). Moved the
+User/Kernel `state` out of the locked `TimeManager` into a lock-free
+`Thread::timer_state` (AtomicU8); `tick()`/`poll()` take state as a param; the
+tickacct common syscall boundary is now a single Relaxed store (no lock, no
+accounting); accounting is purely `on_tick`+`on_leave` sampling the atomic; an
+armed interval timer (lock-free `itimer_armed` hint) still takes the lock+poll.
+
+| getpid ns | exact (non-tickacct) | coarse (tickacct, Tier 2) |
+|---|---|---|
+| this build | 974 | **495.7** |
+| vs 853 baseline | — | **−42%, ~at the 458 ns trap floor** |
+
+rusage_acct: coarse cpu/wall=1.00, syscall **s_frac 0.71 ≈ Linux 0.72** (vs the
+exact path's 0.62) — the coarse split is now *Linux-like*, total CPU time exact.
+Enabled in the ship (placement) config; the non-tickacct path keeps exact
+per-boundary accounting as a fallback. Commit `2de99d499`.
+
+getpid is now **~495 ns vs Linux 152 (~3.3×)**, down from ~5.6×. The remainder is
+the `uctx.run()` trap round-trip — arch-level.
+
+### (superseded) original Tier-2 estimate
 
 To remove the lock from the common syscall boundary, move the User/Kernel
 `state` out of the locked `TimeManager` into a lock-free `AtomicU8` on `Thread`

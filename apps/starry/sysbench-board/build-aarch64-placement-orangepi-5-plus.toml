@@ -27,6 +27,14 @@ features = [
   # -P also 1.5-2x better. Security-reviewed (5-lens + adversarial verify, no
   # bypass). See ACCESS_FASTPATH_DESIGN_2026-08-08.md.
   "starry-kernel/user-access-fastpath",
+  # Coarse tick CPU-time accounting (Linux TICK_CPU_ACCOUNTING) via a lock-free
+  # timer state, taking the SMP time lock off the syscall boundary. Board A/B
+  # 2026-08-10 (same HEAD, only this feature): getpid 853 -> 495.7 ns (-42%, ~at
+  # the uctx.run trap floor), pipe_wr 5841 -> 5112 ns; accounting stays correct
+  # (rusage_acct cpu/wall=1.00, syscall s_frac 0.71 vs Linux 0.72). Trade-off:
+  # getrusage/times become tick-granular like Linux (vs the exact path's precise
+  # split). 7-agent adversarial review = 0 bugs. See SYSCALL_PROFILE_2026-08-09.md.
+  "starry-kernel/tickacct",
 ]
 log = "Info"
 max_cpu_num = 8

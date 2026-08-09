@@ -48,3 +48,17 @@ RUSAGE_ACCT syscall cpu/wall=1.00 s_frac=0.68  PASS
 ## SMP-safe SpinNoIrq lock costs ~96ns/syscall (ON 935->1031). Net: tickacct is
 ## now perf-NEUTRAL; its value is correct uniform all-CPU accounting. Accounting
 ## stays exact (rusage_acct PASS, s_frac 0.68 both, matches Linux ~0.72 band).
+
+## Tier 2 (lock-free timer_state, coarse tick accounting) — board A/B 2026-08-10
+## Same HEAD, only starry-kernel/tickacct differing. Commit 2de99d499.
+== tickacct (coarse + lock-free state) ==
+SYSCOST getpid  495.7 ns/syscall     <-- -42% vs the 853 exact baseline; ~at the uctx.run floor
+SYSCOST pipe_wr  5112.0 ns
+RUSAGE_ACCT user    cpu/wall=1.00 u_frac=1.00  PASS
+RUSAGE_ACCT syscall cpu/wall=1.00 s_frac=0.71  PASS   <-- Linux 0.72; coarse split now Linux-like
+== placement (exact / non-tickacct fallback) ==
+SYSCOST getpid  974.5 ns/syscall
+RUSAGE_ACCT syscall cpu/wall=1.00 s_frac=0.62  PASS   <-- exact split
+## The SMP time lock is now off the syscall hot path (lock-free timer_state store);
+## accounting is coarse Linux TICK_CPU_ACCOUNTING. 7-agent review = 0 bugs.
+## Promoted: tickacct enabled in the ship (placement) config.
