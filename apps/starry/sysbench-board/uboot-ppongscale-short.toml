@@ -1,0 +1,11 @@
+# Concurrent pipe ping-pong SCALING probe (K parallel pairs). ppong self-times,
+# so per-roundtrip usec at K=8 vs K=1 exposes global-lock contention under load
+# without needing bc/awk in StarryOS's shell. Linux scales ~9.4x (K1->K8).
+serial = "/dev/cu.usbserial-AQ03MLX2"
+baud_rate = "1500000"
+dtb_file = "os/StarryOS/configs/board/orangepi-5-plus.dtb"
+shell_prefix = "root@starry:/root #"
+shell_init_cmd = "echo SCALE_BEGIN; for K in 1 2 4 8; do echo \"=== K=$K ===\"; k=0; while [ $k -lt $K ]; do /home/orangepi/ppong -P 30000 & k=$((k+1)); done; wait; done; echo FULL_RUN_DONE; sleep 2; sync; reboot -f"
+success_regex = ["(?m)^FULL_RUN_DONE\\s*$"]
+fail_regex = ["panicked at", "(?i)error while loading"]
+timeout = 300

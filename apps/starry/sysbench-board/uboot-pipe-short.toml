@@ -1,0 +1,11 @@
+# Minimal pipe ping-pong microbench (per-message cost, isolates the hackbench
+# primitive). Driven by sdboot-run.py. Runs the static /home/orangepi/ppong on
+# StarryOS; compare usec/roundtrip vs the Linux baseline (-P 12.5, -T 16.0).
+serial = "/dev/cu.usbserial-AQ03MLX2"
+baud_rate = "1500000"
+dtb_file = "os/StarryOS/configs/board/orangepi-5-plus.dtb"
+shell_prefix = "root@starry:/root #"
+shell_init_cmd = "echo PPONG_BEGIN; /home/orangepi/ppong -P 100000; /home/orangepi/ppong -T 100000; echo FULL_RUN_DONE; sleep 2; sync; reboot -f"
+success_regex = ["(?m)^FULL_RUN_DONE\\s*$"]
+fail_regex = ["panicked at", "(?i)not found", "(?i)error while loading"]
+timeout = 300
