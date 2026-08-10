@@ -165,7 +165,9 @@ fn thp_map_promoted_anon(
         Ok(()) => Ok(true),
         Err(err) => {
             // Roll back any sub-area already mapped so the mmap fails atomically.
-            let _ = aspace.unmap(start, length);
+            if let Err(e) = aspace.unmap(start, length) {
+                warn!("THP promote rollback unmap failed: {e:?}");
+            }
             Err(err)
         }
     }
@@ -536,7 +538,8 @@ pub fn sys_mmap(
                         }
                         match backend.clone() {
                             FileBackend::Cached(cache) => {
-                                // TODO(mivik): file mmap page size
+                                // File-backed mappings are always 4 KiB pages;
+                                // THP promotion applies to anonymous backends only.
                                 Backend::new_file(
                                     start,
                                     cache,

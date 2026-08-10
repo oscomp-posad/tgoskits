@@ -628,12 +628,18 @@ impl AddrSpace {
         false
     }
 
-    /// THP: split every `Size2M` anonymous area that operation `[start, end)`
-    /// only *partially* covers into 4 KiB PTEs, so a following sub-2 MiB
-    /// `unmap`/`protect`/`discard` on it is well-formed. Areas fully contained
-    /// in `[start, end)` are left as 2 MiB blocks (whole-block ops stay valid).
+    /// THP: collect the start address of every `Size2M` anonymous area that
+    /// overlaps `[start, end)`. When `partial_only` is set, only areas an op
+    /// boundary strictly bisects (partial coverage) are returned; otherwise every
+    /// overlapping huge area is returned. Read-only pre-pass for the split helpers
+    /// below, which then call `split_huge_area` on each collected start.
     #[cfg(feature = "thp")]
-    fn split_huge_for_partial_op(&mut self, start: VirtAddr, end: VirtAddr) -> AxResult {
+    fn collect_huge_area_starts(
+        &self,
+        start: VirtAddr,
+        end: VirtAddr,
+        partial_only: bool,
+    ) -> alloc::vec::Vec<VirtAddr> {
         let mut to_split = alloc::vec::Vec::new();
         for area in self.areas.iter() {
             if area.start() >= end {
@@ -647,11 +653,21 @@ impl AddrSpace {
                 Backend::Cow(c) if c.is_anonymous() && c.page_size() == PageSize::Size2M
             );
             // Partial coverage: an op boundary lies strictly inside the area.
-            if is_huge && (area.start() < start || end < area.end()) {
+            let partial = area.start() < start || end < area.end();
+            if is_huge && (!partial_only || partial) {
                 to_split.push(area.start());
             }
         }
-        for area_start in to_split {
+        to_split
+    }
+
+    /// THP: split every `Size2M` anonymous area that operation `[start, end)`
+    /// only *partially* covers into 4 KiB PTEs, so a following sub-2 MiB
+    /// `unmap`/`protect`/`discard` on it is well-formed. Areas fully contained
+    /// in `[start, end)` are left as 2 MiB blocks (whole-block ops stay valid).
+    #[cfg(feature = "thp")]
+    fn split_huge_for_partial_op(&mut self, start: VirtAddr, end: VirtAddr) -> AxResult {
+        for area_start in self.collect_huge_area_starts(start, end, true) {
             self.split_huge_area(area_start)?;
         }
         Ok(())
@@ -665,22 +681,7 @@ impl AddrSpace {
     /// promotes at mmap time and never re-promotes, splitting is sufficient.
     #[cfg(feature = "thp")]
     fn split_huge_range(&mut self, start: VirtAddr, end: VirtAddr) -> AxResult {
-        let mut to_split = alloc::vec::Vec::new();
-        for area in self.areas.iter() {
-            if area.start() >= end {
-                break;
-            }
-            if area.end() <= start {
-                continue;
-            }
-            if matches!(
-                area.backend(),
-                Backend::Cow(c) if c.is_anonymous() && c.page_size() == PageSize::Size2M
-            ) {
-                to_split.push(area.start());
-            }
-        }
-        for area_start in to_split {
+        for area_start in self.collect_huge_area_starts(start, end, false) {
             self.split_huge_area(area_start)?;
         }
         Ok(())

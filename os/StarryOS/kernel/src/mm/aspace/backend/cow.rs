@@ -612,7 +612,7 @@ impl CowBackend {
                 // amplification for sparse post-fork writes is the accepted THP
                 // tradeoff). Under fragmentation `alloc_new_frame` returns
                 // NoMemory, which the fault handler turns into a 4 KiB split +
-                // retry (see `split_huge_block_2m`).
+                // retry (see `split_huge_area`).
                 let new_frame = self.alloc_new_frame(false)?;
                 unsafe {
                     core::ptr::copy_nonoverlapping(
