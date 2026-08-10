@@ -70,8 +70,8 @@ static RUN_QUEUE_ONLINE: core::sync::atomic::AtomicUsize = core::sync::atomic::A
 // Per-CPU occupancy is tracked as the `occ` field on each [`AxRunQueue`] (read
 // cross-CPU via `get_run_queue(cpu).occ()`, mirroring how `nr_running` is read).
 // See the field's doc comment for the rationale. A free helper lets the free
-// functions `migrate_entry` / `clear_prev_task_on_cpu` bump a target CPU's counter
-// without holding a run-queue reference.
+// function `clear_prev_task_on_cpu` bump a target CPU's counter without holding a
+// run-queue reference.
 #[cfg(all(feature = "smp", feature = "sched-loadbalance"))]
 #[inline]
 fn occ_inc_cpu(cpu: usize) {
@@ -568,6 +568,9 @@ mod rr_tests {
 /// ## TODO
 ///
 /// 1. Implement better load balancing across CPUs for more efficient task distribution.
+///    A basic runtime balancer now exists behind the opt-in `sched-loadbalance-pull`
+///    (idle-pull) and `sched-loadbalance-push` (periodic shed) features; the default
+///    build is still placement-only.
 /// 2. Use a more generic load balancing algorithm that can be customized or replaced.
 #[inline]
 pub(crate) fn select_run_queue<G: BaseGuard>(task: &AxTaskRef) -> AxRunQueueRef<'static, G> {
@@ -587,12 +590,12 @@ pub(crate) fn select_run_queue<G: BaseGuard>(task: &AxTaskRef) -> AxRunQueueRef<
         // New tasks (spawn / clone) get round-robin placement across the CPUs
         // their affinity allows, so a burst of threads spreads over the machine
         // instead of piling onto the core that ran the spawning syscall. A fresh
-        // task has no warm cache to preserve, and with no load balancer to
-        // redistribute later (see the TODO above), initial placement is the only
-        // spreading we get — pinning every clone to the current CPU left all of a
-        // process's threads on the boot core (flat multi-core scaling). Wakeups
-        // still prefer the waking/last CPU for cache warmth; see
-        // `select_wake_run_queue`.
+        // task has no warm cache to preserve, and in the default placement-only
+        // build (no `sched-loadbalance-pull`/`-push` feature) there is no runtime
+        // redistribution, so initial placement is the only spreading we get —
+        // pinning every clone to the current CPU left all of a process's threads on
+        // the boot core (flat multi-core scaling). Wakeups still prefer the
+        // waking/last CPU for cache warmth; see `select_wake_run_queue`.
         //
         // With `sched-loadbalance`, placement is capacity-aware: a new task is
         // steered to the least-loaded eligible core, preferring a big (A76) core
@@ -1286,10 +1289,9 @@ impl AxRunQueue {
     fn nr_dec(&self) {}
 
     /// Lock-free runnable count (heuristic; transiently stale but never
-    /// wrong-signed). Consumed by the load balancer (later tasks).
-    #[cfg(all(feature = "smp", feature = "sched-loadbalance"))]
+    /// wrong-signed). Consumed by the idle-poll path (`current_cpu_has_ready`).
+    #[cfg(all(feature = "smp", feature = "sched-loadbalance", feature = "idle-poll"))]
     #[inline]
-    #[allow(dead_code)]
     fn load(&self) -> usize {
         self.nr_running.load(core::sync::atomic::Ordering::Relaxed)
     }
@@ -1328,6 +1330,9 @@ impl AxRunQueue {
                 core::sync::atomic::Ordering::Relaxed,
                 |v| Some(v.saturating_sub(1)),
             )
+            // The closure always returns `Some`, so `fetch_update` never returns
+            // `Err`; the `unwrap_or(0)` fallback is unreachable (the `0` is never
+            // observed and would not spuriously satisfy the assert below).
             .unwrap_or(0);
         debug_assert!(prev > 0, "AxRunQueue::occ underflow on CPU {}", self.cpu_id);
     }
@@ -1469,7 +1474,9 @@ impl AxRunQueue {
                 // We won: the reclaimed reference is dropped here; fall through
                 // and enqueue our own `task` (its context is now saved).
             }
-            // TODO: priority
+            // TODO: honor task priority on re-insertion (tasks are currently FIFO
+            // within a run queue, so a higher-priority wakeup does not preempt or
+            // jump ahead of lower-priority Ready tasks).
             #[cfg(feature = "smp")]
             task.set_cpu_id(self.cpu_id as _);
             self.sched_put_prev(task, preempt);
@@ -1529,7 +1536,7 @@ impl AxRunQueue {
             #[cfg(feature = "smp")]
             crate::wakeprof::note_pick(this_cpu_id());
         }
-        // Occupancy ([`RQ_OCC`]) is intentionally NOT touched here: picking a task to
+        // Occupancy ([`AxRunQueue::occ`]) is intentionally NOT touched here: picking a task to
         // run (ready -> running) does not change how many tasks this CPU owns. The
         // counter moves only when a task enters (spawn/wake/migrate-in) or leaves
         // (block/exit/migrate-out) the CPU's active set.
@@ -1850,6 +1857,9 @@ pub(crate) fn idle_pull_once() -> bool {
 #[cfg(all(feature = "smp", feature = "sched-loadbalance-push"))]
 impl AxRunQueue {
     fn try_push_balance(&mut self) {
+        // Re-evaluate shedding every 16 ticks: at the ~100 Hz scheduler tick this is
+        // ~160 ms, coarse enough to keep the tick-path cost negligible yet responsive
+        // enough to correct a standing imbalance idle-pull cannot see.
         const PUSH_BALANCE_INTERVAL: usize = 16;
         self.balance_counter = self.balance_counter.wrapping_add(1);
         if !self.balance_counter.is_multiple_of(PUSH_BALANCE_INTERVAL) {
@@ -1878,8 +1888,11 @@ impl AxRunQueue {
         let Some((dest, dest_eff)) = best else {
             return;
         };
-        // hysteresis: only push if clearly busier, to avoid thrashing
-        if effective_load(this, local_occ) < dest_eff + 2 {
+        // hysteresis: only push if clearly busier, to avoid thrashing. The margin is
+        // in effective-load units (raw load * 1024 / capacity, see `effective_load`);
+        // 2 is the "clearly busier than the destination" threshold.
+        const PUSH_HYSTERESIS_EFF: usize = 2;
+        if effective_load(this, local_occ) < dest_eff + PUSH_HYSTERESIS_EFF {
             return;
         }
         let now = ax_hal::time::monotonic_time_nanos();
@@ -1918,9 +1931,13 @@ pub(crate) fn init() {
     // The idle task will run when there is no other runnable task.
     #[cfg(feature = "lockdep")]
     let idle_task_stack_size = crate::default_task_stack_size();
-    // TODO: Consider unifying the non-lockdep idle stack size with the task stack configuration.
+    // TODO: Consider unifying the non-lockdep idle stack size with the task stack
+    // configuration; `DEFAULT_IDLE_STACK_SIZE` is a fixed fallback until then.
     #[cfg(not(feature = "lockdep"))]
-    let idle_task_stack_size = 16384;
+    let idle_task_stack_size = {
+        const DEFAULT_IDLE_STACK_SIZE: usize = 16384; // 16 KiB
+        DEFAULT_IDLE_STACK_SIZE
+    };
     let idle_task = TaskInner::new(|| crate::run_idle(), "idle".into(), idle_task_stack_size);
     // idle task should be pinned to the current CPU.
     idle_task.set_cpumask(AxCpuMask::one_shot(cpu_id));

@@ -649,7 +649,7 @@ pub fn run_idle() -> ! {
             not(feature = "host-test")
         ))]
         {
-            // ~200 µs poll window: well under the ~1 ms WFI-exit latency, so active
+            // ~50 µs poll window: well under the ~1 ms WFI-exit latency, so active
             // cross-core wakes are caught by the spin; genuinely-idle CPUs still halt.
             const IDLE_POLL_NANOS: u64 = 50_000;
             let deadline = ax_hal::time::monotonic_time_nanos() + IDLE_POLL_NANOS;
