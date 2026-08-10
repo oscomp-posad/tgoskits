@@ -64,7 +64,8 @@ pub fn read_kernel_page_table() -> PhysAddr {
 /// Reads the current page table root register for user space (`TTBR0_EL1`).
 ///
 /// When the "arm-el2" feature is enabled, for user-mode programs,
-/// virtualization is completely transparent to them, so there is no need to modify
+/// virtualization is completely transparent to them, so there is no need to
+/// modify `TTBR0_EL1` for guest user mode.
 ///
 /// Returns the physical address of the page table root.
 #[inline]
@@ -100,9 +101,10 @@ pub unsafe fn write_kernel_page_table(root_paddr: PhysAddr) {
 }
 
 /// Writes the register to update the current page table root for user space
-/// (`TTBR1_EL0`).
+/// (`TTBR0_EL1`).
 /// When the "arm-el2" feature is enabled, for user-mode programs,
-/// virtualization is completely transparent to them, so there is no need to modify
+/// virtualization is completely transparent to them, so there is no need to
+/// modify `TTBR0_EL1` for guest user mode.
 ///
 /// Note that the TLB is **NOT** flushed after this operation.
 ///

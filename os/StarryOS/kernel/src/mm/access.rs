@@ -55,8 +55,9 @@ pub fn access_user_memory<R>(f: impl FnOnce() -> R) -> R {
 const FASTPATH_MAX_PAGES: usize = 16;
 
 /// Lock-free check that every page of `[start, start+len)` is already present
-/// with the requested EL0 permission, using a hardware page-table probe and no
-/// address-space lock (the Linux `access_ok` model).
+/// with the requested EL0 permission, using a lock-free hardware page-permission
+/// probe (`AT S1E0R`/`S1E0W`, which resolves the address against the current
+/// stage-1 tables with EL0 access rights) and no address-space lock.
 ///
 /// Returns `true` only when the whole range is fast-path eligible and every page
 /// is present+permitted, in which case the caller may skip the aspace
@@ -90,6 +91,9 @@ fn user_range_fast_ok(start: VirtAddr, len: usize, access_flags: MappingFlags) -
     };
     // `end >= start` and both are rounded the same way, so `page_end >= page_start`.
     let pages = (page_end - page_start) / PAGE_SIZE_4K;
+    // `pages == 0` is unreachable here: the `len == 0` early return plus
+    // `page_end > page_start` guarantee `pages >= 1`. It is kept as a defensive
+    // guard so the range cap still holds if either invariant is later removed.
     if pages == 0 || pages > FASTPATH_MAX_PAGES {
         return false;
     }
@@ -401,37 +405,25 @@ pub fn check_access(start: usize, len: usize) -> VmResult {
     }
 }
 
-fn ensure_thread_context(op: &str, start: usize, len: usize) -> VmResult {
-    let curr = current();
-    if curr.try_as_thread().is_some() {
-        Ok(())
-    } else {
-        warn!(
-            "reject user memory {op} outside thread context: task={}, start={start:#x}, len={len}",
-            curr.id_name()
-        );
-        Err(VmError::AccessDenied)
-    }
-}
-
 fn prepare_user_memory(op: &str, start: usize, len: usize, access_flags: MappingFlags) -> VmResult {
     check_access(start, len)?;
     if len == 0 {
         return Ok(());
     }
-    ensure_thread_context(op, start, len)?;
-
-    let start = VirtAddr::from(start);
-    let end = start + len;
-    let page_start = start.align_down_4k();
-    let page_end = end.align_up_4k();
-
     let curr = current();
-    let thr = curr.try_as_thread().ok_or(VmError::AccessDenied)?;
+    let Some(thr) = curr.try_as_thread() else {
+        warn!(
+            "reject user memory {op} outside thread context: task={}, start={start:#x}, len={len}",
+            curr.id_name()
+        );
+        return Err(VmError::AccessDenied);
+    };
     let aspace_arc = thr.proc_data.aspace();
     if unsafe { aspace_arc.raw() }.is_owned_by_current() {
         return Err(VmError::AccessDenied);
     }
+
+    let start = VirtAddr::from(start);
 
     // Lock-free fast path: if every page is already present with the requested
     // permission, the copy will not fault, so skip the aspace lock and
@@ -441,6 +433,11 @@ fn prepare_user_memory(op: &str, start: usize, len: usize, access_flags: Mapping
     if user_range_fast_ok(start, len, access_flags) {
         return Ok(());
     }
+
+    // Slow path only: compute the page-aligned bounds `populate_area` needs.
+    let end = start + len;
+    let page_start = start.align_down_4k();
+    let page_end = end.align_up_4k();
 
     let mut aspace = aspace_arc.lock();
     if !aspace.can_access_range(start, len, access_flags) {
