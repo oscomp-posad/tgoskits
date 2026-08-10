@@ -207,6 +207,13 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64<M, PTE, H
         }
     }
 
+    /// Whether every entry of the table at `table_paddr` is unused (all leaves
+    /// unmapped). Used to detect an intermediate table left empty by a prior
+    /// huge-page split so a later huge `map` can reclaim it.
+    fn table_all_unused(&self, table_paddr: PhysAddr) -> bool {
+        self.table_of(table_paddr).iter().all(|e| e.is_unused())
+    }
+
     fn next_table_mut_or_create<'a>(&mut self, entry: &mut PTE) -> PagingResult<&'a mut [PTE]> {
         if entry.is_unused() {
             let paddr = Self::alloc_table()?;
@@ -432,16 +439,55 @@ impl<'a, M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64Cursor
     ) -> PagingResult {
         // `vaddr` does not need to be page-aligned here; `get_entry_mut_or_create`
         // internally maps `vaddr` to its corresponding page table entry (PTE).
-        let entry = self.inner.get_entry_mut_or_create(vaddr, page_size)?;
-        if !entry.is_unused() {
+        {
+            let entry = self.inner.get_entry_mut_or_create(vaddr, page_size)?;
+            if !entry.is_unused() {
+                // Occupied. Installing a huge page over a leftover *intermediate
+                // table* (a prior split whose leaves are now all unmapped) is the
+                // one recoverable case: reclaim the empty table below. A live
+                // mapping, or a table that still holds finer mappings, is a real
+                // conflict.
+                if !(page_size.is_huge() && !entry.is_huge() && entry.is_present()) {
+                    return Err(PagingError::AlreadyMapped);
+                }
+            } else {
+                *entry =
+                    GenericPTE::new_page(target.align_down(page_size), flags, page_size.is_huge());
+                // Fresh not-present → present (the `is_unused` check guarantees it).
+                // Architectures that never cache not-present translations need no
+                // TLB maintenance here; skipping it removes a broadcast TLBI per
+                // faulted page. See `PagingMetaData::NEED_FLUSH_ON_MAP`.
+                // `remap`/`protect`/`unmap` touch *valid* entries and still flush.
+                if M::NEED_FLUSH_ON_MAP {
+                    self.push(vaddr);
+                }
+                return Ok(());
+            }
+        }
+
+        // Huge map over a leftover intermediate table. Reclaim it iff it is empty
+        // (an emptied split table); otherwise it holds live finer mappings and the
+        // huge block cannot replace them.
+        //
+        // Assumes the intermediate table is exclusively owned by this page table
+        // (true for a table produced by a huge-page split, and for private user
+        // mappings). `copy_from` shares subtrees only at the root level and only
+        // fully-populated ones, which are never `table_all_unused`, so a borrowed
+        // subtree is never freed here.
+        let table_paddr = self.inner.get_entry_mut_or_create(vaddr, page_size)?.paddr();
+        if !self.inner.table_all_unused(table_paddr) {
             return Err(PagingError::AlreadyMapped);
         }
+        // Break-before-make: clear the table descriptor and complete the TLBI
+        // (invalidating any cached walk of this table) before freeing the table
+        // frame, then install the huge block into the now-unused slot.
+        self.inner.get_entry_mut_or_create(vaddr, page_size)?.clear();
+        M::flush_tlb(Some(vaddr));
+        H::dealloc_frame(table_paddr);
+
+        let entry = self.inner.get_entry_mut_or_create(vaddr, page_size)?;
+        debug_assert!(entry.is_unused(), "reclaimed slot must be free");
         *entry = GenericPTE::new_page(target.align_down(page_size), flags, page_size.is_huge());
-        // This is a fresh not-present → present transition (the `is_unused` check
-        // above guarantees it). Architectures that never cache not-present
-        // translations need no TLB maintenance here; skipping it removes a
-        // broadcast TLBI per faulted page. See `PagingMetaData::NEED_FLUSH_ON_MAP`.
-        // `remap`/`protect`/`unmap` touch *valid* entries and still flush.
         if M::NEED_FLUSH_ON_MAP {
             self.push(vaddr);
         }
