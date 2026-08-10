@@ -27,14 +27,23 @@ impl PagingMetaData for A64PagingMetaData {
 
     #[inline]
     fn flush_tlb(vaddr: Option<VirtAddr>) {
+        // The leading `dsb ishst` orders the caller's page-table store (the PTE
+        // being invalidated/updated) before the TLBI, so a walker on any core
+        // cannot re-cache the stale entry after the invalidation; the trailing
+        // `dsb sy; isb` complete the invalidation and synchronize this core. This
+        // is the barrier sequence break-before-make relies on (matches Linux
+        // `dsb(ishst); tlbi …; dsb(ish); isb`).
         unsafe {
             if let Some(vaddr) = vaddr {
                 // TLB Invalidate by VA, All ASID, EL1, Inner Shareable
                 const VA_MASK: usize = (1 << 44) - 1; // VA[55:12] => bits[43:0]
-                asm!("tlbi vaae1is, {}; dsb sy; isb", in(reg) ((vaddr.as_usize() >> 12) & VA_MASK))
+                asm!(
+                    "dsb ishst; tlbi vaae1is, {}; dsb sy; isb",
+                    in(reg) ((vaddr.as_usize() >> 12) & VA_MASK)
+                )
             } else {
                 // TLB Invalidate by VMID, All at stage 1, EL1
-                asm!("tlbi vmalle1; dsb sy; isb")
+                asm!("dsb ishst; tlbi vmalle1; dsb sy; isb")
             }
         }
     }
