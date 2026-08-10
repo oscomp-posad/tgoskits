@@ -1,0 +1,12 @@
+# Board validation of the final-review fixes (tickacct descheduled-billing floor
+# + atomic THP MADV_NOHUGEPAGE split with break-before-make). Driven by
+# scripts/board/sdboot-run.py against the placement ship config.
+[net]
+serial = "/dev/cu.usbserial-AQ03MLX2"
+baud_rate = "1500000"
+dtb_file = "os/StarryOS/configs/board/orangepi-5-plus.dtb"
+shell_prefix = "root@starry:/root #"
+shell_init_cmd = "echo VALIDATE_BEGIN; /home/orangepi/rusage_acct 2; /home/orangepi/tickacct_desched; /home/orangepi/thp_nohugepage; echo FULL_RUN_DONE; sleep 1; sync; reboot -f"
+success_regex = ["(?m)^FULL_RUN_DONE\\s*$"]
+fail_regex = ["panicked at", "Unhandled( Synchronous)? [Ee]xception", "Kernel panic", "Synchronous Abort", "(?i)data abort"]
+timeout = 300
