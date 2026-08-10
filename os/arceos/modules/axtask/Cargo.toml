@@ -61,11 +61,13 @@ sched-rr = ["multitask", "preempt"]
 sched-loadbalance = ["smp"]
 
 # wake_affine: on a wakeup, co-locate the wakee on the waker's core when it is
-# lightly loaded (Linux `wake_affine`). OPT-IN and OFF by default: board-measured to
-# REGRESS hackbench (a fan-out, not 1:1 pairs — co-location over-consolidates and
-# serializes; thread-mode ~1.9x worse at g=5, worsening with concurrency). The
-# default wake path keeps the run#14-validated occ-spread. Enable only behind a
-# board A/B on a workload with genuine 1:1 producer→consumer pairs.
+# lightly loaded (Linux `wake_affine`). OPT-IN, OFF by default. NOTE: an earlier
+# board A/B that appeared to REGRESS hackbench was later found to be CONTAMINATED
+# by the COW-refcount fork EFAULT bug (FrameRefCnt u8->u32, since fixed). A clean
+# RK3588 A/B (2026-08-06, only this flag differing) shows wake_affine ON is a net
+# win: schbench m1t4 wakeup p50 1023us->9us (near Linux 6us), hackbench -P g2/g5
+# better, with a small -P g10 regression. Kept OFF as the conservative default
+# pending promotion; see `select_wake_run_queue` + SCHEDBENCH_BOARD_RESULTS_2026-08-06.md.
 sched-loadbalance-wake-affine = ["sched-loadbalance"]
 
 # Relax the wake_affine gate from `occ(waker) <= 1` to a load compare against the
