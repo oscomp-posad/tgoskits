@@ -132,26 +132,38 @@ impl PosixTimerTable {
             interval_ns: 0,
             deadline_ns: 0,
         };
-        if self.timers.lock().insert(id, timer).is_none() {
-            self.count.fetch_add(1, Ordering::Relaxed);
-        }
+        let mut timers = self.timers.lock();
+        timers.insert(id, timer);
+        self.publish_count(&timers);
         Ok(id)
     }
 
     /// Delete a timer. Returns true if it existed.
     pub fn delete(&self, id: i32) -> bool {
-        let removed = self.timers.lock().remove(&id).is_some();
-        if removed {
-            self.count.fetch_sub(1, Ordering::Relaxed);
-        }
+        let mut timers = self.timers.lock();
+        let removed = timers.remove(&id).is_some();
+        self.publish_count(&timers);
         removed
     }
 
     /// Clear all timers. Used on execve.
     pub fn clear(&self) {
         let mut timers = self.timers.lock();
-        self.count.store(0, Ordering::Relaxed);
         timers.clear();
+        self.publish_count(&timers);
+    }
+
+    /// Republish the lock-free `count` hint as the exact map length.
+    ///
+    /// Called under the `timers` lock by every mutator (create/delete/clear) so
+    /// `count` can never drift or underflow: previously the fetch_add/fetch_sub
+    /// ran *outside* the lock, so an `execve` clear racing a concurrent
+    /// create/delete could over-count or wrap to `usize::MAX`. Deriving it from
+    /// `len()` under the lock makes it exact. Relaxed is sufficient — readers use
+    /// it only as a "might have timers" hint and the alarm task fires every armed
+    /// timer at its deadline regardless of this value.
+    fn publish_count(&self, timers: &BTreeMap<i32, PosixTimer>) {
+        self.count.store(timers.len(), Ordering::Relaxed);
     }
 
     /// Lock-free hint: could this process have any POSIX timer to poll?
