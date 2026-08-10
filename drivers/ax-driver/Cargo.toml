@@ -136,8 +136,12 @@ rockchip-soc = [
     "dep:rdif-reset",
     "dep:rockchip-soc",
 ]
-# RK3588 fixed-OPP-at-boot CPU DVFS (voltage-free rung): raises the CPU cluster
-# clocks via the SCMI seam at probe time. Board-only policy; keep it opt-in.
+# RK3588 big.LITTLE CPU DVFS: aligns each cluster's SCMI clock (via BL31) with its
+# PMIC rail voltage at boot, then hands off to an ondemand-style governor that
+# scales OPP to load. Board-only, opt-in. Assumes a cool board — there is NO
+# thermal governor (mitigated by capping A76 at the all-core-safe 2126 MHz @ 925 mV
+# rung); the OPP ladders are calibrated from one board; the A55 rail is driven
+# open-loop (RK806 voltage read-back is unreliable). See cpufreq.rs for details.
 rk3588-cpufreq = [
     "rockchip-soc",
     "dep:arm-scmi-rs",

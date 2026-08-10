@@ -285,8 +285,8 @@ impl Rk3xI2c {
             // back EN|START; CLKDIV should hold the (u-boot) divisor. All-zero
             // or stuck values point at a still-gated clock or held reset.
             warn!(
-                "pmic_i2c: START did not complete: CON={:#010x} IPD={:#010x} \
-                 CLKDIV={:#010x} IEN={:#010x}",
+                "pmic_i2c: START did not complete: CON={:#010x} IPD={:#010x} CLKDIV={:#010x} \
+                 IEN={:#010x}",
                 self.r(REG_CON),
                 self.r(REG_IPD),
                 self.r(REG_CLKDIV),
@@ -409,8 +409,8 @@ fn ungate_i2c0_clocks() {
         Ok(ptr) => ptr,
         Err(err) => {
             warn!(
-                "pmic_i2c: iomap PMU CRU {RK3588_PMU_CRU_BASE:#x} failed: {err:?}; \
-                 i2c0 clock left as-is"
+                "pmic_i2c: iomap PMU CRU {RK3588_PMU_CRU_BASE:#x} failed: {err:?}; i2c0 clock \
+                 left as-is"
             );
             return;
         }
@@ -426,8 +426,8 @@ fn ungate_i2c0_clocks() {
     // Read back the (unmasked) gate bits for board diagnostics: 0 == enabled.
     let after = unsafe { gate.read_volatile() } & I2C0_GATE_BITS;
     info!(
-        "pmic_i2c: ungated i2c0 clocks (PMU_CLKGATE_CON(2)@{:#x} <- {val:#010x}); \
-         gate bits now {after:#x} (0 == enabled)",
+        "pmic_i2c: ungated i2c0 clocks (PMU_CLKGATE_CON(2)@{:#x} <- {val:#010x}); gate bits now \
+         {after:#x} (0 == enabled)",
         RK3588_PMU_CRU_BASE + PMU_CLKGATE_CON2
     );
 }
@@ -443,8 +443,8 @@ fn deassert_i2c0_reset() {
         Ok(ptr) => ptr,
         Err(err) => {
             warn!(
-                "pmic_i2c: iomap PMU CRU {RK3588_PMU_CRU_BASE:#x} failed: {err:?}; \
-                 i2c0 reset left as-is"
+                "pmic_i2c: iomap PMU CRU {RK3588_PMU_CRU_BASE:#x} failed: {err:?}; i2c0 reset \
+                 left as-is"
             );
             return;
         }
@@ -460,8 +460,8 @@ fn deassert_i2c0_reset() {
     // Read back the (unmasked) reset bits for board diagnostics: 0 == released.
     let after = unsafe { softrst.read_volatile() } & I2C0_RESET_BITS;
     info!(
-        "pmic_i2c: de-asserted i2c0 reset (PMU_SOFTRST_CON(2)@{:#x} <- {val:#010x}); \
-         reset bits now {after:#x} (0 == released)",
+        "pmic_i2c: de-asserted i2c0 reset (PMU_SOFTRST_CON(2)@{:#x} <- {val:#010x}); reset bits \
+         now {after:#x} (0 == released)",
         RK3588_PMU_CRU_BASE + PMU_SOFTRST_CON2
     );
 }
@@ -510,8 +510,8 @@ fn set_i2c0_pinmux() {
     };
     match pinctrl.apply_fdt_default_state(&fdt, node.as_node()) {
         Ok(()) => info!(
-            "pmic_i2c: applied i2c0 pinctrl-0 (scl GPIO0_D1 / sda GPIO0_D2 -> func3) \
-             via rockchip pinctrl"
+            "pmic_i2c: applied i2c0 pinctrl-0 (scl GPIO0_D1 / sda GPIO0_D2 -> func3) via rockchip \
+             pinctrl"
         ),
         Err(err) => warn!("pmic_i2c: failed to apply i2c0 pinctrl-0: {err:?}"),
     }
@@ -543,7 +543,13 @@ pub fn init() -> bool {
     };
     // SAFETY: `virt` is a fresh device mapping of `RK3588_I2C0_BASE` of
     // `RK3588_I2C0_SIZE` bytes returned by `iomap`.
-    let mmio = unsafe { MmioRaw::new(MmioAddr::from(RK3588_I2C0_BASE as u64), virt, RK3588_I2C0_SIZE) };
+    let mmio = unsafe {
+        MmioRaw::new(
+            MmioAddr::from(RK3588_I2C0_BASE as u64),
+            virt,
+            RK3588_I2C0_SIZE,
+        )
+    };
     let i2c = Rk3xI2c { mmio };
     i2c.init_controller();
     *guard = Some(i2c);
@@ -561,17 +567,18 @@ pub fn get_uv(chip: u8) -> Option<u32> {
 }
 
 /// Set a rail directly to `target_uv` (single write), refusing anything outside
-/// the Phase-2 envelope `[675_000, 800_000]` µV or that is not an exact 6.25 mV
-/// step, and verifying the read-back. Returns `false` on any rejection or
-/// mismatch (leaving the rail unchanged/at its last confirmed value).
+/// the safe envelope `[VDD_FLOOR_UV, VDD_CEIL_UV]` (675_000..=1_000_000 µV) or
+/// that is not an exact 6.25 mV step, and verifying the read-back. Returns
+/// `false` on any rejection or mismatch (leaving the rail unchanged/at its last
+/// confirmed value).
 ///
 /// This is the direct setter. Live-core lowering should use
 /// [`set_uv_stepped`], which ramps down in small increments.
 pub fn set_uv(chip: u8, target_uv: u32) -> bool {
     if !in_envelope(target_uv) {
         warn!(
-            "pmic_i2c: refusing chip {chip:#x} set to {target_uv} uV \
-             (outside [{VDD_FLOOR_UV}, {VDD_CEIL_UV}])"
+            "pmic_i2c: refusing chip {chip:#x} set to {target_uv} uV (outside [{VDD_FLOOR_UV}, \
+             {VDD_CEIL_UV}])"
         );
         return false;
     }
@@ -600,8 +607,8 @@ pub fn set_uv(chip: u8, target_uv: u32) -> bool {
 pub fn set_uv_stepped(chip: u8, target_uv: u32) -> bool {
     if !in_envelope(target_uv) {
         warn!(
-            "pmic_i2c: refusing chip {chip:#x} step to {target_uv} uV \
-             (outside [{VDD_FLOOR_UV}, {VDD_CEIL_UV}])"
+            "pmic_i2c: refusing chip {chip:#x} step to {target_uv} uV (outside [{VDD_FLOOR_UV}, \
+             {VDD_CEIL_UV}])"
         );
         return false;
     }
@@ -690,13 +697,13 @@ mod tests {
     }
 
     #[test]
-    fn envelope_is_down_only_675_to_800() {
-        assert!(in_envelope(675_000));
+    fn envelope_is_675_to_1000() {
+        assert!(in_envelope(VDD_FLOOR_UV)); // 675 mV floor
         assert!(in_envelope(800_000));
         assert!(in_envelope(725_000));
-        assert!(!in_envelope(674_999)); // below OPP floor
-        assert!(!in_envelope(800_001)); // above boot voltage
-        assert!(!in_envelope(1_000_000));
+        assert!(in_envelope(VDD_CEIL_UV)); // 1.0 V ceiling (admits the A76 top OPPs)
+        assert!(!in_envelope(VDD_FLOOR_UV - 1)); // below OPP floor
+        assert!(!in_envelope(VDD_CEIL_UV + 1)); // above ceiling
     }
 
     #[test]
@@ -705,6 +712,9 @@ mod tests {
         assert_eq!(STEP_LSB, 4);
         assert_eq!((STEP_LSB as u32) * VSEL_STEP_UV, 25_000);
         // 800 -> 675 mV is 20 LSB = exactly 5 whole 4-LSB steps.
-        assert_eq!(uv_to_vsel(800_000).unwrap() - uv_to_vsel(675_000).unwrap(), 20);
+        assert_eq!(
+            uv_to_vsel(800_000).unwrap() - uv_to_vsel(675_000).unwrap(),
+            20
+        );
     }
 }

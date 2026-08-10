@@ -591,6 +591,12 @@ fn deassert_spi2_reset() -> bool {
 /// was fixed by applying the *full* pin config, not just the mux — the DTS
 /// pinconf flags (pull/drive/slew on `spi2m2_pins`/`spi2m2_cs0`) were u-boot's or
 /// default, not what the RK806 link needs, so CLK/MOSI/CS never cleanly reached
+/// Enables the SPI2/RK806 bring-up diagnostics: the GPIO0_B3 (MISO) force-input
+/// probe, the iomux dump, and the read-shape probe. These only observe/nudge the
+/// (still-broken) RK806 *read* path and are not needed for the A55 rail *write*;
+/// off in the shipping driver to avoid the boot-time SPI probing + serial spew.
+const SPI2_BRINGUP_DEBUG: bool = false;
+
 /// the chip. Rather than hand-decode the pinconf, we apply the node's `pinctrl-0`
 /// state through the in-tree pinctrl driver, which already encodes it. Pad-config
 /// change only (no PMIC access); best-effort — any failure is logged and the
@@ -634,14 +640,17 @@ fn set_spi2_pinmux() {
         Err(err) => warn!("pmic_spi: failed to apply spi2 pinctrl-0: {err:?}"),
     }
 
-    // MISO loopback probe (last untested register): force GPIO0_B3 (= SPI2_MISO) to
-    // INPUT direction. Linux leaves it input (GPIO0 DDR_L bit11 = 0); if StarryOS's
-    // boot left B3 as a GPIO *output*, the pad would drive instead of sample, so the
-    // controller reads its own TX shift register — exactly the observed rx==tx
-    // loopback. The func-1 mux normally overrides GPIO direction, so this is a
-    // long-shot, but it is the one register we have not yet forced. GPIO0 @ 0xfd8a0000,
+    // Bring-up diagnostic (off in the shipping driver — see `SPI2_BRINGUP_DEBUG`):
+    // MISO loopback probe, force GPIO0_B3 (= SPI2_MISO) to INPUT direction. Linux
+    // leaves it input (GPIO0 DDR_L bit11 = 0); if StarryOS's boot left B3 as a GPIO
+    // *output*, the pad would drive instead of sample, so the controller reads its
+    // own TX shift register — the observed rx==tx loopback. The func-1 mux normally
+    // overrides GPIO direction, so this is a long-shot (it did NOT fix reads), and
+    // the pinctrl-0 state above already programs the pad. GPIO0 @ 0xfd8a0000,
     // SWPORT_DR_L=0x00, SWPORT_DDR_L=0x08 (write-masked: hi16 = per-bit mask).
-    if let Ok(gpio0) = iomap(0xfd8a_0000, 0x100) {
+    if SPI2_BRINGUP_DEBUG
+        && let Ok(gpio0) = iomap(0xfd8a_0000, 0x100)
+    {
         let p = gpio0.as_ptr();
         // SAFETY: GPIO0 mapping covers 0x100; DDR_L is at 0x08, within the page.
         let ddr = unsafe { p.add(0x08).cast::<u32>().read_volatile() };
@@ -746,9 +755,11 @@ pub fn init() -> bool {
     // rockchip pinctrl driver — boot #7 showed a mux-only match isn't enough; the
     // pad config is what fixed i2c0. Must precede any transfer.
     set_spi2_pinmux();
-    // Boot #8: read confirmed MISO loopback. Dump the applied SPI2 mux so we can
-    // check B3(MISO) is really func1 (vs A6/MOSI which works).
-    dump_spi2_iomux();
+    // Bring-up diagnostic (gated off): dump the applied SPI2 mux to check
+    // B3(MISO) is really func1 (vs A6/MOSI which works).
+    if SPI2_BRINGUP_DEBUG {
+        dump_spi2_iomux();
+    }
     dev.configure();
     if !dev.is_alive() {
         warn!(
@@ -759,9 +770,11 @@ pub fn init() -> bool {
     }
     // Read-only reachability probe (chip-ID + raw DCDC2 frame).
     dev.log_diagnostics();
-    // Boot #8: the read now returns data but RX mirrors TX — distinguish MISO
-    // loopback from a value-position offset (read-only).
-    dev.probe_read_shape();
+    // Bring-up diagnostic (gated off): the read returns data but RX mirrors TX —
+    // distinguish MISO loopback from a value-position offset (read-only).
+    if SPI2_BRINGUP_DEBUG {
+        dev.probe_read_shape();
+    }
     info!("pmic_spi: RK806/SPI2 bound at {RK3588_SPI2_BASE:#x}");
     *guard = Some(dev);
     true
@@ -841,9 +854,13 @@ pub fn set_uv_stepped(target_uv: u32) -> bool {
     true
 }
 
-/// **Diagnostic** force-write of the A55 rail (DCDC2 `ON_VSEL`) — proves whether
-/// SPI *writes* physically reach the RK806 while reads are dead. Not part of the
-/// normal DVFS API; intended to be called once from a cpufreq test flag.
+/// Open-loop (no read-back) force-write of the A55 rail (DCDC2 `ON_VSEL`). This is
+/// the A55 voltage-set primitive for the boot rail alignment and the ondemand
+/// governor: the RK806 *read* path is a scope-wall (rx==tx loopback returning a
+/// bogus `0x00`), so unlike the read-back-verified [`set_uv`] this deliberately
+/// skips the read-current/down-only guard and writes the requested rail directly.
+/// Read-back verification is deferred pending the MISO fix; a bounded, OPP-matched
+/// write is safe without it (see the safety note below).
 ///
 /// Safety: hard-clamped to `[675_000, 950_000]` uV — the A55 (little cluster) OPP
 /// voltage range (675 mV @ 1008 MHz up to 950 mV @ 1800 MHz, all Linux-proven

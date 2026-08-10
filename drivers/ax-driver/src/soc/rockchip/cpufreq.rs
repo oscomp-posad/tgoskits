@@ -163,8 +163,8 @@ fn probe(_probe: ProbeFdt<'_>) -> Result<(), OnProbeError> {
 fn set_and_verify(phandle: Phandle, clock_id: u32, target: u64, ceiling: u64) -> bool {
     if target > ceiling {
         warn!(
-            "cpufreq: refusing to set clock id {clock_id} to {target} Hz (above boot-safe \
-             ceiling {ceiling} Hz)"
+            "cpufreq: refusing to set clock id {clock_id} to {target} Hz (above boot-safe ceiling \
+             {ceiling} Hz)"
         );
         return false;
     }
@@ -224,13 +224,18 @@ const APPLY_RAIL_VOLTAGE: bool = true;
 const A76_NOMINAL_UV: u32 = 675_000;
 const A55_NOMINAL_UV: u32 = 675_000;
 
-/// One-shot A55 MOSI/write diagnostic (user-authorized). The RK806 read path is
-/// dead (returns a bogus 0x00), so we cannot validate an A55 write by read-back.
-/// This force-writes DCDC2 to the bounded-safe A55 OPP nominal and relies on
-/// cpuprobe observing whether the A55 frequency drops — the only way to learn if
-/// MOSI/writes physically reach the RK806 when reads do not. The write is clamped
-/// to [675 mV, 800 mV] (the A55 boot-safe row) inside the PMIC module.
-const A55_FORCE_WRITE_TEST: bool = true;
+/// Apply the A55 rail voltage open-loop (no read-back verification).
+///
+/// The RK806 read path is a scope-wall (returns a bogus `0x00`), so an A55 write
+/// cannot be verified by read-back the way A76 (I2C) writes are. When `true` (the
+/// design default) the A55 rail is set with a single bounded write to its OPP
+/// nominal; the write is clamped to the A55 boot-safe envelope inside the PMIC
+/// module, and RK3588's voltage-coupled PVTPLL clock tracks the rail, so a
+/// bounded, OPP-matched voltage is always safe even without read-back. This is
+/// currently the ONLY path that aligns the A55 rail — the read-back-verified
+/// stepped descent below is skipped while reads are unreliable. Set `false` to
+/// leave the A55 rail at its boot voltage (A76 DVFS is unaffected).
+const A55_OPEN_LOOP_VSET: bool = true;
 
 /// Read (and, once validated, lower) the three CPU-cluster rails to their OPP
 /// nominal so the voltage-coupled clock lands on the exact requested frequency.
@@ -280,31 +285,29 @@ fn align_rail_voltages_to_opp() {
         let b1 = pmic_i2c::set_uv_stepped(pmic_i2c::RK8603_BIG1_ADDR, A76_NOMINAL_UV);
         info!("cpufreq: A76 rails -> {A76_NOMINAL_UV} uV (big0 ok={b0}, big1 ok={b1})");
     }
-    // A55 (spi2/RK806): only lower it if the current-voltage read is trustworthy.
+    // A55 (spi2/RK806): exactly ONE write path fires. Prefer the read-back-verified
+    // stepped descent, but only if the boot-voltage read is trustworthy —
     // `set_uv_stepped` reads the rail before stepping down, so we must never lower a
-    // rail we cannot read. The spi2/RK806 read path is not up yet (it returns a bogus
-    // 0x00 == 500 mV), so skip the A55 write until that bring-up completes rather than
-    // act on a false reading. A real A55 boot voltage is in [675 mV, 950 mV] per the
-    // RK806 DCDC2 range and the cluster0 OPP table.
+    // rail we cannot read. The spi2/RK806 read path returns a bogus 0x00 (== 500 mV)
+    // today, so that gate fails and we fall back to the bounded open-loop write (the
+    // only A55 lever until the read/MISO path is fixed). A real A55 boot voltage is
+    // in [675 mV, 950 mV] per the RK806 DCDC2 range and the cluster0 OPP table.
     match if a55_ok { pmic_spi::get_uv() } else { None } {
         Some(v) if (675_000..=950_000).contains(&v) => {
             let a55 = pmic_spi::set_uv_stepped(A55_NOMINAL_UV);
-            info!("cpufreq: A55 rail {v} -> {A55_NOMINAL_UV} uV (ok={a55})");
+            info!("cpufreq: A55 rail {v} -> {A55_NOMINAL_UV} uV (stepped, ok={a55})");
+        }
+        other if A55_OPEN_LOOP_VSET && a55_ok => {
+            let ok = pmic_spi::force_write_dcdc2(A55_NOMINAL_UV);
+            info!(
+                "cpufreq: A55 rail -> {A55_NOMINAL_UV} uV (open-loop, read {other:?} untrusted, \
+                 write xfer_ok={ok})"
+            );
         }
         other => warn!(
-            "cpufreq: A55 boot voltage not trustworthy ({other:?} uV); skipping A55 write \
-             until spi2/RK806 bring-up completes (A76 unaffected)"
+            "cpufreq: A55 boot voltage not trustworthy ({other:?} uV) and open-loop vset off; \
+             A55 left at boot voltage (A76 unaffected)"
         ),
-    }
-
-    // A55 MOSI/write diagnostic: force-write DCDC2 to the bounded-safe nominal and
-    // let cpuprobe reveal whether writes reach the RK806 even though reads don't.
-    if A55_FORCE_WRITE_TEST && a55_ok {
-        let ok = pmic_spi::force_write_dcdc2(A55_NOMINAL_UV);
-        info!(
-            "cpufreq: A55 MOSI/write test -> {A55_NOMINAL_UV} uV (write xfer_ok={ok}); \
-             watch A55 cpuprobe (req=0..3) for a freq drop if the write reached"
-        );
     }
 
     // Arm the dynamic governor only if both PMIC buses came up, so it never tries
@@ -370,23 +373,59 @@ struct Opp {
 /// brownout) but is NOT yet all-core validated and there is no thermal governor,
 /// so it is held UNREACHABLE by default — see `A76_CAP_TO_ALLCORE_SAFE`.
 const A76_OPPS: &[Opp] = &[
-    Opp { ring_khz: 408_000, uv: 675_000, mhz: 408 },
-    Opp { ring_khz: 816_000, uv: 675_000, mhz: 816 },
-    Opp { ring_khz: 1_200_000, uv: 675_000, mhz: 1189 },
-    Opp { ring_khz: 1_200_000, uv: 725_000, mhz: 1318 },
-    Opp { ring_khz: 1_200_000, uv: 800_000, mhz: 1491 },
-    Opp { ring_khz: 1_200_000, uv: 850_000, mhz: 1592 },
+    Opp {
+        ring_khz: 408_000,
+        uv: 675_000,
+        mhz: 408,
+    },
+    Opp {
+        ring_khz: 816_000,
+        uv: 675_000,
+        mhz: 816,
+    },
+    Opp {
+        ring_khz: 1_200_000,
+        uv: 675_000,
+        mhz: 1189,
+    },
+    Opp {
+        ring_khz: 1_200_000,
+        uv: 725_000,
+        mhz: 1318,
+    },
+    Opp {
+        ring_khz: 1_200_000,
+        uv: 800_000,
+        mhz: 1491,
+    },
+    Opp {
+        ring_khz: 1_200_000,
+        uv: 850_000,
+        mhz: 1592,
+    },
     // Ring-length lever step 1: ring 1416 @ 850 mV -> 1830 MHz (measured) — LOWER
     // power than the old 1725 @ 925 mV top (V^2f 1322 < 1476), a strict win.
-    Opp { ring_khz: 1_416_000, uv: 850_000, mhz: 1830 },
+    Opp {
+        ring_khz: 1_416_000,
+        uv: 850_000,
+        mhz: 1830,
+    },
     // Step 2: ring 1608 @ 925 mV -> 2126 MHz (measured, board-validated all-core).
     // Default governor ceiling — the highest all-core-safe rung.
-    Opp { ring_khz: 1_608_000, uv: 925_000, mhz: 2126 },
+    Opp {
+        ring_khz: 1_608_000,
+        uv: 925_000,
+        mhz: 2126,
+    },
     // Top: ring 1608 @ 1000 mV (PMIC ceiling) to match Linux's 2256 top. The
     // 1608-2400 band is all PVTPLL length 11, so freq here is set by voltage;
     // measured ~2262 per-core (run #1). Highest-power rung — held UNREACHABLE by
     // default until threads=1->8 is validated (see A76_CAP_TO_ALLCORE_SAFE).
-    Opp { ring_khz: 1_608_000, uv: 1_000_000, mhz: 2256 },
+    Opp {
+        ring_khz: 1_608_000,
+        uv: 1_000_000,
+        mhz: 2256,
+    },
 ];
 
 /// A55 (little) OPP ladder, low→high, same hybrid rationale: ring-scaled below the
@@ -401,17 +440,49 @@ const A76_OPPS: &[Opp] = &[
 /// threads=8 all-core validated, and shares the no-thermal-governor caveat; if a
 /// future run shows little-cluster brownout, cap it symmetrically to the 1695 rung.
 const A55_OPPS: &[Opp] = &[
-    Opp { ring_khz: 408_000, uv: 675_000, mhz: 408 },
-    Opp { ring_khz: 816_000, uv: 675_000, mhz: 816 },
-    Opp { ring_khz: 1_008_000, uv: 675_000, mhz: 1021 },
-    Opp { ring_khz: 1_008_000, uv: 762_500, mhz: 1212 },
-    Opp { ring_khz: 1_008_000, uv: 800_000, mhz: 1285 },
-    Opp { ring_khz: 1_008_000, uv: 850_000, mhz: 1372 },
+    Opp {
+        ring_khz: 408_000,
+        uv: 675_000,
+        mhz: 408,
+    },
+    Opp {
+        ring_khz: 816_000,
+        uv: 675_000,
+        mhz: 816,
+    },
+    Opp {
+        ring_khz: 1_008_000,
+        uv: 675_000,
+        mhz: 1021,
+    },
+    Opp {
+        ring_khz: 1_008_000,
+        uv: 762_500,
+        mhz: 1212,
+    },
+    Opp {
+        ring_khz: 1_008_000,
+        uv: 800_000,
+        mhz: 1285,
+    },
+    Opp {
+        ring_khz: 1_008_000,
+        uv: 850_000,
+        mhz: 1372,
+    },
     // Ring-length lever: ring 1416 @ 850 mV -> 1695 MHz (measured) — higher freq
     // AND lower power than the old 1523 @ 950 top (V^2f 1225 < 1374), a strict win.
-    Opp { ring_khz: 1_416_000, uv: 850_000, mhz: 1695 },
+    Opp {
+        ring_khz: 1_416_000,
+        uv: 850_000,
+        mhz: 1695,
+    },
     // Top: ring 1608 @ 950 mV -> 1881 MHz (measured, near Linux's A55 max 1800).
-    Opp { ring_khz: 1_608_000, uv: 950_000, mhz: 1881 },
+    Opp {
+        ring_khz: 1_608_000,
+        uv: 950_000,
+        mhz: 1881,
+    },
 ];
 
 /// All-core safety cap on the A76 governor ceiling (compile-gate, defaulted SAFE).
@@ -515,16 +586,39 @@ impl Cluster {
 /// the voltage-coupled clock never overshoots its rail:
 ///   - going UP:   raise voltage first, then the SCMI ring (clock follows up);
 ///   - going DOWN: lower the SCMI ring first, then voltage (clock follows down).
-fn apply_opp(cluster: Cluster, opp: Opp, going_up: bool) {
+///
+/// The governor uses a single-shot `set_voltage` here (not the boot path's
+/// `set_uv_stepped` ≤25 mV descent). That is safe *because of this ordering*: on
+/// a down-shift the SCMI ring is lowered first, so the PVTPLL-coupled clock has
+/// already tracked down before the rail moves — there is no window where a high
+/// clock runs on a not-yet-lowered rail, hence no undervolt transient to step
+/// around. The boot rail-alignment path steps because it lowers voltage WITHOUT a
+/// coupled ring change and must avoid a droop transient on the live boot core.
+/// Returns whether the pair was applied as intended (safe to record as the new
+/// OPP). A failed voltage *raise* returns `false` WITHOUT touching the clock, so
+/// the caller keeps the old OPP index and retries — raising the ring on a rail
+/// that did not move undervolts the core at speed (timing violation → hang /
+/// silent corruption). A failed voltage *lower* is harmless (rail stays higher =
+/// over-volt), so a down-shift always reports success.
+#[must_use]
+fn apply_opp(cluster: Cluster, opp: Opp, going_up: bool) -> bool {
     let phandle = Phandle::from(0u32);
     let hz = opp.ring_khz as u64 * 1_000;
     if going_up {
-        cluster.set_voltage(opp.uv);
+        if !cluster.set_voltage(opp.uv) {
+            warn!(
+                "gov: {} voltage raise to {} mV did not land; leaving clock put",
+                cluster.name(),
+                opp.uv / 1_000
+            );
+            return false;
+        }
         scmi::set_clock_rate(phandle, cluster.clock_id(), hz);
     } else {
         scmi::set_clock_rate(phandle, cluster.clock_id(), hz);
         cluster.set_voltage(opp.uv);
     }
+    true
 }
 
 /// Period, in ms, the kernel governor task sleeps between [`governor_poll`]s.
@@ -584,17 +678,26 @@ pub fn governor_poll(busy: &[u64]) {
         return;
     }
 
-    // The task sleeps `GOV_PERIOD_MS`, so ~`GOV_PERIOD_MS / 10` scheduler ticks
-    // (10 ms/tick, TICKS_PER_SEC = 100) elapse per window. Using the nominal
-    // window needs no clock here; a late wake only under-reports load (busy% is
-    // clamped below), which is safe — it can never spuriously over-scale.
-    const WINDOW_TICKS: u64 = if GOV_PERIOD_MS / 10 == 0 { 1 } else { GOV_PERIOD_MS / 10 };
+    // The task sleeps `GOV_PERIOD_MS`, so ~`GOV_PERIOD_MS / MS_PER_TICK` scheduler
+    // ticks elapse per window. Using the nominal window needs no clock here; a late
+    // wake only under-reports load (busy% is clamped below), which is safe — it can
+    // never spuriously over-scale. `MS_PER_TICK` must track the scheduler tick rate
+    // (~100 Hz => 10 ms/tick); if that changes, this ratio must too.
+    const MS_PER_TICK: u64 = 10;
+    const WINDOW_TICKS: u64 = if GOV_PERIOD_MS / MS_PER_TICK == 0 {
+        1
+    } else {
+        GOV_PERIOD_MS / MS_PER_TICK
+    };
 
     // First call only establishes the baseline (see `PRIMED`); still walk every
     // cluster below so all `LAST_BUSY` entries are seeded, but make no OPP change.
     let priming = !PRIMED.swap(true, Ordering::Relaxed);
 
-    for (ci, &cluster) in [Cluster::A55, Cluster::Big0, Cluster::Big1].iter().enumerate() {
+    for (ci, &cluster) in [Cluster::A55, Cluster::Big0, Cluster::Big1]
+        .iter()
+        .enumerate()
+    {
         // Score each core in the cluster individually this window. A cluster
         // shares ONE clock, so a single saturated core is reason to raise the
         // whole cluster — this matches Linux schedutil/ondemand, which drive a
@@ -638,17 +741,22 @@ pub fn governor_poll(busy: &[u64]) {
         };
 
         if new != cur {
-            apply_opp(cluster, opps[new], new > cur);
-            IDX[ci].store(new, Ordering::Relaxed);
-            info!(
-                "gov: {} peak={}% opp {}->{} = {} MHz @ {} mV",
-                cluster.name(),
-                peak_pct,
-                cur,
-                new,
-                opps[new].mhz,
-                opps[new].uv / 1_000
-            );
+            // Only record the new OPP if it was actually applied. On a failed
+            // voltage raise `apply_opp` leaves the clock (and rail) at `cur`, so
+            // keeping IDX at `cur` makes the next poll retry from the true state
+            // instead of believing a higher rail than the hardware holds.
+            if apply_opp(cluster, opps[new], new > cur) {
+                IDX[ci].store(new, Ordering::Relaxed);
+                info!(
+                    "gov: {} peak={}% opp {}->{} = {} MHz @ {} mV",
+                    cluster.name(),
+                    peak_pct,
+                    cur,
+                    new,
+                    opps[new].mhz,
+                    opps[new].uv / 1_000
+                );
+            }
         }
     }
 }
@@ -782,9 +890,14 @@ pub fn calibrate_cluster(cluster_idx: usize, intended_cpu: usize) {
     let phandle = Phandle::from(0u32);
     for &(uv, khz) in points {
         // Voltage first (points are voltage-non-decreasing, so this only ever
-        // over-volts the current ring = safe), then the SCMI ring.
+        // over-volts the current ring = safe), then the SCMI ring — but ONLY if
+        // the voltage write landed, else raising the ring would run it on the
+        // previous, lower rail (undervolt at speed). A skipped point is logged
+        // via `volt_ok=false`.
         let vok = cluster.set_voltage(uv);
-        scmi::set_clock_rate(phandle, cluster.clock_id(), khz as u64 * 1_000);
+        if vok {
+            scmi::set_clock_rate(phandle, cluster.clock_id(), khz as u64 * 1_000);
+        }
         cal_delay_ms(25);
         let f = measure_mhz();
         info!(
