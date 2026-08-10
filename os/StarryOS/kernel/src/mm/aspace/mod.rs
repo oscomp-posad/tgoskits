@@ -712,11 +712,17 @@ impl AddrSpace {
     /// single backend page size, so touching any block forces the whole area
     /// down to 4 KiB — the PTEs and the backend size stay consistent.
     ///
-    /// Atomic against allocation failure: all COW-break copies are prepared
-    /// first ([`prepare_huge_split_2m`](backend::prepare_huge_split_2m)); if any
-    /// block cannot be prepared the prepared ones are released and the area is
-    /// left untouched (still a valid `Size2M` area), so a fragmented / OOM heap
-    /// never leaves the area in a mixed 2 MiB/4 KiB state.
+    /// Atomic against allocation failure. Phase 1
+    /// ([`prepare_huge_split_2m`](backend::prepare_huge_split_2m)) pre-allocates
+    /// *both* every COW-break data copy *and* every 4 KiB leaf page table; if any
+    /// block cannot be prepared, the prepared ones are released
+    /// ([`abort_huge_split_2m`](backend::abort_huge_split_2m)) and the area is
+    /// left untouched (a valid `Size2M` area). Phase 2
+    /// ([`commit_huge_split_2m`](backend::commit_huge_split_2m)) then splices in
+    /// the reserved tables and re-maps the leaves without allocating, so it
+    /// cannot fail partway. A fragmented / OOM heap therefore never leaves the
+    /// area in a mixed 2 MiB/4 KiB state — either the whole area splits or none of
+    /// it does.
     #[cfg(feature = "thp")]
     fn split_huge_area(&mut self, area_start: VirtAddr) -> AxResult {
         let (start, end, size, flags, reported_flags) = {
@@ -736,8 +742,9 @@ impl AddrSpace {
             )
         };
 
-        // Phase 1: prepare every resident block (pre-allocates COW-break copies).
-        // On any failure release what was prepared and leave the area untouched.
+        // Phase 1: prepare every resident block (pre-allocates COW-break copies
+        // and the leaf page tables). On any failure release what was prepared and
+        // leave the area untouched.
         let mut plans = alloc::vec::Vec::new();
         let mut va = start;
         let mut prepare_err = None;
@@ -754,15 +761,17 @@ impl AddrSpace {
         }
         if let Some(err) = prepare_err {
             for plan in plans {
-                backend::abort_huge_split_2m(plan);
+                backend::abort_huge_split_2m(&self.pt, plan);
             }
             return Err(err);
         }
 
-        // Phase 2: commit each prepared block (no data-frame allocation).
+        // Phase 2: commit each prepared block. Commit is infallible (the leaf
+        // table and any COW-break copy were reserved in phase 1), so once phase 1
+        // succeeds the whole area splits — it can never be left partway.
         for plan in plans {
             let mut cursor = self.pt.cursor();
-            backend::commit_huge_split_2m(plan, Some(&self.rss), &mut cursor)?;
+            backend::commit_huge_split_2m(plan, Some(&self.rss), &mut cursor);
         }
 
         // PTEs are now 4 KiB; downgrade the VMA to a fresh 4 KiB anon backend.
@@ -799,7 +808,12 @@ impl AddrSpace {
         }
 
         let range = VirtAddrRange::from_start_size(vaddr.align_down(page_size), page_size as _);
+        // `mut` only under `thp`, where the fragmentation fallback below reassigns
+        // it; a plain binding otherwise keeps the non-thp build warning-free.
+        #[cfg(feature = "thp")]
         let mut populate_result = self.populate_range(range, flags, access_flags);
+        #[cfg(not(feature = "thp"))]
+        let populate_result = self.populate_range(range, flags, access_flags);
 
         // THP fragmentation fallback: a 2 MiB anon block that cannot obtain an
         // order-9 buddy frame downgrades its whole area to 4 KiB and re-faults

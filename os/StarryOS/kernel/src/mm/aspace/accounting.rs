@@ -146,6 +146,25 @@ impl MemoryAccounting {
         Ok(())
     }
 
+    /// Record a resident Cow page whose VA is guaranteed not yet charged — e.g.
+    /// the fresh 4 KiB sub-pages produced by splitting a huge page, where the
+    /// caller holds the `AddrSpace` lock and has just removed the covering huge
+    /// charge. Unlike [`record_charge`](Self::record_charge) this does not guard
+    /// against a duplicate key, so it is infallible and usable on a commit path
+    /// that must not fail partway. Debug builds assert the freshness invariant.
+    #[cfg(feature = "thp")]
+    pub fn record_charge_fresh(&self, vaddr: VirtAddr, kind: RssKind) {
+        // SAFETY: `AddrSpace` lock held by all callers.
+        let charges = unsafe { &mut *self.charges.get() };
+        debug_assert!(
+            !charges.contains_key(&vaddr),
+            "record_charge_fresh: duplicate charge for {vaddr:?}"
+        );
+        charges.insert(vaddr, kind);
+        self.inc(kind, 1);
+        self.generation.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Remove charge after PTE unmap. Debug builds assert the entry exists.
     pub fn remove_charge(&self, vaddr: VirtAddr) -> Option<RssKind> {
         // SAFETY: `AddrSpace` lock held by all callers.
