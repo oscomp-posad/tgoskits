@@ -185,6 +185,44 @@ fn not_present_huge_block_is_not_reclaimed() -> PagingResult<()> {
     Ok(())
 }
 
+// Unmapping a not-present huge block (post `mprotect(PROT_NONE)`) must hand its
+// data frame back to the caller — otherwise the frame leaks (the mm layer frees
+// exactly what `unmap` returns; a `MappedToHugePage`/`NotMapped` error frees
+// nothing). This is the leak the `is_table` fix would otherwise trade the UAF
+// for.
+#[test]
+fn unmap_not_present_huge_block_returns_its_frame() -> PagingResult<()> {
+    LIVE.with_borrow_mut(|it| it.clear());
+
+    let va = VirtAddr::from_usize(0x40_0000);
+    let d = PhysAddr::from_usize(0x1000_0000); // dummy data frame, never dereferenced
+    let mut pt = Pt::try_new().unwrap();
+
+    // Present 2 MiB block backed by D, then drop to no-access -> not-present huge
+    // block (VALID clear, frame retained).
+    pt.cursor().map(va, d, PageSize::Size2M, RW)?;
+    pt.cursor().protect(va, MappingFlags::empty())?;
+
+    // Before the fix `unmap` returned Err(MappedToHugePage) and D leaked. It must
+    // now return D + its size so the caller can free it.
+    let (paddr, _flags, size) = pt
+        .cursor()
+        .unmap(va)
+        .expect("unmap of a not-present huge block must return its frame, not error");
+    assert_eq!(size, PageSize::Size2M);
+    assert_eq!(paddr.as_usize(), d.as_usize());
+
+    // The slot is now free: a fresh 2 MiB map at the same VA succeeds, and the
+    // page table drops with no stranded table frames.
+    pt.cursor()
+        .map(va, PhysAddr::from_usize(0x2000_0000), PageSize::Size2M, RW)?;
+    pt.cursor().unmap(va)?;
+    drop(pt);
+    LIVE.with_borrow(|it| assert!(it.is_empty(), "leaked {} table frame(s)", it.len()));
+
+    Ok(())
+}
+
 #[test]
 fn thp_split_unmap_reclaims_empty_table_on_unmap() -> PagingResult<()> {
     LIVE.with_borrow_mut(|it| it.clear());

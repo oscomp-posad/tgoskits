@@ -282,6 +282,56 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64<M, PTE, H
         Ok((p1e, PageSize::Size4K))
     }
 
+    /// Finds a *not-present huge block* covering `vaddr` — a block descriptor
+    /// whose present bit is clear but that still owns a frame, as produced by
+    /// `mprotect(PROT_NONE)` over a THP area — clears it, and returns its frame
+    /// so the caller can free it.
+    ///
+    /// Such a block is not reachable through [`get_entry_mut`](Self::get_entry_mut):
+    /// on aarch64/riscv it reads `is_huge() == false`, so the walker cannot
+    /// return it as a huge mapping and instead yields
+    /// [`MappedToHugePage`](PagingError::MappedToHugePage). Without this, its
+    /// frame would leak on unmap (`unmap` never sees a paddr to hand back).
+    ///
+    /// A block is `!is_unused() && !is_table()` (neither empty nor a table
+    /// pointer). Returns [`NotMapped`](PagingError::NotMapped) if no such block
+    /// covers `vaddr`.
+    fn take_not_present_huge_block(
+        &mut self,
+        vaddr: M::VirtAddr,
+    ) -> PagingResult<(PhysAddr, MappingFlags, PageSize)> {
+        let vaddr: usize = vaddr.into();
+        let p3 = if M::LEVELS == 3 {
+            self.table_of_mut(self.root_paddr())
+        } else if M::LEVELS == 4 {
+            let p4 = self.table_of_mut(self.root_paddr());
+            let p4e = &p4[p4_index(vaddr)];
+            if !p4e.is_table() {
+                return Err(PagingError::NotMapped);
+            }
+            self.table_of_mut(p4e.paddr())
+        } else {
+            unreachable!()
+        };
+        let p3e = &mut p3[p3_index(vaddr)];
+        if !p3e.is_unused() && !p3e.is_table() {
+            let ret = (p3e.paddr(), p3e.flags(), PageSize::Size1G);
+            p3e.clear();
+            return Ok(ret);
+        }
+        if !p3e.is_table() {
+            return Err(PagingError::NotMapped);
+        }
+        let p2 = self.table_of_mut(p3e.paddr());
+        let p2e = &mut p2[p2_index(vaddr)];
+        if !p2e.is_unused() && !p2e.is_table() {
+            let ret = (p2e.paddr(), p2e.flags(), PageSize::Size2M);
+            p2e.clear();
+            return Ok(ret);
+        }
+        Err(PagingError::NotMapped)
+    }
+
     fn get_entry_mut_or_create(
         &mut self,
         vaddr: M::VirtAddr,
@@ -618,7 +668,19 @@ impl<'a, M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64Cursor
         &mut self,
         vaddr: M::VirtAddr,
     ) -> PagingResult<(PhysAddr, MappingFlags, PageSize)> {
-        let (entry, size) = self.inner.get_entry_mut(vaddr)?;
+        let (entry, size) = match self.inner.get_entry_mut(vaddr) {
+            Ok(entry) => entry,
+            // A *not-present huge block* (`mprotect(PROT_NONE)` over a THP area)
+            // is not reachable through `get_entry_mut` — it yields
+            // `MappedToHugePage`. It still owns its frame, so hand that back to
+            // the caller to free rather than leak it.
+            Err(PagingError::MappedToHugePage) => {
+                let ret = self.inner.take_not_present_huge_block(vaddr)?;
+                self.push(vaddr);
+                return Ok(ret);
+            }
+            Err(e) => return Err(e),
+        };
         if !entry.is_present() {
             entry.clear();
             return Err(PagingError::NotMapped);
