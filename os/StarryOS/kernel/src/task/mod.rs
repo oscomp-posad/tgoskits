@@ -785,8 +785,10 @@ pub struct ProcessData {
     dumpable: AtomicI32,
 
     /// PR_GET_THP_DISABLE / PR_SET_THP_DISABLE value.
-    /// StarryOS does not implement transparent huge pages, but userspace may
-    /// set this as a compatibility hint and later query it.
+    /// With the `thp` feature this gates real 2 MiB huge-page promotion (checked
+    /// by `thp_eligible`); without the feature THP is a no-op and this value is
+    /// only stored and queried for userspace compatibility. Inherited across
+    /// `clone`.
     thp_disable: AtomicU32,
 
     /// Accumulated CPU time of waited children (utime + stime).

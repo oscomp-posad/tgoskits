@@ -657,6 +657,53 @@ impl AddrSpace {
         Ok(())
     }
 
+    /// THP: split *every* `Size2M` anonymous area overlapping `[start, end)` down
+    /// to 4 KiB — including fully-covered ones — implementing `MADV_NOHUGEPAGE`.
+    /// Unlike [`split_huge_for_partial_op`](Self::split_huge_for_partial_op),
+    /// which only splits areas an op boundary bisects, this splits all overlapping
+    /// huge areas so the range holds no huge pages afterward. Since THP-lite only
+    /// promotes at mmap time and never re-promotes, splitting is sufficient.
+    #[cfg(feature = "thp")]
+    fn split_huge_range(&mut self, start: VirtAddr, end: VirtAddr) -> AxResult {
+        let mut to_split = alloc::vec::Vec::new();
+        for area in self.areas.iter() {
+            if area.start() >= end {
+                break;
+            }
+            if area.end() <= start {
+                continue;
+            }
+            if matches!(
+                area.backend(),
+                Backend::Cow(c) if c.is_anonymous() && c.page_size() == PageSize::Size2M
+            ) {
+                to_split.push(area.start());
+            }
+        }
+        for area_start in to_split {
+            self.split_huge_area(area_start)?;
+        }
+        Ok(())
+    }
+
+    /// THP: split any transparent huge pages in `[start, start+size)` back to
+    /// 4 KiB, implementing Linux `MADV_NOHUGEPAGE`. A no-op without the `thp`
+    /// feature (no huge pages exist) or when the range holds none.
+    ///
+    /// Granularity note: because a `MemoryArea` carries a single backend page
+    /// size, any huge area the range touches is split in full — the part outside
+    /// `[start, start+size)` is downgraded to 4 KiB too, and (THP-lite never
+    /// re-promotes) stays 4 KiB. This over-application is content-preserving and
+    /// matches `split_huge_for_partial_op`. It may allocate (COW-break of a
+    /// shared huge block), so it can return `NoMemory` where Linux — which only
+    /// sets a VMA flag — would not.
+    pub fn split_huge_pages(&mut self, start: VirtAddr, size: usize) -> AxResult {
+        self.validate_region(start, size)?;
+        #[cfg(feature = "thp")]
+        self.split_huge_range(start, start + size)?;
+        Ok(())
+    }
+
     /// THP: convert one entire `Size2M` anonymous area to 4 KiB granularity.
     ///
     /// Every resident 2 MiB block is re-mapped as 512 leaf PTEs and the area's

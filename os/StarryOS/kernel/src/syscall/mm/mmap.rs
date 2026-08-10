@@ -1158,6 +1158,18 @@ pub fn sys_madvise(addr: usize, length: usize, advice: i32) -> AxResult<isize> {
             let length = align_up_4k(length);
             let _ = aspace.populate_area(VirtAddr::from(addr), length, MappingFlags::READ);
         }
+        // MADV_NOHUGEPAGE: split any transparent huge pages in the range back to
+        // 4 KiB. THP-lite only promotes at mmap time and never re-promotes, so
+        // splitting the existing huge pages is the full effect (no khugepaged to
+        // re-collapse them). A no-op without the `thp` feature.
+        MADV_NOHUGEPAGE => {
+            aspace.split_huge_pages(VirtAddr::from(addr), align_up_4k(length))?;
+        }
+        // MADV_HUGEPAGE is accepted but a no-op: THP-lite has no on-demand
+        // collapse (khugepaged) to promote an already-mapped 4 KiB range. Large
+        // eligible private-anon mappings are promoted automatically at mmap time
+        // (see thp_map_promoted_anon); opt out with PR_SET_THP_DISABLE or
+        // MAP_NORESERVE.
         _ => {}
     }
 
