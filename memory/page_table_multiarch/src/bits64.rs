@@ -129,6 +129,27 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64<M, PTE, H
     pub fn cursor(&mut self) -> PageTable64Cursor<'_, M, PTE, H> {
         PageTable64Cursor::new(self)
     }
+
+    /// Allocates a fresh, zeroed intermediate (non-leaf) page-table frame for a
+    /// caller that will later splice it in with
+    /// [`PageTable64Cursor::split_huge_page_with`].
+    ///
+    /// Reserving the table up front lets a huge-page split be *committed* with no
+    /// allocation — i.e. atomically against out-of-memory: if this reservation
+    /// fails the caller can abort before mutating any mapping, and once it
+    /// succeeds the commit cannot fail for lack of memory partway through. A
+    /// reserved frame that ends up unused must be returned with
+    /// [`dealloc_intermediate_table`](Self::dealloc_intermediate_table).
+    pub fn alloc_intermediate_table(&self) -> PagingResult<PhysAddr> {
+        Self::alloc_table()
+    }
+
+    /// Frees a frame obtained from
+    /// [`alloc_intermediate_table`](Self::alloc_intermediate_table) that was not
+    /// consumed by a split (rollback path).
+    pub fn dealloc_intermediate_table(&self, paddr: PhysAddr) {
+        H::dealloc_frame(paddr);
+    }
 }
 
 // Private implements.
@@ -481,6 +502,50 @@ impl<'a, M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64Cursor
         entry.clear();
         self.push(vaddr);
         Ok((paddr, flags, size))
+    }
+
+    /// Splits the huge-page mapping at `vaddr` by pointing its block descriptor
+    /// at the caller-provided, pre-zeroed intermediate table `table_paddr`
+    /// (obtained from [`PageTable64::alloc_intermediate_table`]).
+    ///
+    /// The region is then mapped by the (empty) next-level table; the caller
+    /// installs the finer leaf entries with [`map`](Self::map), which cannot
+    /// allocate because the table already exists. Because *this* call performs no
+    /// allocation, a split whose table was reserved ahead of time commits without
+    /// ever failing for lack of memory partway through and leaving a half-torn
+    /// mapping (the failure mode of unmapping the block and then allocating the
+    /// leaf table on the first re-`map`).
+    ///
+    /// Break-before-make: replacing a valid *block* descriptor with a valid
+    /// *table* descriptor of a finer granule for the same VA is architecturally
+    /// unsafe (a sibling core may cache both translations and take a TLB conflict
+    /// abort). This invalidates the block and completes the broadcast TLBI
+    /// *before* installing the table, so only one translation for the VA is ever
+    /// live. Installing the table over the now-invalid slot is a not-present ->
+    /// present transition needing no further flush; the caller maps the leaves
+    /// (also not-present -> present) afterwards. The region is transiently
+    /// unmapped across these steps — callers hold the address-space lock, so a
+    /// concurrent fault blocks and re-resolves rather than seeing a conflict.
+    ///
+    /// Returns [`Err(PagingError::NotMapped)`](PagingError::NotMapped) if `vaddr`
+    /// is not mapped by a present huge page, leaving the mapping unchanged and
+    /// `table_paddr` for the caller to free.
+    pub fn split_huge_page_with(
+        &mut self,
+        vaddr: M::VirtAddr,
+        table_paddr: PhysAddr,
+    ) -> PagingResult {
+        let (entry, size) = self.inner.get_entry_mut(vaddr)?;
+        if !size.is_huge() || !entry.is_present() {
+            return Err(PagingError::NotMapped);
+        }
+        // Break: invalidate the block and complete the broadcast TLBI
+        // (`flush_tlb` ends with `dsb sy; isb`) so no core still caches the huge
+        // entry. Make: install the pre-reserved table over the invalid slot.
+        entry.clear();
+        M::flush_tlb(Some(vaddr));
+        *entry = GenericPTE::new_table(table_paddr);
+        Ok(())
     }
 
     /// Maps a contiguous virtual memory region to a contiguous physical memory
