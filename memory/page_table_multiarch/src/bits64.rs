@@ -188,22 +188,26 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64<M, PTE, H
     }
 
     fn next_table<'a>(&self, entry: &PTE) -> PagingResult<&'a [PTE]> {
-        if entry.paddr().as_usize() == 0 {
-            Err(PagingError::NotMapped)
-        } else if entry.is_huge() {
-            Err(PagingError::MappedToHugePage)
-        } else {
+        // Descend only into a genuine table. Using `is_table()` (not `!is_huge()`)
+        // is essential: on aarch64/riscv a *not-present* huge block reads
+        // `is_huge() == false`, so the old check walked into its data frame as a
+        // page table (mis-reads, and a wrongful free in `dealloc_tree`).
+        if entry.is_table() {
             Ok(self.table_of(entry.paddr()))
+        } else if entry.paddr().as_usize() == 0 {
+            Err(PagingError::NotMapped)
+        } else {
+            Err(PagingError::MappedToHugePage)
         }
     }
 
     fn next_table_mut<'a>(&mut self, entry: &PTE) -> PagingResult<&'a mut [PTE]> {
-        if entry.paddr().as_usize() == 0 {
-            Err(PagingError::NotMapped)
-        } else if entry.is_huge() {
-            Err(PagingError::MappedToHugePage)
-        } else {
+        if entry.is_table() {
             Ok(self.table_of_mut(entry.paddr()))
+        } else if entry.paddr().as_usize() == 0 {
+            Err(PagingError::NotMapped)
+        } else {
+            Err(PagingError::MappedToHugePage)
         }
     }
 
@@ -409,12 +413,11 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64<M, PTE, H
                 all_children_freed = false;
                 continue;
             }
-            // Only descend into a *present* sub-table. `is_present` is
-            // load-bearing: on aarch64/riscv a not-present huge block (e.g. after
-            // `mprotect(PROT_NONE)`) reads `is_huge == false` (huge-ness is
-            // present-gated there), so without this check its data frame would be
-            // misread as a page table and wrongly freed.
-            if entry.is_unused() || entry.is_huge() || !entry.is_present() {
+            // Descend only into a genuine sub-table. `is_table()` excludes an
+            // unused slot, a huge block, and — crucially — a *not-present* huge
+            // block (whose `is_huge()` reads false on aarch64/riscv), whose data
+            // frame must never be misread as a page table and freed.
+            if !entry.is_table() {
                 continue;
             }
             let child_paddr = entry.paddr();
@@ -519,12 +522,12 @@ impl<'a, M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64Cursor
             if !entry.is_unused() {
                 // Occupied. Installing a huge page over a leftover *intermediate
                 // table* (a prior split whose leaves are now all unmapped) is the
-                // one recoverable case: reclaim the empty table below. Require
-                // `is_present`: on aarch64/riscv a not-present huge block reads
-                // `is_huge == false`, so without it its data frame would be
-                // misread as a table. A live mapping, a present huge block, or a
-                // table that still holds finer mappings all remain a conflict.
-                if !(page_size.is_huge() && !entry.is_huge() && entry.is_present()) {
+                // one recoverable case: reclaim the empty table below. `is_table()`
+                // excludes a live mapping, a (present or not-present) huge block —
+                // whose data frame must not be misread as a table — and any other
+                // non-table entry; a table that still holds finer mappings is
+                // rejected by `table_all_unused` further down.
+                if !(page_size.is_huge() && entry.is_table()) {
                     return Err(PagingError::AlreadyMapped);
                 }
             } else {

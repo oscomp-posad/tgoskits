@@ -175,10 +175,12 @@ fn not_present_huge_block_is_not_reclaimed() -> PagingResult<()> {
         .map(va, PhysAddr::from_usize(0x8000_0000), PageSize::Size2M, RW);
     assert_eq!(remap, Err(PagingError::AlreadyMapped));
 
-    // Skip the separate, pre-existing `Drop`/`next_table` mis-walk of a
-    // not-present huge block; this test only asserts the new reclaim/map paths
-    // leave D untouched.
-    core::mem::forget(pt);
+    // Teardown must also leave D untouched: `dealloc_tree` descends via
+    // `next_table`, which (using `is_table()`) refuses to walk into the
+    // not-present huge block. Dropping `pt` frees its own tables but never D — a
+    // foreign free would panic in `TrackHandler`.
+    drop(pt);
+    LIVE.with_borrow(|it| assert!(it.is_empty(), "leaked {} table frame(s)", it.len()));
     unsafe { alloc::dealloc(d as *mut u8, layout) };
     Ok(())
 }
