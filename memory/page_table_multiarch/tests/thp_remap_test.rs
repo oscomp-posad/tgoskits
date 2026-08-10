@@ -223,6 +223,62 @@ fn unmap_not_present_huge_block_returns_its_frame() -> PagingResult<()> {
     Ok(())
 }
 
+// The 4 KiB analogue of the huge case: a not-present 4 KiB leaf (post
+// `mprotect(PROT_NONE)`) still owns its frame, which `unmap` must return rather
+// than clearing the PTE and reporting `NotMapped` (which would leak the frame).
+// A genuinely unused slot must still report `NotMapped`.
+#[test]
+fn unmap_not_present_4k_leaf_returns_its_frame() -> PagingResult<()> {
+    LIVE.with_borrow_mut(|it| it.clear());
+
+    let va = VirtAddr::from_usize(0x40_0000);
+    let d = PhysAddr::from_usize(0x1000_0000); // dummy data frame, never dereferenced
+    let mut pt = Pt::try_new().unwrap();
+
+    pt.cursor().map(va, d, PageSize::Size4K, RW)?;
+    pt.cursor().protect(va, MappingFlags::empty())?; // VALID clear, frame retained
+
+    let (paddr, _flags, size) = pt
+        .cursor()
+        .unmap(va)
+        .expect("unmap of a not-present 4K leaf must return its frame, not error");
+    assert_eq!(size, PageSize::Size4K);
+    assert_eq!(paddr.as_usize(), d.as_usize());
+
+    // The slot is now unused: a second unmap reports NotMapped (nothing to free).
+    assert_eq!(pt.cursor().unmap(va), Err(PagingError::NotMapped));
+
+    drop(pt);
+    LIVE.with_borrow(|it| assert!(it.is_empty(), "leaked {} table frame(s)", it.len()));
+
+    Ok(())
+}
+
+// An on-demand lazy page mapped as `paddr 0, empty flags` (the ArceOS/Axvisor
+// alloc backend's non-populate path) is not-present and, on aarch64/riscv, NOT
+// `is_unused()` — empty flags set present-independent bits (aarch64 AF|NON_BLOCK
+// => raw 0x402). It owns no real frame (frame 0 is never allocatable), so unmap
+// must report `NotMapped`, not return `Ok((0, ..))` — the latter would make the
+// alloc backend `dealloc_frame(0)` and corrupt the allocator at teardown.
+#[test]
+fn unmap_lazy_zero_paddr_entry_frees_nothing() -> PagingResult<()> {
+    LIVE.with_borrow_mut(|it| it.clear());
+
+    let va = VirtAddr::from_usize(0x40_0000);
+    let mut pt = Pt::try_new().unwrap();
+    // Mirrors alloc.rs `map_region(.., |_| 0.into(), .., empty, populate=false)`.
+    pt.cursor()
+        .map(va, PhysAddr::from_usize(0), PageSize::Size4K, MappingFlags::empty())?;
+
+    // Must be reported unmapped (no frame handed back), and the slot torn down.
+    assert_eq!(pt.cursor().unmap(va), Err(PagingError::NotMapped));
+
+    drop(pt);
+    LIVE.with_borrow(|it| assert!(it.is_empty(), "leaked {} table frame(s)", it.len()));
+
+    Ok(())
+}
+
 #[test]
 fn thp_split_unmap_reclaims_empty_table_on_unmap() -> PagingResult<()> {
     LIVE.with_borrow_mut(|it| it.clear());

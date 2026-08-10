@@ -681,7 +681,19 @@ impl<'a, M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64Cursor
             }
             Err(e) => return Err(e),
         };
-        if !entry.is_present() {
+        // Nothing to free when there is no real frame: an unused slot, or a
+        // not-present entry that carries only attribute bits with a zero physical
+        // address — e.g. an on-demand lazy page mapped as `paddr 0, empty` by the
+        // ArceOS/Axvisor alloc backend, which is not `is_unused()` on aarch64/riscv
+        // (empty flags set present-independent bits). Physical frame 0 is never
+        // allocatable, so `paddr == 0` reliably means "no frame". Tear the slot
+        // down (as before) and report it unmapped.
+        //
+        // Otherwise a *present* mapping, or a not-present leaf that still owns a
+        // real frame (the 4 KiB analogue of the not-present huge block above, e.g.
+        // `mprotect(PROT_NONE)` on a 4 KiB anon page), both own a frame that must
+        // be handed back to the caller to free — dropping the paddr here leaks it.
+        if entry.is_unused() || entry.paddr().as_usize() == 0 {
             entry.clear();
             return Err(PagingError::NotMapped);
         }
