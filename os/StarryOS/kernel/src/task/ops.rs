@@ -331,12 +331,13 @@ pub fn tick_cpu_time(task: &TaskInner) {
         return;
     };
     let state = TimerState::from_u8(thr.timer_state.load(Ordering::Relaxed));
+    let floor = thr.resume_floor_ns();
     let Some(mut time) = thr.time.try_lock() else {
         // Lock contended (mid state-transition, or a cross-CPU reader/alarm);
         // skip. Runs from IRQ context, so it must never block.
         return;
     };
-    time.tick(state);
+    time.tick(state, floor);
 }
 
 /// Returns the accumulated `(utime, stime)` for a task without side effects.
@@ -362,7 +363,8 @@ pub fn poll_timer(task: &TaskInner) {
     // itimer signals after releasing it — signal delivery must not run under the
     // IRQ-disabling time lock.
     let state = TimerState::from_u8(thr.timer_state.load(Ordering::Relaxed));
-    let fired = thr.time.lock().poll(state);
+    let floor = thr.resume_floor_ns();
+    let fired = thr.time.lock().poll(state, floor);
     for signo in fired.into_iter().flatten() {
         send_signal_thread_inner(task, thr, SignalInfo::new_kernel(signo));
     }
@@ -411,13 +413,22 @@ pub fn set_timer_state(task: &TaskInner, state: TimerState) {
     #[cfg(feature = "tickacct")]
     let fired = {
         let mut t = thr.time.lock();
-        let fired = t.poll(old);
+        // Read the resume floor *under* the lock: the IRQ-disabling `SpinNoIrq`
+        // guard prevents this thread from being descheduled+resumed (which would
+        // bump `resume_ns`) between the read and `poll()`, so the floor cannot go
+        // stale and re-admit a descheduled gap.
+        let floor = thr.resume_floor_ns();
+        let fired = t.poll(old, floor);
         thr.itimer_armed
             .store(t.has_armed_itimer(), Ordering::Relaxed);
         fired
     };
     #[cfg(not(feature = "tickacct"))]
-    let fired = thr.time.lock().poll(old);
+    let fired = {
+        let mut t = thr.time.lock();
+        let floor = thr.resume_floor_ns();
+        t.poll(old, floor)
+    };
     thr.timer_state.store(state as u8, Ordering::Relaxed);
     for signo in fired.into_iter().flatten() {
         send_signal_thread_inner(task, thr, SignalInfo::new_kernel(signo));

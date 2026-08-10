@@ -17,10 +17,14 @@ use core::{
     sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicUsize, Ordering},
     task::Poll,
 };
+#[cfg(feature = "tickacct")]
+use core::sync::atomic::AtomicU64;
 
 use ax_errno::AxResult;
 use ax_kernel_guard::NoPreemptIrqSave;
 use ax_kspin::SpinRwLock as RwLock;
+#[cfg(feature = "tickacct")]
+use ax_runtime::hal::time::monotonic_time_nanos;
 use ax_runtime::hal::{cpu::uspace::UserContext, time::TimeValue};
 use ax_sync::{Mutex, spin::SpinNoIrq};
 use ax_task::{TaskExt, TaskInner};
@@ -144,6 +148,19 @@ pub struct Thread {
     #[cfg(feature = "tickacct")]
     pub itimer_armed: AtomicBool,
 
+    /// Lock-free monotonic timestamp (ns) of the last time this thread was
+    /// switched onto a CPU (`on_enter`).
+    ///
+    /// It floors the billing baseline in `tick()`/`poll()` (via
+    /// [`resume_floor_ns`](Thread::resume_floor_ns)) so the interval a thread
+    /// spent descheduled is never charged to its utime/stime. Unlike a lock
+    /// (which `on_enter` can only `try_lock` inside the context switch, and thus
+    /// may drop on cross-CPU contention), a Relaxed store can never be dropped —
+    /// so a long deschedule cannot leak into CPU time even if the resume races a
+    /// cross-CPU reader/alarm holding the `time` lock.
+    #[cfg(feature = "tickacct")]
+    pub resume_ns: AtomicU64,
+
     /// The OOM score adjustment value.
     oom_score_adj: AtomicI32,
 
@@ -251,6 +268,8 @@ impl Thread {
             timer_state: AtomicU8::new(TimerState::None as u8),
             #[cfg(feature = "tickacct")]
             itimer_armed: AtomicBool::new(false),
+            #[cfg(feature = "tickacct")]
+            resume_ns: AtomicU64::new(0),
             exit: Arc::new(AtomicBool::new(false)),
             oom_score_adj: AtomicI32::new(200),
             accessing_user_memory: AtomicBool::new(false),
@@ -528,21 +547,38 @@ impl Thread {
     pub fn unblock_next_signal_check(&self) -> bool {
         self.block_next_signal_check.unblock()
     }
+
+    /// The lower bound (monotonic ns) for CPU-time billing: the instant this
+    /// thread last resumed onto a CPU. `tick()`/`poll()` clamp their baseline to
+    /// at least this so a descheduled interval is never billed to utime/stime.
+    ///
+    /// Folds to `0` without `tickacct` (exact per-boundary accounting keeps its
+    /// own baseline and needs no floor), making that build byte-identical.
+    #[inline]
+    pub(crate) fn resume_floor_ns(&self) -> usize {
+        #[cfg(feature = "tickacct")]
+        {
+            self.resume_ns.load(Ordering::Relaxed) as usize
+        }
+        #[cfg(not(feature = "tickacct"))]
+        {
+            0
+        }
+    }
 }
 
 #[extern_trait]
 impl TaskExt for Box<Thread> {
     fn on_enter(&self) {
-        // Reset the CPU-time tick baseline to the resume point so the interval
-        // this thread spent descheduled is not billed to it on the next tick.
-        // Skip on lock contention (cross-CPU reader/alarm holds it, or a
-        // re-entrant IRQ path); losing one baseline reset is harmless. Never
-        // block here — this runs inside the context switch. See
-        // `set_timer_state` for the model.
+        // Record the resume instant so the interval this thread spent
+        // descheduled is not billed to it: `tick()`/`poll()` floor their billing
+        // baseline at `resume_ns` (see `resume_floor_ns`). A lock-free Relaxed
+        // store can never be dropped, so — unlike a `try_lock` on the `time` lock
+        // inside the context switch — a resume that races a cross-CPU
+        // reader/alarm still discards the descheduled gap. Never block here.
         #[cfg(feature = "tickacct")]
-        if let Some(mut time) = self.time.try_lock() {
-            time.retick();
-        }
+        self.resume_ns
+            .store(monotonic_time_nanos(), Ordering::Relaxed);
         let scope = self.proc_data.scope.read();
         unsafe { ActiveScope::set(&scope) };
         core::mem::forget(scope);
@@ -556,15 +592,16 @@ impl TaskExt for Box<Thread> {
     fn on_leave(&self) {
         // Account this thread's CPU slice before it leaves the CPU, so a task
         // that blocks or yields between ticks still records the time it ran.
-        // `tick()` bills [last_tick, now] to utime/stime by the current
-        // TimerState and advances last_tick; the matching `on_enter` retick
-        // discards the descheduled gap. Skip on lock contention (never block
-        // the context switch); the lost slice is at most one tick and rare.
+        // `tick()` bills [max(last_tick, resume_ns), now] to utime/stime by the
+        // current TimerState and advances last_tick; the `resume_ns` floor (set
+        // in `on_enter`) keeps the descheduled gap out. Skip on lock contention
+        // (never block the context switch); the lost slice is at most one tick.
         #[cfg(feature = "tickacct")]
         {
             let state = TimerState::from_u8(self.timer_state.load(Ordering::Relaxed));
+            let floor = self.resume_floor_ns();
             if let Some(mut time) = self.time.try_lock() {
-                time.tick(state);
+                time.tick(state, floor);
             }
         }
         // Fold this slice's per-task perf counter deltas and stop the counters
@@ -584,8 +621,9 @@ impl TaskExt for Box<Thread> {
         #[cfg(feature = "tickacct")]
         {
             let state = TimerState::from_u8(self.timer_state.load(Ordering::Relaxed));
+            let floor = self.resume_floor_ns();
             if let Some(mut time) = self.time.try_lock() {
-                time.tick(state);
+                time.tick(state, floor);
             }
         }
     }

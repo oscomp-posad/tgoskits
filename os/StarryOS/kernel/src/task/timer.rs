@@ -212,9 +212,15 @@ impl TimeManager {
     ///
     /// `state` is the User/Kernel mode to attribute the elapsed slice to,
     /// supplied by the caller from the lock-free `Thread::timer_state` atomic.
-    pub fn tick(&mut self, state: TimerState) {
+    ///
+    /// `resume_floor_ns` is the thread's last resume instant
+    /// ([`Thread::resume_floor_ns`](crate::task::Thread::resume_floor_ns)); the
+    /// billed baseline is clamped to at least it so a slice that began before the
+    /// thread was descheduled does not charge the descheduled gap to utime/stime.
+    /// Callers without that floor (exact accounting) pass `0`, a no-op.
+    pub fn tick(&mut self, state: TimerState, resume_floor_ns: usize) {
         let now_ns = monotonic_time_nanos() as usize;
-        let delta = now_ns.saturating_sub(self.last_tick_ns);
+        let delta = now_ns.saturating_sub(self.last_tick_ns.max(resume_floor_ns));
         match state {
             TimerState::User => self.utime_ns += delta,
             TimerState::Kernel => self.stime_ns += delta,
@@ -234,17 +240,22 @@ impl TimeManager {
     /// IRQ-disabling — running the emitter under it would extend the IRQs-off
     /// window and risk a lock-ordering deadlock. Returning the signals keeps
     /// the locked region free of any nested lock.
+    ///
+    /// `resume_floor_ns` clamps the utime/stime baseline exactly as in
+    /// [`tick`](Self::tick) (interval-timer accounting, which tracks wall time,
+    /// is unaffected). Callers without that floor pass `0`, a no-op.
     #[must_use = "the returned itimer signals must be emitted after unlocking"]
-    pub fn poll(&mut self, state: TimerState) -> [Option<Signo>; 3] {
+    pub fn poll(&mut self, state: TimerState, resume_floor_ns: usize) -> [Option<Signo>; 3] {
         let now_ns = monotonic_time_nanos() as usize;
         // itimer_delta: full wall-clock time since the last poll() call.
         // Used for interval-timer accounting so they fire at the right time
         // regardless of whether tick() has been called in between.
         let itimer_delta = now_ns.saturating_sub(self.last_wall_ns);
         // remaining: time since the last tick() that has not yet been counted
-        // in utime_ns / stime_ns.  If tick() was never called, last_tick_ns ==
-        // last_wall_ns and remaining == itimer_delta (identical to original).
-        let remaining = now_ns.saturating_sub(self.last_tick_ns);
+        // in utime_ns / stime_ns, floored at the resume instant so a descheduled
+        // gap is not billed. If tick() was never called and the thread was not
+        // descheduled, last_tick_ns == last_wall_ns and remaining == itimer_delta.
+        let remaining = now_ns.saturating_sub(self.last_tick_ns.max(resume_floor_ns));
         // Fixed slots so no `n` counter is needed: 0=Virtual, 1=Prof, 2=Real.
         let mut fired = [None; 3];
         match state {
@@ -273,18 +284,6 @@ impl TimeManager {
         // from a clean slate.
         self.last_tick_ns = now_ns;
         fired
-    }
-
-    /// Resets the tick baseline to the current time without accumulating any
-    /// CPU time.
-    ///
-    /// Called when a task is switched back onto a CPU (`TaskExt::on_enter`):
-    /// the interval it spent descheduled must not be billed to it, so the next
-    /// `tick()` counts only from this resume point. Leaves `last_wall_ns`
-    /// (the itimer baseline) untouched, exactly like `tick()`.
-    #[cfg(feature = "tickacct")]
-    pub fn retick(&mut self) {
-        self.last_tick_ns = monotonic_time_nanos() as usize;
     }
 
     /// Returns whether any interval timer is currently armed.
