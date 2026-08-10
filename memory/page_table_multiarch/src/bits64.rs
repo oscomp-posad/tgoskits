@@ -358,6 +358,81 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64<M, PTE, H
         }
         H::dealloc_frame(table_paddr);
     }
+
+    /// Reclaims intermediate tables that an unmap of `[vaddr, vaddr + size)`
+    /// leaves entirely empty — e.g. an L2->L3 table stranded when a huge-page
+    /// split's leaves are unmapped. Each such table's frame is freed and its
+    /// parent entry cleared (break-before-make), instead of the table lingering
+    /// until the whole page table is dropped. The root table is never freed.
+    /// Safe to call after any range unmap; a no-op when nothing became empty.
+    pub fn reclaim_empty_tables(&mut self, vaddr: M::VirtAddr, size: usize) {
+        if size == 0 {
+            return;
+        }
+        let lo: usize = vaddr.into();
+        let hi = lo.saturating_add(size);
+        let root = self.root_paddr();
+        // The root table is never freed; ignore its emptiness.
+        let _ = self.reclaim_empty_in_range(root, 0, 0, lo, hi);
+    }
+
+    /// Recursively frees the empty descendant tables of `table_paddr` (which
+    /// covers `[base, ..)` at `level`) that lie within `[lo, hi)`, clearing each
+    /// freed child's parent entry. Returns whether `table_paddr` is now fully
+    /// unused. Follows the crate's `table_of_mut` fabricated-lifetime convention;
+    /// recursion only ever touches disjoint child tables.
+    fn reclaim_empty_in_range(
+        &mut self,
+        table_paddr: PhysAddr,
+        level: usize,
+        base: usize,
+        lo: usize,
+        hi: usize,
+    ) -> bool {
+        // A last-level (leaf) table holds pages, not sub-tables: report only
+        // whether it is empty so the parent can decide to free it.
+        if level >= M::LEVELS - 1 {
+            return self.table_all_unused(table_paddr);
+        }
+        let entry_span = 1usize << (12 + (M::LEVELS - 1 - level) * 9);
+        let table = self.table_of_mut(table_paddr);
+        let mut all_children_freed = true;
+        for (i, entry) in table.iter_mut().enumerate() {
+            let entry_base = base + i * entry_span;
+            if entry_base >= hi || entry_base.saturating_add(entry_span) <= lo {
+                continue; // this entry's span is entirely outside the unmapped range
+            }
+            // A root subtree shared from another page table via `copy_from` is not
+            // ours to free (mirrors `Drop`).
+            #[cfg(feature = "copy-from")]
+            if level == 0 && self.borrowed_entries.get(i) {
+                all_children_freed = false;
+                continue;
+            }
+            // Only descend into a *present* sub-table. `is_present` is
+            // load-bearing: on aarch64/riscv a not-present huge block (e.g. after
+            // `mprotect(PROT_NONE)`) reads `is_huge == false` (huge-ness is
+            // present-gated there), so without this check its data frame would be
+            // misread as a page table and wrongly freed.
+            if entry.is_unused() || entry.is_huge() || !entry.is_present() {
+                continue;
+            }
+            let child_paddr = entry.paddr();
+            if self.reclaim_empty_in_range(child_paddr, level + 1, entry_base, lo, hi) {
+                // Break-before-make: clear the parent entry and complete the TLBI
+                // (invalidating the cached walk of this table) before freeing the
+                // now-unreferenced table frame.
+                entry.clear();
+                M::flush_tlb(Some(entry_base.into()));
+                H::dealloc_frame(child_paddr);
+            } else {
+                all_children_freed = false;
+            }
+        }
+        // Only a table whose every in-range sub-table was freed can have become
+        // empty; scan to confirm no out-of-range entries survive.
+        all_children_freed && self.table_all_unused(table_paddr)
+    }
 }
 
 impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> Drop for PageTable64<M, PTE, H> {
@@ -444,9 +519,11 @@ impl<'a, M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64Cursor
             if !entry.is_unused() {
                 // Occupied. Installing a huge page over a leftover *intermediate
                 // table* (a prior split whose leaves are now all unmapped) is the
-                // one recoverable case: reclaim the empty table below. A live
-                // mapping, or a table that still holds finer mappings, is a real
-                // conflict.
+                // one recoverable case: reclaim the empty table below. Require
+                // `is_present`: on aarch64/riscv a not-present huge block reads
+                // `is_huge == false`, so without it its data frame would be
+                // misread as a table. A live mapping, a present huge block, or a
+                // table that still holds finer mappings all remain a conflict.
                 if !(page_size.is_huge() && !entry.is_huge() && entry.is_present()) {
                     return Err(PagingError::AlreadyMapped);
                 }

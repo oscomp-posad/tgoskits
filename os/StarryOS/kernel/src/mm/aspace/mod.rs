@@ -367,6 +367,11 @@ impl AddrSpace {
         let _rss = RssAccountingGuard::enter(&self.rss);
         crate::syscall::memfd_on_aspace_unmap_range(self, start, size);
         self.areas.unmap(start, size, &mut self.pt)?;
+        // Free any intermediate page table this unmap emptied (e.g. an L3 table
+        // stranded when a huge-page split's leaves are removed, or any leaf table
+        // whose whole 2 MiB span was unmapped), instead of leaking it until the
+        // address space is torn down.
+        self.pt.reclaim_empty_tables(start, size);
         self.vm_stat.on_unmap(removed_pages);
         Ok(())
     }

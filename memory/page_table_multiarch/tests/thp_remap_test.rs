@@ -21,7 +21,9 @@ use std::{
 
 use ax_memory_addr::{PhysAddr, VirtAddr};
 use ax_page_table_entry::{MappingFlags, aarch64::A64PTE};
-use ax_page_table_multiarch::{PageSize, PageTable64, PagingHandler, PagingMetaData, PagingResult};
+use ax_page_table_multiarch::{
+    PageSize, PageTable64, PagingError, PagingHandler, PagingMetaData, PagingResult,
+};
 
 const PAGE_LAYOUT: Layout = unsafe { Layout::from_size_align_unchecked(4096, 4096) };
 
@@ -137,6 +139,90 @@ fn thp_split_unmap_remap_reclaims_table_and_succeeds() -> PagingResult<()> {
     // 5) Tear down and assert no page-table frame leaked (the split's L3 table
     //    must have been reclaimed, not stranded).
     pt.cursor().unmap(va)?;
+    drop(pt);
+    LIVE.with_borrow(|it| assert!(it.is_empty(), "leaked {} page-table frame(s)", it.len()));
+
+    Ok(())
+}
+
+// A not-present huge block (e.g. after `mprotect(PROT_NONE)`) reads
+// `is_huge == false` on aarch64/riscv. Its data frame must NOT be misread as a
+// page table and freed by the reclaim or the huge-map path. `TrackHandler`
+// panics on a foreign free, so a regression here fails loudly.
+#[test]
+fn not_present_huge_block_is_not_reclaimed() -> PagingResult<()> {
+    LIVE.with_borrow_mut(|it| it.clear());
+
+    // A zeroed, 2 MiB-aligned data frame — reading it as a page table would find
+    // every entry "unused" (the trap that would make `table_all_unused` true).
+    let layout = Layout::from_size_align(HUGE_2M, HUGE_2M).unwrap();
+    let d = unsafe { alloc::alloc_zeroed(layout) } as usize;
+    assert!(d != 0);
+
+    let va = VirtAddr::from_usize(0x40_0000);
+    let mut pt = Pt::try_new().unwrap();
+
+    // Present 2 MiB block backed by D, then drop it to no-access -> a non-present
+    // huge block (VALID clear => is_huge()==false).
+    pt.cursor().map(va, PhysAddr::from_usize(d), PageSize::Size2M, RW)?;
+    pt.cursor().protect(va, MappingFlags::empty())?;
+
+    // Neither path may touch D. If either misread D as a table and freed it,
+    // TrackHandler would panic (D was never allocated through it).
+    pt.reclaim_empty_tables(va, HUGE_2M);
+    let remap = pt
+        .cursor()
+        .map(va, PhysAddr::from_usize(0x8000_0000), PageSize::Size2M, RW);
+    assert_eq!(remap, Err(PagingError::AlreadyMapped));
+
+    // Skip the separate, pre-existing `Drop`/`next_table` mis-walk of a
+    // not-present huge block; this test only asserts the new reclaim/map paths
+    // leave D untouched.
+    core::mem::forget(pt);
+    unsafe { alloc::dealloc(d as *mut u8, layout) };
+    Ok(())
+}
+
+#[test]
+fn thp_split_unmap_reclaims_empty_table_on_unmap() -> PagingResult<()> {
+    LIVE.with_borrow_mut(|it| it.clear());
+
+    let va = VirtAddr::from_usize(0x40_0000);
+    let pa = PhysAddr::from_usize(0x1000_0000);
+    let mut pt = Pt::try_new().unwrap();
+
+    // Map + split (installs an L3 table), then unmap every leaf — which strands
+    // the now-empty L3 table (the leak this reclaim closes).
+    pt.cursor().map(va, pa, PageSize::Size2M, RW)?;
+    let table = pt.alloc_intermediate_table()?;
+    {
+        let mut c = pt.cursor();
+        c.split_huge_page_with(va, table)?;
+        for i in 0..(HUGE_2M / PG) {
+            c.map(
+                va + i * PG,
+                PhysAddr::from_usize(pa.as_usize() + i * PG),
+                PageSize::Size4K,
+                RW,
+            )?;
+        }
+    }
+    {
+        let mut c = pt.cursor();
+        for i in 0..(HUGE_2M / PG) {
+            c.unmap(va + i * PG)?;
+        }
+    }
+
+    // Reclaim frees the empty L3 table and cascades up the L2/L1 that held only
+    // it, leaving just the root live BEFORE teardown (the leak is closed eagerly,
+    // not deferred to `Drop`).
+    let before = LIVE.with_borrow(|it| it.len());
+    pt.reclaim_empty_tables(va, HUGE_2M);
+    let after = LIVE.with_borrow(|it| it.len());
+    assert!(after < before, "reclaim should free stranded table(s): {before} -> {after}");
+    assert_eq!(after, 1, "only the root table should remain live after reclaim");
+
     drop(pt);
     LIVE.with_borrow(|it| assert!(it.is_empty(), "leaked {} page-table frame(s)", it.len()));
 
