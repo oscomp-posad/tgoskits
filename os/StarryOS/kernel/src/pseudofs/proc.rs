@@ -40,9 +40,13 @@ use crate::{
     },
     task::{
         AsThread, Cred, ProcessData, TaskStat, Thread, get_process_data, get_task, processes,
-        tasks, tick_cpu_time,
+        tasks,
     },
 };
+// Only used by the boot-CPU tick callback below, which is compiled out under
+// `tickacct` (the every-CPU `on_tick` hook supersedes it).
+#[cfg(not(feature = "tickacct"))]
+use crate::task::tick_cpu_time;
 
 /// Global IRQ counter incremented on every timer tick.
 /// Module-level so both `/proc/interrupts` and `/proc/stat` can read it.
@@ -1692,6 +1696,10 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
     // per-CPU).  On SMP, tasks on other CPUs still get their time recorded
     // at syscall boundaries via set_timer_state(); the tick path is an
     // additional precision improvement for CPU 0.
+    //
+    // Under `tickacct` the every-CPU `TaskExt::on_tick` hook accounts the boot
+    // CPU too, so this boot-CPU-only callback is redundant and compiled out.
+    #[cfg(not(feature = "tickacct"))]
     ax_task::register_timer_callback(|_| {
         tick_cpu_time(&ax_task::current());
     });

@@ -136,8 +136,11 @@ pub struct Thread {
     ///
     /// Lets `set_timer_state` (tickacct) decide between the lock-free common
     /// path and the itimer-servicing poll without taking the `time` lock. Kept
-    /// exact by `sys_setitimer` under the lock; may lag `true` briefly after a
-    /// one-shot itimer fires (harmless — only costs a redundant lock+poll).
+    /// exact by `sys_setitimer` under the lock, and self-corrected by
+    /// `set_timer_state` at the next syscall boundary that runs `poll()` (it
+    /// resyncs the hint from the same locked snapshot), so a fired one-shot
+    /// itimer clears the hint there rather than lagging until the next
+    /// `setitimer`.
     #[cfg(feature = "tickacct")]
     pub itimer_armed: AtomicBool,
 

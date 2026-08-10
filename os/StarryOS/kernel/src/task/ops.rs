@@ -322,7 +322,10 @@ pub fn register_session(session: &Arc<Session>) {
 /// Accumulates CPU time for `task` from a timer-tick IRQ context.
 ///
 /// Unlike `poll_timer`, this never emits signals, making it safe to call
-/// from interrupt handlers.
+/// from interrupt handlers. Only the non-`tickacct` build uses it (the boot-CPU
+/// `register_timer_callback` in procfs); under `tickacct` the every-CPU
+/// `TaskExt::on_tick` hook accounts CPU time on all CPUs instead.
+#[cfg(not(feature = "tickacct"))]
 pub fn tick_cpu_time(task: &TaskInner) {
     let Some(thr) = task.try_as_thread() else {
         return;
@@ -401,6 +404,19 @@ pub fn set_timer_state(task: &TaskInner, state: TimerState) {
     // own CPU), so it can block briefly on rare cross-CPU contention without
     // reentrancy.
     let old = TimerState::from_u8(thr.timer_state.load(Ordering::Relaxed));
+    // Under `tickacct`, resync the lock-free `itimer_armed` hint from the same
+    // locked snapshot: a one-shot itimer that just fired inside `poll()` is now
+    // disarmed, so the hint self-corrects here instead of lingering `true` until
+    // the next `sys_setitimer`.
+    #[cfg(feature = "tickacct")]
+    let fired = {
+        let mut t = thr.time.lock();
+        let fired = t.poll(old);
+        thr.itimer_armed
+            .store(t.has_armed_itimer(), Ordering::Relaxed);
+        fired
+    };
+    #[cfg(not(feature = "tickacct"))]
     let fired = thr.time.lock().poll(old);
     thr.timer_state.store(state as u8, Ordering::Relaxed);
     for signo in fired.into_iter().flatten() {

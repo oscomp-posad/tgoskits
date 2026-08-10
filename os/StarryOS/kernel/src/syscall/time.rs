@@ -109,7 +109,10 @@ pub fn sys_setitimer(
 
     let (interval, remained) = match new_value.nullable() {
         Some(new_value) => {
-            // FIXME: AnyBitPattern
+            // NOTE: `itimerval` is a plain-integer POD — two `timeval`s, each a
+            // pair of integers with no padding or otherwise-invalid bit patterns
+            // — so every bit pattern is a valid value and the unchecked
+            // `assume_init()` read is sound.
             let new_value = unsafe { new_value.vm_read_uninit()?.assume_init() };
             (
                 new_value.it_interval.try_into_time_value()?.as_nanos() as usize,

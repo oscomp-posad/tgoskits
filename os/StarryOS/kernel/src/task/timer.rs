@@ -60,11 +60,11 @@ static EVENT_NEW_TIMER: LazyLock<Event> = LazyLock::new(Event::new);
 #[allow(non_camel_case_types)]
 #[derive(Eq, PartialEq, Debug, Clone, Copy, FromRepr)]
 pub enum ITimerType {
-    /// 统计系统实际运行时间
+    /// Real elapsed wall-clock time.
     Real    = 0,
-    /// 统计用户态运行时间
+    /// User-mode CPU time.
     Virtual = 1,
-    /// 统计进程的所有用户态/内核态运行时间
+    /// User + kernel CPU time.
     Prof    = 2,
 }
 
@@ -341,7 +341,6 @@ impl TimeManager {
             time_value_from_nanos(itimer.remained_ns),
         )
     }
-
 }
 
 async fn alarm_task() {
@@ -363,7 +362,12 @@ async fn alarm_task() {
         if entry.deadline <= now {
             let entry_deadline = entry.deadline;
             let target = entry.target.clone();
-            assert!(guard.pop().is_some_and(|it| it.deadline == entry_deadline));
+            // pop() runs unconditionally (it removes the peeked entry); only the
+            // peek-then-pop invariant is asserted, and only in debug — under the
+            // same held lock it is locally provable, so a release build must not
+            // be able to panic the alarm subsystem here.
+            let popped = guard.pop();
+            debug_assert!(popped.is_some_and(|it| it.deadline == entry_deadline));
             drop(guard);
             match target {
                 AlarmTarget::Thread(weak_task) => {

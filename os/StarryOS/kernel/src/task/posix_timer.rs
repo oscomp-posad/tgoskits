@@ -12,12 +12,16 @@ use ax_runtime::hal::time::{NANOS_PER_SEC, monotonic_time_nanos, wall_time};
 use linux_raw_sys::general::{
     CLOCK_BOOTTIME, CLOCK_MONOTONIC, CLOCK_MONOTONIC_COARSE, CLOCK_MONOTONIC_RAW,
     CLOCK_PROCESS_CPUTIME_ID, CLOCK_REALTIME, CLOCK_REALTIME_COARSE, CLOCK_THREAD_CPUTIME_ID,
-    SIGEV_NONE, SIGEV_SIGNAL,
+    SIGEV_NONE, SIGEV_SIGNAL, TIMER_ABSTIME,
 };
 use starry_process::Pid;
 use starry_signal::{SignalInfo, Signo};
 
 use super::timer::{AlarmTarget, register_alarm_for};
+
+/// Maximum valid signal number. Linux `_NSIG` is 64 (the signal crate's highest
+/// `Signo` is `SIGRT32 == 64`); a `sigev_signo` must fall in `1..=MAX_SIGNO`.
+const MAX_SIGNO: i32 = 64;
 
 /// Kernel-side representation of a POSIX timer.
 struct PosixTimer {
@@ -116,7 +120,7 @@ impl PosixTimerTable {
         let signo = match sigev_notify {
             SIGEV_NONE => None,
             SIGEV_SIGNAL => {
-                if sigev_signo <= 0 || sigev_signo > 64 {
+                if sigev_signo <= 0 || sigev_signo > MAX_SIGNO {
                     return Err(AxError::InvalidInput);
                 }
                 Signo::from_repr(sigev_signo as u8)
@@ -124,6 +128,10 @@ impl PosixTimerTable {
             _ => return Err(AxError::InvalidInput),
         };
 
+        // Monotonically increasing ids. `fetch_add` could in theory wrap after
+        // 2^31 `timer_create` calls (yielding negative ids), but that count is
+        // unreachable in any realistic run, so the i32 id space is effectively
+        // unbounded here and no reuse/recycling scheme is needed.
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let timer = PosixTimer {
             clock_id,
@@ -227,7 +235,7 @@ impl PosixTimerTable {
             timer.deadline_ns = 0;
         } else {
             let now = clock_now_ns(timer.clock_id);
-            let abs_flag = flags & 1; // TIMER_ABSTIME = 1
+            let abs_flag = flags & TIMER_ABSTIME as i32;
             if abs_flag != 0 {
                 // Absolute time: use the requested time directly.
                 // If it's already in the past, poll_expired will fire
@@ -237,18 +245,18 @@ impl PosixTimerTable {
                 // Relative time
                 timer.deadline_ns = now + new_value_ns;
             }
-            // Register with the alarm system so poll_timer fires
-            if timer.deadline_ns > 0 {
-                let remaining = timer
-                    .deadline_ns
-                    .saturating_sub(clock_now_ns(timer.clock_id));
-                // Register alarm even if remaining == 0 (already expired)
-                // so that poll_expired runs on the next tick.
-                register_alarm_for(
-                    wall_time() + Duration::from_nanos(remaining),
-                    AlarmTarget::Process(pid),
-                );
-            }
+            // Register with the alarm system so poll_timer fires. Both branches
+            // above assign a strictly-positive deadline (this is the
+            // `new_value_ns != 0` arm), so no `deadline_ns > 0` guard is needed.
+            // Compute `remaining` against the `now` already read above (the same
+            // reading both branches used) rather than a second clock read.
+            let remaining = timer.deadline_ns.saturating_sub(now);
+            // Register alarm even if remaining == 0 (already expired)
+            // so that poll_expired runs on the next tick.
+            register_alarm_for(
+                wall_time() + Duration::from_nanos(remaining),
+                AlarmTarget::Process(pid),
+            );
         }
 
         Ok((old_interval, old_remaining))
@@ -269,10 +277,11 @@ impl PosixTimerTable {
         Ok((timer.interval_ns, remaining))
     }
 
-    /// Check all timers for expiry and return signals to deliver.
-    /// Called from the alarm_task via poll_timer.
-    /// `task` is the user task that owns these timers (needed to
-    /// re-register alarms for periodic timers).
+    /// Check all timers for expiry, invoking `emitter` once per expired timer
+    /// (there is no return value).
+    ///
+    /// Called from the alarm task via `poll_process_timer`. `pid` identifies the
+    /// owning process and is used to re-register the alarm for periodic timers.
     pub fn poll_expired(&self, pid: Pid, mut emitter: impl FnMut(SignalInfo)) {
         let mut timers = self.timers.lock();
         for timer in timers.values_mut() {
