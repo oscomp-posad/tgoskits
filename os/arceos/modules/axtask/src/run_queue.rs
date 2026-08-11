@@ -207,6 +207,46 @@ fn select_least_loaded(cpumask: AxCpuMask) -> usize {
         .unwrap_or_else(|| select_run_queue_index(cpumask))
 }
 
+/// Wake-spread: pure idle-core picker (no run-queue deref, host-testable). Prefers a
+/// cache-warm idle `prev`, else the biggest-capacity idle core (a bandwidth worker → an
+/// idle A76), lowest index on a capacity tie. `None` if no core is idle. `waker` is
+/// excluded from the `prev` shortcut (it is never idle, but this is defensive).
+#[cfg(feature = "sched-loadbalance-wake-spread")]
+fn pick_idle_core(
+    cpu_num: usize,
+    prev: usize,
+    waker: usize,
+    idle: impl Fn(usize) -> bool,
+    cap: impl Fn(usize) -> usize,
+) -> Option<usize> {
+    if prev < cpu_num && prev != waker && idle(prev) {
+        return Some(prev); // Linux select_idle_sibling: a warm idle prev wins
+    }
+    let mut best: Option<(usize, usize)> = None; // (cpu, capacity)
+    for cpu in 0..cpu_num {
+        if !idle(cpu) {
+            continue;
+        }
+        if best.is_none_or(|(_, bc)| cap(cpu) > bc) {
+            best = Some((cpu, cap(cpu)));
+        }
+    }
+    best.map(|(c, _)| c)
+}
+
+/// Wake-spread: prefer a fully-idle (`occ == 0`), allowed, online sibling with a whole
+/// core to give a CPU-bound wakee; big-core then lowest-index tie-break. `None` if none
+/// — under oversubscription this yields, so the wake path keeps the wake_affine coalesce
+/// unchanged. Only consulted for a CPU-bound wakee (see `select_wake_run_queue`).
+#[cfg(feature = "sched-loadbalance-wake-spread")]
+fn select_idle_sibling(cpumask: AxCpuMask, prev_cpu: usize, waker: usize) -> Option<usize> {
+    use core::sync::atomic::Ordering;
+    let online = RUN_QUEUE_ONLINE.load(Ordering::Acquire);
+    let idle =
+        |c: usize| cpumask.get(c) && (online & (1usize << c)) != 0 && get_run_queue(c).occ() == 0;
+    pick_idle_core(ax_hal::cpu_num(), prev_cpu, waker, idle, cpu_capacity)
+}
+
 /// Normalized compute capacity of `cpu` (big.LITTLE weighting), floored at 1 so
 /// `effective_load`'s division is always well-defined. Sourced from the device
 /// tree's `capacity-dmips-mhz` (A76 ~ 1024, A55 ~ 530); homogeneous machines
@@ -715,7 +755,70 @@ pub(crate) fn select_wake_run_queue<G: BaseGuard>(task: &AxTaskRef) -> AxRunQueu
         };
         #[cfg(all(feature = "sched-loadbalance", not(feature = "sched-loadbalance-wake-affine")))]
         let affine: Option<usize> = None;
-        #[cfg(feature = "sched-loadbalance")]
+        // Wake-spread ON: a CPU-bound wakee prefers a fully-idle sibling over the
+        // wake_affine coalesce, so two long-running workers don't timeslice one core.
+        // When the wakee is short-stint (messaging) or no idle sibling exists
+        // (oversubscription), `spread` is None and the order below is identical to the
+        // flag-off arm — the messaging coalesce is preserved.
+        #[cfg(all(
+            feature = "sched-loadbalance",
+            feature = "sched-loadbalance-wake-spread"
+        ))]
+        let index = {
+            // Prefer a fully-idle sibling for the wakee (prev-preferred). wake-idle-sibling
+            // ON: for ANY wakee (Linux select_idle_sibling) — two racing barrier workers
+            // each grab a DISTINCT idle core (occ bumped at enqueue), fixing the mem_bw2
+            // startup-barrier bunch the prev-ONLY check missed (across the barrier's
+            // multi-step wake a worker's prev is transiently occupied by its sibling, so
+            // prev_idle fails and wake_affine co-located them; checking ANY idle core is
+            // race-robust). Only cheap because idle-poll makes the idle-core wake
+            // immediate. OFF: only a CPU-bound wakee (wake-spread), so short-stint
+            // messaging keeps the wake_affine coalesce.
+            #[cfg(feature = "sched-loadbalance-wake-idle-sibling")]
+            let idle_target: Option<usize> = select_idle_sibling(cpumask, last_cpu, this_cpu_id());
+            #[cfg(not(feature = "sched-loadbalance-wake-idle-sibling"))]
+            let idle_target: Option<usize> = if task.is_cpu_bound() {
+                select_idle_sibling(cpumask, last_cpu, this_cpu_id())
+            } else {
+                None
+            };
+            let occ_prev = if last_ok {
+                get_run_queue(last_cpu).occ()
+            } else {
+                usize::MAX
+            };
+            let prev_idle = last_ok && occ_prev == 0;
+            let idx = if let Some(cpu) = idle_target {
+                cpu // wakee → a fully-idle sibling (prev-preferred), no co-location
+            } else if let Some(waker) = affine {
+                waker // wake_affine: cache-local hand-off (oversubscribed / no idle core)
+            } else if prev_idle {
+                last_cpu // idle previous CPU (cache-warm)
+            } else {
+                select_least_loaded(cpumask) // spread an independent burst
+            };
+            // Wake-placement trace (diagnostic; /proc/wakeprof). Records why each wake
+            // landed where — used to root-cause the mem_bw2 barrier bunch flakiness.
+            #[cfg(feature = "wakeprof")]
+            {
+                let flags = (idle_target.is_some() as u8)
+                    | ((prev_idle as u8) << 2)
+                    | ((affine.is_some() as u8) << 3);
+                crate::wakeprof::note_wake_place(
+                    this_cpu_id(),
+                    if last_ok { Some(last_cpu) } else { None },
+                    occ_prev,
+                    idx,
+                    flags,
+                    task.id().as_u64(),
+                );
+            }
+            idx
+        };
+        #[cfg(all(
+            feature = "sched-loadbalance",
+            not(feature = "sched-loadbalance-wake-spread")
+        ))]
         let index = if let Some(waker) = affine {
             waker // wake_affine: cache-local sync hand-off, no cross-core IPI
         } else if last_ok && get_run_queue(last_cpu).occ() == 0 {
@@ -1551,6 +1654,23 @@ impl AxRunQueue {
             return;
         }
 
+        // Wake-spread (CPU-boundness) accounting: fold `prev`'s just-finished run stint
+        // into its EWMA and stamp `next`'s switch-in, so the wake path can tell a
+        // long-running compute/bandwidth task (spread to an idle sibling) from a short
+        // ping-pong partner (keep the wake_affine coalesce). One time read per real
+        // context switch, off the wake hot path; after the `prev == next` fast path so a
+        // re-pick pays nothing. Idle tasks are skipped (an idle task is never a wakee).
+        #[cfg(feature = "sched-loadbalance-wake-spread")]
+        {
+            let now = ax_hal::time::monotonic_time_nanos();
+            if !prev_task.is_idle() {
+                prev_task.note_stint_end(now);
+            }
+            if !next_task.is_idle() {
+                next_task.set_run_start_ns(now);
+            }
+        }
+
         // Record when `prev` leaves the CPU: its cache is warmest now and cools from
         // here. `idle_pull_once`/`pull_task` (and push-balance) refuse to migrate a
         // task whose deschedule was more recent than `MIGRATION_COST_NANOS`.
@@ -1994,4 +2114,111 @@ pub(crate) fn init_secondary(stack_ptr: VirtAddr, stack_size: usize) {
     // Mark this CPU's run queue online so round-robin spawn placement may target it.
     #[cfg(feature = "smp")]
     RUN_QUEUE_ONLINE.fetch_or(1 << cpu_id, core::sync::atomic::Ordering::Release);
+}
+
+#[cfg(all(test, feature = "host-test", feature = "sched-loadbalance-wake-spread"))]
+mod wake_spread_tests {
+    use super::{TaskInner, pick_idle_core};
+
+    const THRESH: u64 = TaskInner::CPU_BOUND_STINT_NANOS; // 500_000 ns
+
+    // ---- EWMA discriminator (TaskInner::ewma_step) ----
+
+    #[test]
+    fn ewma_single_step_is_stint_over_eight() {
+        // From a zero seed, one fold contributes exactly stint/8.
+        assert_eq!(TaskInner::ewma_step(0, 2_000_000), 2_000_000 >> 3);
+    }
+
+    #[test]
+    fn ping_pong_stints_stay_below_threshold() {
+        // A messaging partner: ~26 µs stints (the hackbench per-pair figure). Even at
+        // steady state the EWMA converges toward the stint value (~26 µs), far under
+        // the 500 µs threshold, so is_cpu_bound stays false and the coalesce is kept.
+        let mut e = 0u64;
+        for _ in 0..64 {
+            e = TaskInner::ewma_step(e, 26_000);
+        }
+        assert!(e < THRESH, "ping-pong EWMA {e} unexpectedly >= {THRESH}");
+    }
+
+    #[test]
+    fn compute_stints_cross_threshold() {
+        // A streaming worker: ~2 ms stints between barriers. The EWMA climbs well past
+        // the threshold within a handful of stints.
+        let mut e = 0u64;
+        for _ in 0..16 {
+            e = TaskInner::ewma_step(e, 2_000_000);
+        }
+        assert!(e >= THRESH, "compute EWMA {e} unexpectedly < {THRESH}");
+    }
+
+    #[test]
+    fn one_anomalous_long_stint_does_not_flip_a_messaging_task() {
+        // Hysteresis: a messaging task (long 26 µs history) that runs long ONCE must not
+        // immediately be misclassified as CPU-bound (α = 1/8 damps the single spike).
+        let mut e = 0u64;
+        for _ in 0..64 {
+            e = TaskInner::ewma_step(e, 26_000);
+        }
+        e = TaskInner::ewma_step(e, 2_000_000); // one anomalous long stint
+        assert!(e < THRESH, "single long stint wrongly flipped EWMA to {e}");
+    }
+
+    #[test]
+    fn one_short_stint_does_not_clear_a_compute_task() {
+        // Symmetric hysteresis: a CPU-bound task that blocks early ONCE stays CPU-bound.
+        let mut e = 0u64;
+        for _ in 0..16 {
+            e = TaskInner::ewma_step(e, 2_000_000);
+        }
+        e = TaskInner::ewma_step(e, 26_000); // one anomalous short stint
+        assert!(
+            e >= THRESH,
+            "single short stint wrongly cleared EWMA to {e}"
+        );
+    }
+
+    // ---- Idle-core picker (pick_idle_core) ----
+
+    // RK3588-like capacity map: cpu0-3 = A55 (530), cpu4-7 = A76 (1024).
+    fn cap(c: usize) -> usize {
+        if c >= 4 { 1024 } else { 530 }
+    }
+
+    #[test]
+    fn warm_idle_prev_wins() {
+        // prev is idle and not the waker -> return prev (cache-warm), even though a
+        // bigger-capacity idle core exists.
+        let idle = |c: usize| c == 1 || c == 5;
+        assert_eq!(pick_idle_core(8, 1, 0, idle, cap), Some(1));
+    }
+
+    #[test]
+    fn biggest_capacity_idle_core_when_prev_busy() {
+        // prev busy -> pick the biggest-capacity idle core: an idle A76 over an idle A55.
+        let idle = |c: usize| c == 2 || c == 6;
+        assert_eq!(pick_idle_core(8, 3, 0, idle, cap), Some(6));
+    }
+
+    #[test]
+    fn lowest_index_breaks_capacity_tie() {
+        // Two idle A76 cores, prev busy -> lowest index wins.
+        let idle = |c: usize| c == 4 || c == 6;
+        assert_eq!(pick_idle_core(8, 3, 0, idle, cap), Some(4));
+    }
+
+    #[test]
+    fn none_when_no_core_idle() {
+        let idle = |_c: usize| false;
+        assert_eq!(pick_idle_core(8, 3, 0, idle, cap), None);
+    }
+
+    #[test]
+    fn waker_is_never_returned_via_prev_shortcut() {
+        // prev == waker: the warm-prev shortcut must be skipped (the waker is the very
+        // core we are trying to spread OFF of). Falls through to the biggest idle core.
+        let idle = |c: usize| c == 0 || c == 5; // 0 is both prev and waker here
+        assert_eq!(pick_idle_core(8, 0, 0, idle, cap), Some(5));
+    }
 }

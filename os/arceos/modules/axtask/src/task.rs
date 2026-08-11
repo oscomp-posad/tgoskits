@@ -131,6 +131,19 @@ pub struct TaskInner {
     ))]
     last_stop_nanos: AtomicU64,
 
+    /// Wake-spread (CPU-boundness) discriminator. `run_start_ns` is the monotonic-ns
+    /// stamp of this task's most recent switch-IN; at switch-OUT `now - run_start_ns`
+    /// is one run stint folded into `run_ewma_ns` (EWMA, α = 1/8). A high EWMA means
+    /// the task holds a core for long stretches (CPU/memory-bound) → on wakeup it is
+    /// spread to a fully-idle sibling instead of coalesced onto the waker; a low EWMA
+    /// (short ping-pong stints) keeps the cache-local wake_affine hand-off. `0` in
+    /// `run_start_ns` = not currently on a CPU (guards the first fold). See
+    /// `run_queue::select_idle_sibling` and [`Self::is_cpu_bound`].
+    #[cfg(feature = "sched-loadbalance-wake-spread")]
+    run_start_ns: AtomicU64,
+    #[cfg(feature = "sched-loadbalance-wake-spread")]
+    run_ewma_ns: AtomicU64,
+
     /// A ticket ID used to identify the timer event.
     /// Set by `set_timer_ticket()` when creating a timer event in `set_alarm_wakeup()`,
     /// expired by setting it as zero in `timer_ticket_expired()`, which is called by `cancel_events()`.
@@ -437,6 +450,10 @@ impl TaskInner {
                 any(feature = "sched-loadbalance-pull", feature = "sched-loadbalance-push")
             ))]
             last_stop_nanos: AtomicU64::new(0),
+            #[cfg(feature = "sched-loadbalance-wake-spread")]
+            run_start_ns: AtomicU64::new(0),
+            #[cfg(feature = "sched-loadbalance-wake-spread")]
+            run_ewma_ns: AtomicU64::new(0),
             #[cfg(feature = "preempt")]
             need_resched: AtomicBool::new(false),
             #[cfg(feature = "preempt")]
@@ -743,6 +760,53 @@ impl TaskInner {
     #[inline]
     pub(crate) fn set_last_stop_nanos(&self, now: u64) {
         self.last_stop_nanos.store(now, Ordering::Relaxed)
+    }
+
+    /// Wake-spread: EWMA threshold (ns) at/above which a task is CPU-bound. 500 µs is
+    /// ~20× the ~26 µs hackbench ping-pong stint and ~5 % of one 10 ms tick, so a
+    /// messaging partner never crosses it while a streaming worker sits far above.
+    /// Board-A/B swept over {250 µs, 500 µs, 1 ms}; see SCHED_SPREAD_VERIFIED.
+    #[cfg(feature = "sched-loadbalance-wake-spread")]
+    pub(crate) const CPU_BOUND_STINT_NANOS: u64 = 500_000;
+
+    /// Wake-spread: fold one `stint`-ns run into the previous EWMA (α = 1/8, shift-only,
+    /// no divide). Pure — host-unit-tested.
+    #[cfg(feature = "sched-loadbalance-wake-spread")]
+    #[inline]
+    pub(crate) fn ewma_step(prev: u64, stint: u64) -> u64 {
+        prev - (prev >> 3) + (stint >> 3)
+    }
+
+    /// Wake-spread: monotonic-ns stamp of this task's most recent switch-IN
+    /// (`0` = not currently on a CPU). See the `run_start_ns` field.
+    #[cfg(feature = "sched-loadbalance-wake-spread")]
+    #[inline]
+    pub(crate) fn set_run_start_ns(&self, now: u64) {
+        self.run_start_ns.store(now, Ordering::Relaxed)
+    }
+
+    /// Wake-spread: fold the just-finished run stint (`now - run_start_ns`) into the
+    /// EWMA and clear `run_start_ns` (the swap makes a re-entrant call a no-op, so a
+    /// stint is never double-folded). No-op if the task was not marked on-CPU
+    /// (`run_start_ns == 0`) or `now` does not advance past the stamp (monotonic guard).
+    #[cfg(feature = "sched-loadbalance-wake-spread")]
+    #[inline]
+    pub(crate) fn note_stint_end(&self, now: u64) {
+        let start = self.run_start_ns.swap(0, Ordering::Relaxed);
+        if start == 0 || now <= start {
+            return;
+        }
+        let prev = self.run_ewma_ns.load(Ordering::Relaxed);
+        self.run_ewma_ns
+            .store(Self::ewma_step(prev, now - start), Ordering::Relaxed);
+    }
+
+    /// Wake-spread: is this task's EWMA run-stint at/above the CPU-bound threshold?
+    /// Read on the wake hot path — one `Relaxed` load + integer compare.
+    #[cfg(feature = "sched-loadbalance-wake-spread")]
+    #[inline]
+    pub(crate) fn is_cpu_bound(&self) -> bool {
+        self.run_ewma_ns.load(Ordering::Relaxed) >= Self::CPU_BOUND_STINT_NANOS
     }
 
     /// Stash an owned reference for a deferred cross-core wake (see the

@@ -112,6 +112,41 @@ static IN_WFI: [core::sync::atomic::AtomicBool; NCPU] =
 static SGI_TO_WFI: AtomicU64 = AtomicU64::new(0);
 static SGI_TO_AWAKE: AtomicU64 = AtomicU64::new(0);
 
+/// Wake-placement decision trace: a ring buffer recording, for each wakeup, which
+/// core `select_wake_run_queue` chose and why. Bounded so it captures the handful of
+/// wakes a low-wake workload (e.g. a mem_bw2 barrier release) makes without flooding.
+/// Each slot packs one decision (see `note_wake_place`). Dumped by `render()` (i.e.
+/// `cat /proc/wakeprof`), cleared by `reset()` (`cat /proc/wakeprof_reset`).
+const WT_N: usize = 512;
+static WT_BUF: [AtomicU64; WT_N] = [const { AtomicU64::new(0) }; WT_N];
+static WT_HEAD: AtomicU64 = AtomicU64::new(0);
+
+/// Record one wake-placement decision. `prev` is the wakee's previous CPU (`None` if
+/// not usable), `occ_prev` its occupancy at decision time, `chosen` the target core.
+/// `flags` bit0=wake-spread fired, bit1=prefer-idle-prev fired, bit2=prev was idle,
+/// bit3=wake_affine eligible. `wakee` is the woken task id (low 24 bits kept).
+/// Packing (u64): [63]valid [59..63]waker [53..59]prev(63=none) [45..53]occ_prev(cap255)
+/// [39..45]chosen [35..39]flags [0..24]wakee_lo.
+pub(crate) fn note_wake_place(
+    waker: usize,
+    prev: Option<usize>,
+    occ_prev: usize,
+    chosen: usize,
+    flags: u8,
+    wakee: u64,
+) {
+    let prev6 = prev.map(|p| (p as u64) & 0x3f).unwrap_or(0x3f);
+    let packed = (1u64 << 63)
+        | (((waker as u64) & 0xf) << 59)
+        | (prev6 << 53)
+        | (((occ_prev.min(255)) as u64) << 45)
+        | (((chosen as u64) & 0x3f) << 39)
+        | (((flags as u64) & 0xf) << 35)
+        | (wakee & 0xff_ffff);
+    let i = (WT_HEAD.fetch_add(1, Relaxed) as usize) % WT_N;
+    WT_BUF[i].store(packed, Relaxed);
+}
+
 /// Idle loop entering/leaving WFI on CPU `cpu`.
 #[inline]
 pub(crate) fn wfi_enter(cpu: usize) {
@@ -235,6 +270,10 @@ pub fn reset() {
         KICK_TS[i].store(0, Relaxed);
         HANDLER_TS[i].store(0, Relaxed);
     }
+    WT_HEAD.store(0, Relaxed);
+    for w in &WT_BUF {
+        w.store(0, Relaxed);
+    }
 }
 
 fn render_cat(name: &str, c: &Cat) -> String {
@@ -267,5 +306,37 @@ pub fn render() -> String {
         SGI_TO_WFI.load(Relaxed),
         SGI_TO_AWAKE.load(Relaxed),
     ));
+    // Wake-placement trace, oldest first. flags: S=wake-spread fired,
+    // P=prefer-idle-prev fired, i=prev-idle, A=affine-eligible.
+    s.push_str("wake-place trace (waker prev occ -> chosen [flags]):\n");
+    let head = WT_HEAD.load(Relaxed) as usize;
+    let start = head.saturating_sub(WT_N);
+    for k in start..head {
+        let p = WT_BUF[k % WT_N].load(Relaxed);
+        if p >> 63 == 0 {
+            continue;
+        }
+        let waker = (p >> 59) & 0xf;
+        let prev = (p >> 53) & 0x3f;
+        let occ = (p >> 45) & 0xff;
+        let chosen = (p >> 39) & 0x3f;
+        let f = (p >> 35) & 0xf;
+        let tid = p & 0xff_ffff;
+        let fl = alloc::format!(
+            "{}{}{}{}",
+            if f & 1 != 0 { "S" } else { "-" },
+            if f & 2 != 0 { "P" } else { "-" },
+            if f & 4 != 0 { "i" } else { "-" },
+            if f & 8 != 0 { "A" } else { "-" },
+        );
+        let prevs = if prev == 0x3f {
+            String::from("-")
+        } else {
+            alloc::format!("{prev}")
+        };
+        s.push_str(&alloc::format!(
+            "WP tid={tid} w={waker} prev={prevs} occ={occ} -> cpu{chosen} [{fl}]\n"
+        ));
+    }
     s
 }

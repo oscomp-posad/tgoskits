@@ -28,6 +28,13 @@ sched-loadbalance-wake-affine = ["ax-task/sched-loadbalance-wake-affine"]
 # Relaxed wake_affine gate (load compare vs prev CPU) — fixes the oversubscription
 # hackbench scaling cliff by keeping sync ping-pong pairs CPU-local under load.
 wake-affine-loaded = ["ax-task/wake-affine-loaded"]
+# CPU-boundness-gated wake spread: a CPU-bound wakee prefers a fully-idle sibling over
+# the wake_affine coalesce (fixes block-synchronized concurrent workers bunching onto
+# one core, e.g. mem_bw2 / sysbench-memory). OFF by default. See ax-task.
+sched-loadbalance-wake-spread = ["ax-task/sched-loadbalance-wake-spread"]
+# Wake-idle-sibling: unconditional select_idle_sibling — any wakee prefers a fully-idle
+# sibling (un-bunches startup-barrier workers, e.g. mem_bw2 2T; needs idle-poll). See ax-task.
+sched-loadbalance-wake-idle-sibling = ["ax-task/sched-loadbalance-wake-idle-sibling"]
 # Opt-in runtime migration on top of placement (Linux newidle + periodic balance),
 # guarded by is-busy source + MIGRATION_COST horizon. See ax-task's features.
 sched-loadbalance-pull = ["ax-task/sched-loadbalance-pull"]

@@ -78,6 +78,30 @@ sched-loadbalance-wake-affine = ["sched-loadbalance"]
 # wakes) while independent bursts still spread. See select_wake_run_queue.
 wake-affine-loaded = ["sched-loadbalance-wake-affine"]
 
+# CPU-boundness-gated wake spread: on a wakeup, if the wakee is CPU-bound (high EWMA
+# run-stint, `is_cpu_bound`), prefer a fully-idle sibling (`select_idle_sibling`) over
+# the wake_affine coalesce, so two long-running compute/bandwidth workers do not
+# timeslice one core (fixes mem_bw2 2T unpinned ~21.7 vs pinned ~42.9). Serial
+# ping-pong partners (short EWMA stint) and the oversubscribed case (no idle sibling)
+# keep the exact wake_affine path, preserving the messaging win. OFF by default;
+# layered on wake_affine. See select_wake_run_queue / select_idle_sibling and
+# SCHED_SPREAD_VERIFIED_2026-08-12.md. Promote only after a board A/B.
+sched-loadbalance-wake-spread = ["sched-loadbalance-wake-affine"]
+
+# Wake-idle-sibling placement: makes `select_idle_sibling` unconditional — on a wakeup
+# ANY wakee (not just a CPU-bound one) prefers a fully-idle sibling (its idle prev CPU
+# first, else the biggest idle core) over the wake_affine coalesce. Un-bunches barrier-
+# woken concurrent workers that wake-spread's EWMA can't catch (a one-shot startup
+# barrier has no run-history): across the barrier's multi-step wake (cond → mutex
+# lock/unlock) the racing workers transiently occupy each other's prev core, so a
+# prev-ONLY check fails and wake_affine co-locates them — checking ANY idle core is
+# race-robust (occ bumped at enqueue → the 2nd wakee never sees the 1st's core idle).
+# Fixes mem_bw2 / sysbench-memory 2T (~24 → ~50 GB/s on RK3588). Self-limiting: under
+# oversubscription no idle core exists → `select_idle_sibling` None → wake_affine
+# coalesces (messaging untouched). Only cheap with idle-poll (idle core picked up
+# immediately, no ~1ms SGI-to-WFI stall); layered on wake-spread. See select_wake_run_queue.
+sched-loadbalance-wake-idle-sibling = ["sched-loadbalance-wake-spread"]
+
 # Newidle work-stealing: an idle CPU pulls one genuinely-excess Ready task off the
 # busiest remote before halting (Linux `newidle_balance`). Guarded by an is-busy
 # source gate + a MIGRATION_COST cache-hotness horizon so a briefly-blocked task is
