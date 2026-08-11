@@ -42,8 +42,15 @@ impl PagingMetaData for A64PagingMetaData {
                     in(reg) ((vaddr.as_usize() >> 12) & VA_MASK)
                 )
             } else {
-                // TLB Invalidate by VMID, All at stage 1, EL1
-                asm!("dsb ishst; tlbi vmalle1; dsb sy; isb")
+                // TLB Invalidate, All at stage 1, EL1, Inner Shareable. This is
+                // the *broadcast* (`is`) variant, not the local `vmalle1`: the full
+                // flush is the cursor's fallback once more than
+                // `SMALL_FLUSH_THRESHOLD` VAs are touched (a large unmap/protect),
+                // so a local-only flush would leave sibling cores with stale TLB
+                // entries — an MT `mprotect`/COW write-protect over many pages
+                // could then be bypassed on another core through a stale writable
+                // entry. Matches the broadcast `vaae1is` used by the by-VA path.
+                asm!("dsb ishst; tlbi vmalle1is; dsb sy; isb")
             }
         }
     }
