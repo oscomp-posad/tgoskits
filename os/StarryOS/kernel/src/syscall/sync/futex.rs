@@ -12,7 +12,7 @@ use linux_raw_sys::general::{
 use starry_vm::{VmMutPtr, VmPtr};
 
 use crate::{
-    mm::atomic_update_user_u32,
+    mm::{atomic_read_user_u32, atomic_update_user_u32},
     task::{AsThread, FutexKey, FutexKeyMode, futex_table_for, get_task},
     time::TimeValueLike,
 };
@@ -199,8 +199,9 @@ pub fn sys_futex(
 
     match op.command {
         FutexCommand::Wait | FutexCommand::WaitBitset => {
-            // Fast path
-            if uaddr.vm_read()? != value {
+            // Fast path. Atomic single-load read (not the byte-wise `vm_read`) so a
+            // concurrent userspace store to the futex word is never observed torn.
+            if atomic_read_user_u32(uaddr)? != value {
                 return Err(AxError::WouldBlock);
             }
 
@@ -218,7 +219,9 @@ pub fn sys_futex(
             if !futex
                 .wq
                 .wait_if_with_cleanup(bitset, timeout, Some(cleanup), || {
-                    uaddr.vm_read() == Ok(value)
+                    // Race-closing re-check under the futex lock: an atomic (untorn)
+                    // read here is what prevents blocking through a concurrent wake.
+                    atomic_read_user_u32(uaddr).is_ok_and(|v| v == value)
                 })?
             {
                 return Err(AxError::WouldBlock);
@@ -257,7 +260,8 @@ pub fn sys_futex(
             let target_cleanup = table2.cleanup_for(&key2);
 
             let Some(source) = futex_table.get(&key) else {
-                if op.command == FutexCommand::CmpRequeue && uaddr.vm_read()? != value3 {
+                if op.command == FutexCommand::CmpRequeue && atomic_read_user_u32(uaddr)? != value3
+                {
                     return Err(AxError::WouldBlock);
                 }
                 return Ok(0);
@@ -271,7 +275,7 @@ pub fn sys_futex(
                 &target.wq,
                 || {
                     if op.command == FutexCommand::CmpRequeue {
-                        Ok(uaddr.vm_read()? == value3)
+                        Ok(atomic_read_user_u32(uaddr)? == value3)
                     } else {
                         Ok(true)
                     }
