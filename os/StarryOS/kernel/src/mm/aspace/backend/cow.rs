@@ -882,7 +882,15 @@ impl BackendOps for CowBackend {
                         child.copy_charge_from(parent, vaddr)?;
                     }
                 }
-                Err(PagingError::NotMapped) => {}
+                // A not-present huge block (a THP block whose present bit was
+                // cleared by `mprotect(PROT_NONE)`) has no valid translation to
+                // clone into the child — `query` reports it as `MappedToHugePage`
+                // because it is neither a normal mapping nor a table. Skip it like
+                // an unmapped page: the parent keeps its sole reference (freed on
+                // its own unmap), and the child inherits the VMA but not this
+                // inaccessible page. Without this, fork of a process that
+                // PROT_NONE'd a THP region fails with EFAULT.
+                Err(PagingError::NotMapped) | Err(PagingError::MappedToHugePage) => {}
                 Err(_) => return Err(AxError::BadAddress),
             };
         }
