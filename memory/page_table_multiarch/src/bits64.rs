@@ -10,6 +10,11 @@ use crate::{
 
 const ENTRY_COUNT: usize = 512;
 
+/// How many freed table frames `reclaim_empty_tables` buffers before draining
+/// them behind one TLB completion barrier. Bounds the transient held-but-freed
+/// frames and the on-stack buffer (`RECLAIM_TLB_BATCH * size_of::<PhysAddr>()`).
+const RECLAIM_TLB_BATCH: usize = 32;
+
 const fn p4_index(vaddr: usize) -> usize {
     (vaddr >> (12 + 27)) & (ENTRY_COUNT - 1)
 }
@@ -426,8 +431,19 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64<M, PTE, H
         let lo: usize = vaddr.into();
         let hi = lo.saturating_add(size);
         let root = self.root_paddr();
+        // Freed table frames are buffered and released in chunks so a whole
+        // recursion pays one completion barrier per chunk instead of one per
+        // freed table (a 1 GiB unmap frees ~512 tables). The barrier MUST precede
+        // the frees (see `reclaim_empty_in_range`).
+        let mut batch: ArrayVec<PhysAddr, RECLAIM_TLB_BATCH> = ArrayVec::new();
         // The root table is never freed; ignore its emptiness.
-        let _ = self.reclaim_empty_in_range(root, 0, 0, lo, hi);
+        let _ = self.reclaim_empty_in_range(root, 0, 0, lo, hi, &mut batch);
+        if !batch.is_empty() {
+            M::flush_tlb_sync();
+            for pa in batch.drain(..) {
+                H::dealloc_frame(pa);
+            }
+        }
     }
 
     /// Recursively frees the empty descendant tables of `table_paddr` (which
@@ -442,6 +458,7 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64<M, PTE, H
         base: usize,
         lo: usize,
         hi: usize,
+        batch: &mut ArrayVec<PhysAddr, RECLAIM_TLB_BATCH>,
     ) -> bool {
         // A last-level (leaf) table holds pages, not sub-tables: report only
         // whether it is empty so the parent can decide to free it.
@@ -471,13 +488,29 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64<M, PTE, H
                 continue;
             }
             let child_paddr = entry.paddr();
-            if self.reclaim_empty_in_range(child_paddr, level + 1, entry_base, lo, hi) {
-                // Break-before-make: clear the parent entry and complete the TLBI
-                // (invalidating the cached walk of this table) before freeing the
-                // now-unreferenced table frame.
+            if self.reclaim_empty_in_range(child_paddr, level + 1, entry_base, lo, hi, batch) {
+                // Break-before-make: clear the parent entry and issue the
+                // (broadcast) TLBI that invalidates the cached walk of this table.
+                // The completion barrier and the frame free are DEFERRED: the
+                // child frame must not be returned to the allocator until a
+                // `flush_tlb_sync` has completed its TLBI, else another core could
+                // reallocate and write the frame while a stale walk still reads it
+                // as page-table entries. Buffer the frame; free it only after the
+                // batched sync (on drain-when-full below, or the tail drain in
+                // `reclaim_empty_tables`).
                 entry.clear();
-                M::flush_tlb(Some(entry_base.into()));
-                H::dealloc_frame(child_paddr);
+                M::flush_tlb_nosync(entry_base.into());
+                if batch.try_push(child_paddr).is_err() {
+                    // Buffer full: complete the batched invalidations, then free
+                    // the whole chunk. Only paddrs whose TLBI was issued before
+                    // this sync are freed, so completion provably precedes reuse.
+                    M::flush_tlb_sync();
+                    for pa in batch.drain(..) {
+                        H::dealloc_frame(pa);
+                    }
+                    // The buffer is now empty, so this push cannot fail.
+                    let _ = batch.try_push(child_paddr);
+                }
             } else {
                 all_children_freed = false;
             }
@@ -922,9 +955,13 @@ impl<'a, M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64Cursor
         match &self.flusher {
             TlbFlusher::None => {}
             TlbFlusher::Array(addrs) => {
+                // Batch the by-VA invalidations behind one completion barrier
+                // instead of one per address. No frame is freed here (the cursor
+                // only records VAs), so deferring the barrier to the end is sound.
                 for vaddr in addrs.iter() {
-                    M::flush_tlb(Some(*vaddr));
+                    M::flush_tlb_nosync(*vaddr);
                 }
+                M::flush_tlb_sync();
             }
             TlbFlusher::Full => {
                 M::flush_tlb(None);

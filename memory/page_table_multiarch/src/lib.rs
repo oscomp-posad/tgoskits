@@ -118,6 +118,34 @@ pub trait PagingMetaData: Sync + Send {
     /// If `vaddr` is [`None`], flushes the entire TLB. Otherwise, flushes the
     /// TLB entry at the given virtual address.
     fn flush_tlb(vaddr: Option<Self::VirtAddr>);
+
+    /// Issues a TLB invalidation for `vaddr` **without** waiting for it to
+    /// complete on other cores.
+    ///
+    /// This lets a caller batch many by-VA invalidations behind a single
+    /// completion barrier ([`flush_tlb_sync`](Self::flush_tlb_sync)) instead of
+    /// paying one barrier per address. It is **only** sound to defer the barrier
+    /// when nothing observes the invalidation before the matching
+    /// `flush_tlb_sync` — in particular, a page-table frame whose parent entry
+    /// was cleared must NOT be freed or reused until `flush_tlb_sync` has run, or
+    /// a stale walk on another core could read the reused frame.
+    ///
+    /// The default is a fully-synchronous single flush, which is always correct;
+    /// only architectures that separate the invalidation from its completion
+    /// barrier (aarch64) gain anything by overriding it. Overrides MUST keep any
+    /// leading store-ordering barrier that break-before-make relies on.
+    #[inline]
+    fn flush_tlb_nosync(vaddr: Self::VirtAddr) {
+        Self::flush_tlb(Some(vaddr));
+    }
+
+    /// Completes any outstanding [`flush_tlb_nosync`](Self::flush_tlb_nosync)
+    /// invalidations and synchronizes the issuing core.
+    ///
+    /// The default is a no-op, correct because the default `flush_tlb_nosync`
+    /// already completed inline.
+    #[inline]
+    fn flush_tlb_sync() {}
 }
 
 /// The low-level **OS-dependent** helpers that must be provided for

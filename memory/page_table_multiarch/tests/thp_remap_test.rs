@@ -279,6 +279,51 @@ fn unmap_lazy_zero_paddr_entry_frees_nothing() -> PagingResult<()> {
     Ok(())
 }
 
+// Reclaiming a large range frees many intermediate tables through the batched
+// TLB-flush path (buffer freed frames, drain-when-full behind one sync, then a
+// tail drain). `TrackHandler` panics on any double/foreign free, so this pins the
+// batch's frame accounting across the 32-frame `RECLAIM_TLB_BATCH` boundary.
+// Counts 1/32/33/200 exercise tail-only, exactly-full, first-drain+tail, and
+// multiple-drains+tail. MockMeta's no-op flush also exercises the default
+// (non-aarch64) `flush_tlb_nosync`/`flush_tlb_sync` path.
+#[test]
+fn reclaim_batches_many_tables_no_double_free() -> PagingResult<()> {
+    for &n in &[1usize, 32, 33, 200] {
+        LIVE.with_borrow_mut(|it| it.clear());
+        let mut pt = Pt::try_new().unwrap();
+        let base = 0x40_0000usize; // 2 MiB-aligned
+
+        // One 4 KiB page in each of n distinct 2 MiB spans => n stranded L3 tables
+        // (sharing one L2/L1), which the reclaim must free through the batch.
+        for i in 0..n {
+            let va = VirtAddr::from_usize(base + i * HUGE_2M);
+            pt.cursor().map(
+                va,
+                PhysAddr::from_usize(0x1000_0000 + i * PG),
+                PageSize::Size4K,
+                RW,
+            )?;
+        }
+        for i in 0..n {
+            let va = VirtAddr::from_usize(base + i * HUGE_2M);
+            pt.cursor().unmap(va)?;
+        }
+
+        let before = LIVE.with_borrow(|it| it.len());
+        pt.reclaim_empty_tables(VirtAddr::from_usize(base), n * HUGE_2M);
+        let after = LIVE.with_borrow(|it| it.len());
+        assert!(
+            after < before,
+            "n={n}: reclaim should free stranded tables {before} -> {after}"
+        );
+
+        // Teardown must not double-free anything the batch already freed.
+        drop(pt);
+        LIVE.with_borrow(|it| assert!(it.is_empty(), "n={n}: leaked {} frame(s)", it.len()));
+    }
+    Ok(())
+}
+
 #[test]
 fn thp_split_unmap_reclaims_empty_table_on_unmap() -> PagingResult<()> {
     LIVE.with_borrow_mut(|it| it.clear());

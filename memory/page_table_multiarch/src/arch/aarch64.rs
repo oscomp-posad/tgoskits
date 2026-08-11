@@ -54,6 +54,30 @@ impl PagingMetaData for A64PagingMetaData {
             }
         }
     }
+
+    // Split of `flush_tlb(Some)` at the completion barrier, for batching many
+    // by-VA invalidations behind a single `dsb`. `flush_tlb_nosync` issues the
+    // broadcast TLBI (keeping the leading `dsb ishst` that break-before-make
+    // relies on) but does NOT wait for completion; `flush_tlb_sync` is the
+    // deferred `dsb sy; isb`. A caller MUST run `flush_tlb_sync` before relying
+    // on the invalidation — in particular before freeing/reusing a page-table
+    // frame whose parent entry was cleared, or a stale walk on another core could
+    // read the reused frame.
+    #[inline]
+    fn flush_tlb_nosync(vaddr: VirtAddr) {
+        const VA_MASK: usize = (1 << 44) - 1; // VA[55:12] => bits[43:0]
+        unsafe {
+            asm!(
+                "dsb ishst; tlbi vaae1is, {}",
+                in(reg) ((vaddr.as_usize() >> 12) & VA_MASK)
+            )
+        }
+    }
+
+    #[inline]
+    fn flush_tlb_sync() {
+        unsafe { asm!("dsb sy; isb") }
+    }
 }
 
 /// AArch64 VMSAv8-64 translation table.
