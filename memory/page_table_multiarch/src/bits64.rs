@@ -994,6 +994,22 @@ impl<'a, M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64Cursor
                         PageSize::Size4K
                     } // ignore if unused
                 }
+                // A not-present huge block (`mprotect(PROT_NONE)` over a THP
+                // block) is not reachable via `get_entry_mut`, but it still owns
+                // its frame — re-enable it in place with the new flags, exactly as
+                // a present block or a not-present 4 KiB leaf is handled above.
+                // This keeps the block huge (matching Linux, which does not split
+                // a THP region on `mprotect`).
+                Err(PagingError::MappedToHugePage) => {
+                    match self.inner.find_not_present_huge_block_mut(vaddr_usize) {
+                        Some((entry, page_size)) => {
+                            entry.set_flags(flags, page_size.is_huge());
+                            self.push(vaddr);
+                            page_size
+                        }
+                        None => PageSize::Size4K,
+                    }
+                }
                 Err(PagingError::NotMapped) => PageSize::Size4K,
                 Err(e) => {
                     error!("failed to protect page: {vaddr_usize:#x?}, {e:?}");

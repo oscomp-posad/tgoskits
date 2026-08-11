@@ -379,6 +379,38 @@ fn split_not_present_huge_block_preserves_frame() -> PagingResult<()> {
     Ok(())
 }
 
+// A whole-region `mprotect(PROT_READ|WRITE)` after `mprotect(PROT_NONE)` must
+// re-enable a not-present huge block IN PLACE (keeping it huge, as Linux does) —
+// `protect_region` reaches it via the not-present-block finder and sets the new
+// flags, rather than erroring (which the mm layer would silently swallow, leaving
+// the block inaccessible and the next access SIGSEGV-ing).
+#[test]
+fn protect_region_reenables_not_present_huge_block() -> PagingResult<()> {
+    LIVE.with_borrow_mut(|it| it.clear());
+
+    let va = VirtAddr::from_usize(0x40_0000);
+    let d = PhysAddr::from_usize(0x1000_0000);
+    let mut pt = Pt::try_new().unwrap();
+
+    pt.cursor().map(va, d, PageSize::Size2M, RW)?;
+    pt.cursor().protect(va, MappingFlags::empty())?; // -> not-present huge block
+    assert_eq!(pt.query(va), Err(PagingError::MappedToHugePage));
+
+    // Whole-region re-enable (the path mprotect takes for a fully-covered area).
+    pt.cursor().protect_region(va, HUGE_2M, RW)?;
+
+    // Present again, same frame, still a 2 MiB block, writable.
+    let (got, flags, sz) = pt.query(va)?;
+    assert_eq!(sz, PageSize::Size2M);
+    assert_eq!(got.as_usize(), d.as_usize());
+    assert!(flags.contains(MappingFlags::WRITE));
+
+    pt.cursor().unmap(va)?;
+    drop(pt);
+    LIVE.with_borrow(|it| assert!(it.is_empty(), "leaked {} table frame(s)", it.len()));
+    Ok(())
+}
+
 #[test]
 fn thp_split_unmap_reclaims_empty_table_on_unmap() -> PagingResult<()> {
     LIVE.with_borrow_mut(|it| it.clear());

@@ -162,6 +162,26 @@ int main(void)
 		munmap(base, raw);
 	}
 
+	/* F: whole-region PROT_NONE then WHOLE-region re-enable (no split — exercises
+	 * mprotect/protect on the not-present huge block directly). */
+	{
+		size_t raw = 4 * HUGE;
+		char *base = mmap(NULL, raw, PROT_READ | PROT_WRITE,
+				  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+		if (base == MAP_FAILED)
+			exit(2);
+		for (size_t off = 0; off < raw; off += HUGE)
+			base[off] = 1;
+		int rc_pn = mprotect(base, raw, PROT_NONE);
+		int rc_re = mprotect(base, raw, PROT_READ | PROT_WRITE); /* whole re-enable */
+		unsigned long a = ((unsigned long)base + HUGE - 1) & ~(HUGE - 1);
+		int sig = try_write((char *)a); /* access a 2 MiB block: expect ok */
+		printf("F whole-PROT_NONE + whole re-enable: mprotect(NONE)=%d mprotect(RW)=%d access_sig=%d => %s\n",
+		       rc_pn, rc_re, sig,
+		       (rc_pn == 0 && rc_re == 0 && sig == 0) ? "PASS" : "FAIL");
+		munmap(base, raw);
+	}
+
 	printf("THP_REENABLE_DONE\n");
 	return 0;
 }

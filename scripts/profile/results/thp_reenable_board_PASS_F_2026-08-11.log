@@ -1,0 +1,356 @@
+bootm 0x0a000000
+## Loading kernel (any) from FIT Image at 0a000000 ...
+   Using 'conf' configuration
+   Verifying Hash Integrity ... OK
+   Trying 'kernel' kernel subimage
+     Description:  StarryOS kernel
+     Type:         Kernel Image
+     Compression:  uncompressed
+     Data Start:   0x0a0000e0
+     Data Size:    13942816 Bytes = 13.3 MiB
+     Architecture: AArch64
+     OS:           Linux
+     Load Address: 0x02000000
+     Entry Point:  0x02000000
+   Verifying Hash Integrity ... OK
+## Loading fdt (any) from FIT Image at 0a000000 ...
+   Using 'conf' configuration
+   Verifying Hash Integrity ... OK
+   Trying 'fdt' fdt subimage
+     Description:  OrangePi-5-Plus device tree
+     Type:         Flat Device Tree
+     Compression:  uncompressed
+     Data Start:   0x0ad4c1b0
+     Data Size:    280050 Bytes = 273.5 KiB
+     Architecture: AArch64
+     Load Address: 0x12000000
+   Verifying Hash Integrity ... OK
+   Loading fdt from 0x0ad4c1b0 to 0x12000000
+   Booting using the fdt blob at 0x12000000
+Working FDT set to 12000000
+   Loading Kernel Image to 2000000
+   Loading Device Tree to 00000000ecb8e000, end 00000000ecbd55f1 ... OK
+Working FDT set to ecb8e000
+
+Starting kernel ...
+
+root=UUID=3ab40e80-4239-4764-b8ff-c58ee0759ad8 earlycon=uart8250,mmio32,0xfeb50000 rootwait rootfstype=ext4 splash=verbose console=ttyS2,1500000 console=tty1 consoleblank=0 loglevel=1 ubootpart=1af5d396-7e1f-7e40-bb91-af7c495a0115 usb-storage.quirks= cma=128M  cgroup_enable=cpuset cgroup_memory=1 cgroup_enable=memory swapaccount=1
+VM Load @0x2000000
+VM Load Offset: 0x82000000
+Memory Map:
+  Rsv    0x00000000110000 - 0x00000000200000 (960 KiB)
+  Free   0x00000000200000 - 0x00000002000000 (30 MiB)
+  KImg   0x00000002000000 - 0x00000002e00000 (14 MiB)
+  Free   0x00000002e00000 - 0x0000000a100000 (115 MiB)
+  Rsv    0x0000000a100000 - 0x0000000a145000 (276 KiB)
+  Free   0x0000000a145000 - 0x0000000a200000 (748 KiB)
+  Rsv    0x0000000a200000 - 0x0000000b65f000 (20.37 MiB)
+  Free   0x0000000b65f000 - 0x00000010000000 (73.63 MiB)
+  Rsv    0x00000010000000 - 0x00000020000000 (256 MiB)
+  Free   0x00000020000000 - 0x000000f0000000 (3.25 GiB)
+  Free   0x00000100000000 - 0x00000200000000 (4 GiB)
+  Free   0x000002f0000000 - 0x00000300000000 (256 MiB)
+Initialize RAM allocator: 0x200000..0x2000000
+Initializing per-CPU data
+Per-CPU data one cpu size: 0x41000 bytes
+Total per-CPU data size for secondary CPUs: 0x208000 bytes (8 CPUs)
+Flushed RAM used range to memory map: 0x200000..0x245000, current: 0x245000
+Flushed RAM used range to memory map: 0x245000..0x44d000, current: 0x44d000
+Per-CPU data allocated at 0x245000 - 0x44d000
+Initializing per-CPU RAM for CPU0 - hard id 0x0 @ 0x245000
+Initializing per-CPU RAM for CPU1 - hard id 0x100 @ 0x286000
+Initializing per-CPU RAM for CPU2 - hard id 0x200 @ 0x2c7000
+Initializing per-CPU RAM for CPU3 - hard id 0x300 @ 0x308000
+Initializing per-CPU RAM for CPU4 - hard id 0x400 @ 0x349000
+Initializing per-CPU RAM for CPU5 - hard id 0x500 @ 0x38a000
+Initializing per-CPU RAM for CPU6 - hard id 0x600 @ 0x3cb000
+Initializing per-CPU RAM for CPU7 - hard id 0x700 @ 0x40c000
+CPU0 - hard id 0x0, stack top @0x286000, stack top virt @0xffffff0000286000, entry virt @0xffffffff803672ec
+CPU1 - hard id 0x100, stack top @0x2c7000, stack top virt @0xffffff00002c7000, entry virt @0xffffffff803672ec
+CPU2 - hard id 0x200, stack top @0x308000, stack top virt @0xffffff0000308000, entry virt @0xffffffff803672ec
+CPU3 - hard id 0x300, stack top @0x349000, stack top virt @0xffffff0000349000, entry virt @0xffffffff803672ec
+CPU4 - hard id 0x400, stack top @0x38a000, stack top virt @0xffffff000038a000, entry virt @0xffffffff803672ec
+CPU5 - hard id 0x500, stack top @0x3cb000, stack top virt @0xffffff00003cb000, entry virt @0xffffffff803672ec
+CPU6 - hard id 0x600, stack top @0x40c000, stack top virt @0xffffff000040c000, entry virt @0xffffffff803672ec
+CPU7 - hard id 0x700, stack top @0x44d000, stack top virt @0xffffff000044d000, entry virt @0xffffffff803672ec
+EL: 1
+Mapping early memory regions...
+Ram                 : [0xffff000000200000, 0xffff0000f0000000) -> [0x0000000000200000, 0x00000000f0000000) (3.75 GiB)
+Ram                 : [0xffff000100000000, 0xffff000200000000) -> [0x0000000100000000, 0x0000000200000000) (4 GiB)
+Ram                 : [0xffff0002f0000000, 0xffff000300000000) -> [0x00000002f0000000, 0x0000000300000000) (256 MiB)
+KImage              : [0xffffffff80000000, 0xffffffff80e00000) -> [0x0000000002000000, 0x0000000002e00000) (14 MiB)
+PerCpu              : [0xffffff0000245000, 0xffffff000044d000) -> [0x0000000000245000, 0x000000000044d000) (2.03 MiB)
+Debug serial        : [0xffff0000feb50000, 0xffff0000feb51000) -> [0x00000000feb50000, 0x00000000feb51000) (4 KiB)
+Boot page table at physical address: 0x44d000
+Setting up table registers...
+MMU Entry point at physical address: 0x236c40c
+Trap vector at 0xffffffff80363000
+Memory Map:
+  Rsv    0x00000000110000 - 0x00000000245000 (1.21 MiB)
+  PerCPU 0x00000000245000 - 0x0000000044d000 (2.03 MiB)
+  Rsv    0x0000000044d000 - 0x00000000459000 (48 KiB)
+  Free   0x00000000459000 - 0x00000002000000 (27.65 MiB)
+  KImg   0x00000002000000 - 0x00000002e00000 (14 MiB)
+  Free   0x00000002e00000 - 0x0000000a100000 (115 MiB)
+  Rsv    0x0000000a100000 - 0x0000000a145000 (276 KiB)
+  Free   0x0000000a145000 - 0x0000000a200000 (748 KiB)
+  Rsv    0x0000000a200000 - 0x0000000b65f000 (20.37 MiB)
+  Free   0x0000000b65f000 - 0x00000010000000 (73.63 MiB)
+  Rsv    0x00000010000000 - 0x00000020000000 (256 MiB)
+  Free   0x00000020000000 - 0x000000f0000000 (3.25 GiB)
+  MMIO   0x000000feb50000 - 0x000000feb51000 (4 KiB)
+  Free   0x00000100000000 - 0x00000200000000 (4 GiB)
+  Free   0x000002f0000000 - 0x00000300000000 (256 MiB)
+Jumping to main entry point at 0xffffffff80351f80 with SP 0xffffff0000286000
+
+       d8888                            .d88888b.   .d8888b.
+      d88888                           d88P" "Y88b d88P  Y88b
+     d88P888                           888     888 Y88b.
+    d88P 888 888d888  .d8888b  .d88b.  888     888  "Y888b.
+   d88P  888 888P"   d88P"    d8P  Y8b 888     888     "Y88b.
+  d88P   888 888     888      88888888 888     888       "888
+ d8888888888 888     Y88b.    Y8b.     Y88b. .d88P Y88b  d88P
+d88P     888 888      "Y8888P  "Y8888   "Y88888P"   "Y8888P"
+
+arch = aarch64
+platform = RK3588 OPi 5 Plus
+target = aarch64-unknown-none-softfloat
+build_mode = 
+log_level = info
+backtrace = false
+smp = 4
+
+[37m[  6.925558 ax_runtime:211] [32mLogging is enabled.[m
+[m[37m[  6.926044 ax_runtime:212] [32mPrimary CPU 0 started, arg = 0x200000.[m
+[m[37m[  6.926673 ax_runtime:214] [32mFound physcial memory regions:[m
+[m[37m[  6.927314 ax_runtime:216] [32m  [PA:0x110000, PA:0x245000) reserved (READ | WRITE | EXECUTE | RESERVED)[m
+[m[37m[  6.928204 ax_runtime:216] [32m  [PA:0x245000, PA:0x44d000) reserved (READ | WRITE | EXECUTE | RESERVED)[m
+[m[37m[  6.929096 ax_runtime:216] [32m  [PA:0x44d000, PA:0x459000) reserved (READ | WRITE | EXECUTE | RESERVED)[m
+[m[37m[  6.929988 ax_runtime:216] [32m  [PA:0x459000, PA:0x2000000) free memory (READ | WRITE | FREE)[m
+[m[37m[  6.930806 ax_runtime:216] [32m  [PA:0x2000000, PA:0x2e00000) reserved (READ | WRITE | EXECUTE | RESERVED)[m
+[m[37m[  6.931713 ax_runtime:216] [32m  [PA:0x2e00000, PA:0xa100000) free memory (READ | WRITE | FREE)[m
+[m[37m[  6.932538 ax_runtime:216] [32m  [PA:0xa100000, PA:0xa145000) reserved (READ | WRITE | EXECUTE | RESERVED)[m
+[m[37m[  6.933446 ax_runtime:216] [32m  [PA:0xa145000, PA:0xa200000) free memory (READ | WRITE | FREE)[m
+[m[37m[  6.934271 ax_runtime:216] [32m  [PA:0xa200000, PA:0xb65f000) reserved (READ | WRITE | EXECUTE | RESERVED)[m
+[m[37m[  6.935179 ax_runtime:216] [32m  [PA:0xb65f000, PA:0x10000000) free memory (READ | WRITE | FREE)[m
+[m[37m[  6.936011 ax_runtime:216] [32m  [PA:0x10000000, PA:0x20000000) reserved (READ | WRITE | EXECUTE | RESERVED)[m
+[m[37m[  6.936933 ax_runtime:216] [32m  [PA:0x20000000, PA:0xf0000000) free memory (READ | WRITE | FREE)[m
+[m[37m[  6.937773 ax_runtime:216] [32m  [PA:0xfeb50000, PA:0xfeb51000) mmio (READ | WRITE | DEVICE | RESERVED)[m
+[m[37m[  6.938658 ax_runtime:216] [32m  [PA:0x100000000, PA:0x200000000) free memory (READ | WRITE | FREE)[m
+[m[37m[  6.939514 ax_runtime:216] [32m  [PA:0x2f0000000, PA:0x300000000) free memory (READ | WRITE | FREE)[m
+[m[37m[  6.940368 ax_runtime:358] [32mInitialize global memory allocator...[m
+[m[37m[  6.940991 ax_runtime:359] [32m  use buddy-slab-allocator allocator.[m
+[m[37m[  6.941615 ax_alloc::buddy_slab:150] [32mInitialize global memory allocator, start_vaddr: 0xffff000100000000, size: 0x100000000[m
+[m[37m[  6.946539 ax_alloc::buddy_slab:408] [32mglobal allocator initialized[m
+[m[37m[  6.947163 ax_alloc::buddy_slab:160] [32mAdd memory region, start_vaddr: 0xffff000000459000, size: 0x1ba7000[m
+[m[37m[  6.948110 ax_alloc::buddy_slab:160] [32mAdd memory region, start_vaddr: 0xffff000002e00000, size: 0x7300000[m
+[m[37m[  6.949134 ax_alloc::buddy_slab:160] [32mAdd memory region, start_vaddr: 0xffff00000a145000, size: 0xbb000[m
+[m[37m[  6.950035 buddy_slab_allocator::global:143] [32mGlobalAllocator: skip region 0xffff00000a145000+0xbb000, no allocator-visible memory after 2097152 alignment[m
+[m[37m[  6.951325 ax_alloc::buddy_slab:160] [32mAdd memory region, start_vaddr: 0xffff00000b65f000, size: 0x49a1000[m
+[m[37m[  6.952317 ax_alloc::buddy_slab:160] [32mAdd memory region, start_vaddr: 0xffff000020000000, size: 0xd0000000[m
+[m[37m[  6.956376 ax_alloc::buddy_slab:160] [32mAdd memory region, start_vaddr: 0xffff0002f0000000, size: 0x10000000[m
+[m[37m[  6.957542 ax_runtime:251] [32mkernel aspace: [VA:0xffff000000000000, VA:0xffffffffffffffff)[m
+[m[37m[  6.958339 ax_mm:92] [32mInitialize virtual memory management...[m
+[m[37m[  7.515241 ax_runtime:263] [32mInitialize platform devices...[m
+[m[37m[  7.584463 someboot::arch::power:23] [32mPower management method : SMC[m
+[m[37m[  7.585103 somehal::driver:5] [32mInitializing rdrive with FDT at 0xffff000000200000[m
+[m[37m[  8.008956 ax_task::api:146] [32mInitialize scheduling...[m
+[m[37m[  8.009547 ax_task::api:151] [32m  use Round-robin scheduler.[m
+[m[37m[  8.010113 ax_runtime:289] [32mInitialize interrupt handlers...[m
+[m[37m[  8.012495 ax_runtime::devices:2] [32mProbe platform devices...[m
+[m[37m[  8.148072 ax_driver::serial::ns16550:49] [32mProbing NS16550 serial device: serial@febc0000[m
+[m[37m[  8.148962 ax_driver::serial::ns16550:85] [32mNS16550 serial@0xffff0000febc0000 registered successfully[m
+[m[37m[  8.192264 ax_driver::serial::rockchip_fiq:35] [32mRockchip FIQ debugger takes disabled UART alias serial2 at /serial@feb50000[m
+[[37m[  8.193357 ax_driver::serial::rockchip_fiq:44] [32mRockchip FIQ debugger UART@0xffff0000feb50000 registered successfully, serial-id=2, baudrate=1500000, irq-mode=true[m
+[m[37m[  8.227473 ax_driver::soc::scmi:55] [33m[scmi] SCMI shmem phandle 71 cannot be resolved by rdrive; using RK3588 shmem fallback 0x10f000+0x100[m
+[m[37m[  8.228664 ax_driver::soc::scmi:76] [32mSCMI SMC registered: smc_id=0x82000010, shmem_phandle=71, shmem=0x10f000+0x100[m
+[m[37m[  8.230605 ax_driver::soc::rockchip::cru::rk3588:60] [32mRK3588 CRU reg: addr=0xfd7c0000, size=0x5c000, rockchip,grf=<0x77>[m
+[m[37m[  8.231687 rockchip_soc::variants::rk3588::cru:122] [32mCRU@ffff0000fd7c0000: Initializing and verifying clock configuration...[m
+[m[37m[  8.232755 rockchip_soc::variants::rk3588::cru:173] [33m⚠ CRU@ffff0000fd7c0000: ACLK_BUS_ROOT div mismatch! u-boot: 3, current: 4[m
+[m[37m[  8.233853 rockchip_soc::variants::rk3588::cru:247] [32m✓ CRU@ffff0000fd7c0000: Clock configuration verified[m
+[m[37m[  8.234795 ax_driver::soc::rockchip::cru::rk3588:79] [32mRK3588 CRU clock/reset registered successfully[m
+[m[37m[  8.237296 ax_driver::soc::rockchip::pm:61] [32mRockchip power-domain provider registered successfully[m
+[m[37m[  8.286070 ax_driver::soc::rockchip::pinctrl:239] [32mRockchip RK3588 pinctrl registered successfully[m
+[m[37m[  8.970671 ax_driver::soc::fixed_regulator:70] [32mFixed regulator vcc5v0_host enabled via pinctrl[m
+[m[37m[  9.089988 ax_driver::soc::fixed_regulator:70] [32mFixed regulator vcc3v3_pcie_eth enabled via pinctrl[m
+[m[37m[  9.160949 ax_driver::soc::fixed_regulator:70] [32mFixed regulator wifi_disable enabled via pinctrl[m
+[m[37m[  9.195091 ax_driver::soc::scmi:187] [32mSCMI describe rates: clock_id=0x0, rates=[Discrete(408000000), Discrete(3504693313536000000)][m
+[m[37m[  9.196242 ax_driver::soc::scmi:187] [32mSCMI describe rates: clock_id=0x2, rates=[Discrete(408000000), Discrete(4329327034368000000)][m
+[m[37m[  9.197380 ax_driver::soc::scmi:187] [32mSCMI describe rates: clock_id=0x3, rates=[Discrete(408000000), Discrete(4329327034368000000)][m
+[m[37m[  9.198501 ax_driver::soc::scmi:95] [32mSCMI clock rate get: clock_id=0x0, rate=816000000 Hz[m
+[m[37m[  9.199305 ax_driver::soc::scmi:149] [32mSCMI clock rate set: clock_id=0x0, rate=1008000000 Hz[m
+[m[37m[  9.200117 ax_driver::soc::scmi:95] [32mSCMI clock rate get: clock_id=0x0, rate=1008000000 Hz[m
+[m[37m[  9.200927 ax_driver::soc::scmi:95] [32mSCMI clock rate get: clock_id=0x0, rate=1008000000 Hz[m
+[m[37m[  9.201740 ax_driver::soc::scmi:95] [32mSCMI clock rate get: clock_id=0x2, rate=816000000 Hz[m
+[m[37m[  9.202548 ax_driver::soc::scmi:149] [32mSCMI clock rate set: clock_id=0x2, rate=1200000000 Hz[m
+[m[37m[  9.203359 ax_driver::soc::scmi:95] [32mSCMI clock rate get: clock_id=0x2, rate=1200000000 Hz[m
+[m[37m[  9.204172 ax_driver::soc::scmi:149] [32mSCMI clock rate set: clock_id=0x3, rate=1200000000 Hz[m
+[m[37m[  9.204987 ax_driver::soc::scmi:95] [32mSCMI clock rate get: clock_id=0x3, rate=1200000000 Hz[m
+[m[37m[  9.205797 ax_driver::soc::scmi:95] [32mSCMI clock rate get: clock_id=0x2, rate=1200000000 Hz[m
+[m[37m[  9.206604 ax_driver::soc::rockchip::cpufreq:132] [32mcpufreq: A55 816->1008, A76 816->1200 MHz[m
+[m[37m[  9.207457 ax_driver::soc::rockchip::pmic_i2c:428] [32mpmic_i2c: ungated i2c0 clocks (PMU_CLKGATE_CON(2)@0xfd7f0808 <- 0x00060000); gate bits now 0x0 (0 == enabled)[m
+[m[37m[  9.208810 ax_driver::soc::rockchip::pmic_i2c:462] [32mpmic_i2c: de-asserted i2c0 reset (PMU_SOFTRST_CON(2)@0xfd7f0a08 <- 0x00060000); reset bits now 0x0 (0 == released)[m
+[m[37m[  9.241989 ax_driver::soc::rockchip::pinctrl::rdif_glue:108] [33mUnknown pinconf property: input-schmitt-enable[m
+[m[37m[  9.242936 ax_driver::soc::rockchip::pinctrl::rdif_glue:108] [33mUnknown pinconf property: input-schmitt-enable[m
+[m[37m[  9.243891 ax_driver::soc::rockchip::pmic_i2c:512] [32mpmic_i2c: applied i2c0 pinctrl-0 (scl GPIO0_D1 / sda GPIO0_D2 -> func3) via rockchip pinctrl[m
+[m[37m[  9.260230 ax_driver::soc::rockchip::pmic_i2c:253] [32mpmic_i2c: rk3x_i2c@0xfd880000 ready (clkdiv=0x60006)[m
+[m[37m[  9.261185 ax_driver::soc::rockchip::cpufreq:258] [32mcpufreq: A76 big0 rail boot voltage = 800000 uV[m
+[m[37m[  9.262081 ax_driver::soc::rockchip::cpufreq:258] [32mcpufreq: A76 big1 rail boot voltage = 800000 uV[m
+[m[37m[  9.262964 ax_driver::soc::rockchip::pmic_spi:547] [32mpmic_spi: ungated SPI2 PCLK+CLK (CRU 0xfd7c0838 <= 0x21000000)[m
+[m[37m[  9.263978 ax_driver::soc::rockchip::pmic_spi:578] [32mpmic_spi: de-asserted SPI2 P+core reset (CRU 0xfd7c0a38 <= 0x21000000)[m
+[m[37m[  9.296824 ax_driver::soc::rockchip::pmic_spi:636] [32mpmic_spi: applied spi2 pinctrl-0 (spi2m2 clk/mosi/miso/cs0 mux+pull+drive) via rockchip pinctrl[m
+[m[37m[  9.313112 ax_driver::soc::rockchip::pmic_spi:296] [32mpmic_spi: SPI2 baud divisor computed 200 (U-Boot left 0x0)[m
+[m[37m[  9.314168 ax_driver::soc::rockchip::pmic_spi:435] [32mpmic_spi: RK806 probe: chip_name(0x5A)=Some(0) chip_ver(0x5B)=Some(0) dcdc2_raw_rx=[00, 1b, 00, 00] (xfer_ok=true)[m
+[m[37m[  9.315544 ax_driver::soc::rockchip::pmic_spi:778] [32mpmic_spi: RK806/SPI2 bound at 0xfeb20000[m
+[m[37m[  9.316412 ax_driver::soc::rockchip::pmic_spi:790] [32mpmic_spi: A55 vdd_cpu_lit = 500000 uV (buck2 vsel 0x00)[m
+[m[37m[  9.317342 ax_driver::soc::rockchip::cpufreq:270] [32mcpufreq: A55 rail boot voltage = 500000 uV[m
+[m[37m[  9.320985 ax_driver::soc::rockchip::pmic_i2c:657] [32mpmic_i2c: chip 0x42 stepped 800000 -> 675000 uV[m
+[m[37m[  9.324678 ax_driver::soc::rockchip::pmic_i2c:657] [32mpmic_i2c: chip 0x43 stepped 800000 -> 675000 uV[m
+[m[37m[  9.325549 ax_driver::soc::rockchip::cpufreq:286] [32mcpufreq: A76 rails -> 675000 uV (big0 ok=true, big1 ok=true)[m
+[m[37m[  9.326548 ax_driver::soc::rockchip::pmic_spi:790] [32mpmic_spi: A55 vdd_cpu_lit = 500000 uV (buck2 vsel 0x00)[m
+[m[37m[  9.327546 ax_driver::soc::rockchip::pmic_spi:896] [32mpmic_spi: force_write_dcdc2: wrote vsel=0x1c (675000 uV) xfer_ok=true readback=Some(
+    0x00,
+)[m
+[m[37m[  9.328801 ax_driver::soc::rockchip::cpufreq:302] [32mcpufreq: A55 rail -> 675000 uV (open-loop, read Some(500000) untrusted, write xfer_ok=true)[m
+[m[37m[  9.330000 ax_driver::soc::rockchip::cpufreq:318] [32mcpufreq: ondemand governor armed (both PMIC buses up)[m
+[m[37m[  9.390154 ax_driver::block::rockchip::sd:217] [32m[mmc@fe2c0000] vqmmc-supply phandle Phandle(283) is not a fixed GPIO regulator; skip pinctrl enable[m
+[m[37m[  9.391441 ax_driver::soc::scmi:124] [32mSCMI clock enabled: clock_id=0x17[m
+[m[37m[  9.392102 ax_driver::block::rockchip::clock:53] [32m[mmc@fe2c0000] enabled SDMMC SCMI clock Some("biu") (0x17)[m
+[m[37m[  9.393063 ax_driver::soc::scmi:124] [32mSCMI clock enabled: clock_id=0x9[m
+[m[37m[  9.393715 ax_driver::block::rockchip::clock:53] [32m[mmc@fe2c0000] enabled SDMMC SCMI clock Some("ciu") (0x9)[m
+[m[37m[  9.394662 ax_driver::block::rockchip::clock:100] [32m[mmc@fe2c0000] enabled SDMMC clock Some("ciu-drive") (0x2c2)[m
+[m[37m[  9.395629 ax_driver::block::rockchip::clock:100] [32m[mmc@fe2c0000] enabled SDMMC clock Some("ciu-sample") (0x2c3)[m
+[m[37m[  9.396621 ax_driver::block::rockchip::sd:129] [32mrockchip-dwmmc probe: node=mmc@fe2c0000, addr=0xfe2c0000, size=0x4000[m
+[m[37m[  9.397709 ax_driver::soc::scmi:149] [32mSCMI clock rate set: clock_id=0x9, rate=50000000 Hz[m
+[m[37m[  9.398509 ax_driver::soc::scmi:95] [32mSCMI clock rate get: clock_id=0x9, rate=49500000 Hz[m
+[m[37m[  9.399300 ax_driver::block::rockchip::sd:141] [32mrockchip-dwmmc: using ciu reference clock 49500000 Hz[m
+[m[37m[  9.400305 ax_driver::block::rockchip::sd::phase:43] [32mrockchip-dwmmc: RK3588 SDMMC phase configured: drive=90deg sample=0deg parent=49500000Hz[m
+[m[37m[  9.401499 ax_driver::block::rockchip::sd:159] [32mrockchip-dwmmc: initialize card through native host2 bus ops[m
+[m[37m[  9.402446 sdmmc_protocol::sdio::init:487] [32msdio: submit bus op ResetAll[m
+[m[37m[  9.403139 sdmmc_protocol::sdio::init:487] [32msdio: submit bus op PowerOn[m
+[m[37m[  9.413809 sdmmc_protocol::sdio::init:487] [32msdio: submit bus op SwitchVoltage(V330)[m
+[m[37m[  9.414562 sdmmc_protocol::sdio::init:449] [32msdio: submit bus op SetBusWidth(Bit1)[m
+[m[37m[  9.415305 sdmmc_protocol::sdio::init:449] [32msdio: submit bus op SetClock(Identification)[m
+[m[37m[  9.416109 ax_driver::soc::scmi:149] [32mSCMI clock rate set: clock_id=0x9, rate=800000 Hz[m
+[m[37m[  9.416892 ax_driver::soc::scmi:95] [32mSCMI clock rate get: clock_id=0x9, rate=800000 Hz[m
+[m[37m[  9.417668 ax_driver::block::rockchip::sd:91] [32mrockchip-dwmmc: ciu clock set target=400000 Hz cclkin=800000 Hz bus=400000 Hz[m
+[m[37m[  9.440360 sdmmc_protocol::sdio::init:695] [32msdio: detected Sd ocr=0xc0ff8000[m
+[m[37m[  9.442407 sdmmc_protocol::sdio::init:849] [32msdio: CSD capacity_blocks=Some(62410752)[m
+[m[37m[  9.443485 sdmmc_protocol::sdio::init:863] [32msdio: switch SD bus width to 4-bit[m
+[m[37m[  9.444809 sdmmc_protocol::sdio::init:449] [32msdio: submit bus op SetBusWidth(Bit4)[m
+[m[37m[  9.445551 sdmmc_protocol::sdio::init:449] [32msdio: submit bus op SetClock(Default)[m
+[m[37m[  9.446298 ax_driver::soc::scmi:149] [32mSCMI clock rate set: clock_id=0x9, rate=50000000 Hz[m
+[m[37m[  9.447096 ax_driver::soc::scmi:95] [32mSCMI clock rate get: clock_id=0x9, rate=49500000 Hz[m
+[m[37m[  9.447887 ax_driver::block::rockchip::sd:91] [32mrockchip-dwmmc: ciu clock set target=25000000 Hz cclkin=49500000 Hz bus=24750000 Hz[m
+[m[37m[  9.449678 ax_driver::soc::scmi:149] [32mSCMI clock rate set: clock_id=0x9, rate=100000000 Hz[m
+[m[37m[  9.450485 ax_driver::soc::scmi:95] [32mSCMI clock rate get: clock_id=0x9, rate=99000000 Hz[m
+[m[37m[  9.451275 ax_driver::block::rockchip::sd:91] [32mrockchip-dwmmc: ciu clock set target=50000000 Hz cclkin=99000000 Hz bus=49500000 Hz[m
+[m[37m[  9.452423 sdmmc_protocol::sdio::init:1442] [32msdio: SD speed selected HighSpeed[m
+[m[37m[  9.453142 sdmmc_protocol::sdio::init:1463] [32msdio: init done kind=Sd sd_v2=true high_capacity=true rca=0x1 ocr=0xc0ff8000 host_bus_width=Bit4 ext_csd_bus_width=None ext_csd_timing=None[m
+[m[37m[  9.454661 ax_driver::block::rockchip::sd:168] [32mrockchip-dwmmc card: kind=Sd high_capacity=true rca=1 ocr=0xc0ff8000 capacity_blocks=Some(62410752) cid=true ext_csd=false[m
+[m[37m[  9.456700 ax_driver::block::rockchip::sd::phase:67] [32mrockchip-dwmmc: sample phase probe 0deg: block0_ok=true mbr_sig=aa55 block0_head=[00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00] block1_ok=true gpt_head=[45, 46, 49, 20, 50, 41, 52, 54][m
+[m[37m[  9.458756 ax_driver::block::rockchip::sd::phase:81] [32mrockchip-dwmmc: selected RK3588 SDMMC sample phase 0deg[m
+[m[37m[  9.459870 ax_driver::block::rockchip::sd:198] [32mrockchip-sd block device registered irq=None[m
+[m[37m[  9.461442 ax_driver::block::rockchip::clock:100] [32m[mmc@fe2e0000] enabled SDHCI clock Some("core") (0x13a)[m
+[m[37m[  9.462375 ax_driver::block::rockchip::clock:100] [32m[mmc@fe2e0000] enabled SDHCI clock Some("bus") (0x138)[m
+[m[37m[  9.463301 ax_driver::block::rockchip::clock:100] [32m[mmc@fe2e0000] enabled SDHCI clock Some("axi") (0x139)[m
+[m[37m[  9.464223 ax_driver::block::rockchip::clock:100] [32m[mmc@fe2e0000] enabled SDHCI clock Some("block") (0x13b)[m
+[m[37m[  9.465160 ax_driver::block::rockchip::clock:100] [32m[mmc@fe2e0000] enabled SDHCI clock Some("timer") (0x13c)[m
+[m[37m[  9.466109 ax_driver::block::rockchip::sdhci_rk3588:166] [32mrockchip-sdhci probe: node=mmc@fe2e0000, addr=0xfe2e0000, size=0x10000[m
+[m[37m[  9.467249 ax_driver::block::rockchip::sdhci_rk3588:176] [32mrockchip-sdhci: using external CRU clock[m
+[m[37m[  9.468113 ax_driver::block::rockchip::sdhci_rk3588:185] [32mrockchip-sdhci: initialize card through native host2 bus ops[m
+[m[37m[  9.469140 sdmmc_protocol::sdio::init:487] [32msdio: submit bus op ResetAll[m
+[m[37m[  9.469824 ax_driver::block::rockchip::sdhci_rk3588:252] [32mrockchip-sdhci: RK3588 DWCMSHC vendor reset area1=0x500[m
+[m[37m[  9.470802 sdmmc_protocol::sdio::init:487] [32msdio: submit bus op PowerOn[m
+[m[37m[  9.481472 sdmmc_protocol::sdio::init:487] [32msdio: submit bus op SwitchVoltage(V330)[m
+[m[37m[  9.482241 sdmmc_protocol::sdio::init:449] [32msdio: submit bus op SetBusWidth(Bit1)[m
+[m[37m[  9.482982 sdmmc_protocol::sdio::init:449] [32msdio: submit bus op SetClock(Identification)[m
+[m[37m[  9.483786 ax_driver::block::rockchip::sdhci_rk3588:118] [32mrockchip-sdhci: core clock set to 375000 Hz[m
+[m[37m[  9.495218 sdhci_host::command:402] [32msdhci: command wait failed CMD1 present=0x03f700f1 normal=0x0000 error=0x0000 clock=0x0007 power=0x0f host1=0x00 host2=0x0000 reset=0x00 nisen=0x7fff eisen=0xffff nsigen=0x0000 esigen=0x0000[m
+[m[37m[  9.497061 sdmmc_protocol::sdio::host2:338] [33msdio-host2 adapter: command completed with error Timeout[m
+[m[37m[  9.497946 sdmmc_protocol::sdio::init:522] [33msdio: init aborted (Timeout(ErrorContext { phase: Unspecified, cmd: None })), resetting host[m
+[m[37m[  9.499110 ax_driver::block::rockchip::sdhci_rk3588:118] [32mrockchip-sdhci: core clock set to 375000 Hz[m
+[m[37m[  9.500142 rdrive:213] [33mProbe failed for [fdt]: other error: failed to initialize SDHCI device at [PA:4264427520, SZ:0x10000): Timeout(ErrorContext { phase: Unspecified, cmd: None })[m
+[mBoot at 1970-01-01 00:00:09.501651125 UTC
+
+[37m[  9.502055 ax_runtime::irq:120] [32mregistered rockchip-sd/0 irq IrqId { domain: IrqDomainId(7), hwirq: HwIrq(235) }[m
+[m[37m[  9.503052 ax_fs_ng::block::runtime::device:1359] [33mrdif filesystem block device rockchip-sd registered with IRQ-driven completion[m
+[m[37m[  9.504147 ax_fs_ng::block::runtime::device:1361] [32mregistered rdif filesystem block device rockchip-sd[m
+[m[37m[  9.505503 ax_hal::dtb:108] [32mcpu_capacities: [530, 530, 530, 530][m
+[m[37m[  9.548752 ax_fs_ng::root:256] [32m    partition 1 name=Some("bootfs") fs=None lba 61440..2158592[m
+[m[37m[  9.550156 ax_fs_ng::root:256] [32m    partition 2 name=None fs=Some(Ext4) lba 2158592..61767680[m
+[m[37m[  9.550985 ax_fs_ng::root:272] [32m  block device 0 (rockchip-sd) has Gpt partition table with 2 partitions[m
+[m[37m[  9.551908 ax_fs_ng::root:451] [32m  only one supported filesystem partition is available; using it as root[m
+[m[37m[  9.552822 ax_fs_ng:75] [32mInitialize filesystem subsystem...[m
+[m[37m[  9.553392 ax_fs_ng:76] [32m  selected root device: disk0 partition 2 (<unnamed>, fs=ext4, lba 2158592..61767680)[m
+[m[37m[  9.577017 rsext4::ext4::mount:327] [32m/lost+found exists (superblock hint inode=11)[m
+[m[37m[  9.579015 rsext4::ext4::mount:462] [32mExt4 filesystem mounted[m
+[m[37m[  9.579593 rsext4::ext4::mount:463] [32m  - block size: 4096 bytes[m
+[m[37m[  9.580200 rsext4::ext4::mount:464] [32m  - total blocks: 7451136[m
+[m[37m[  9.580800 rsext4::ext4::mount:465] [32m  - free blocks: 6600768[m
+[m[37m[  9.581393 rsext4::ext4::mount:466] [32m  - total inodes: 1845888[m
+[m[37m[  9.581993 rsext4::ext4::mount:467] [32m  - free inodes: 1783477[m
+[m[37m[  9.582589 rsext4::ext4::sync:13] [32mSyncing filesystem...[m
+[m[37m[  9.623823 rsext4::ext4::mount:546] [32mExt4 filesystem mounted[m
+[m[37m[  9.624427 ax_fs_ng:88] [32m  filesystem type: "ext4"[m
+[m[37m[  9.627679 ax_net:189] [32mInitialize network subsystem...[m
+[m[37m[  9.628425 ax_net:201] [33m  No network device found![m
+[m[37m[  9.628929 ax_net:292] [32mDevice: lo[m
+[m[37m[  9.631157 ax_runtime::mp:79] [32mSecondary CPU 1 started.[m
+[m[37m[  9.633180 ax_runtime::mp:107] [32mSecondary CPU 1 init OK.[m
+[m[37m[  9.633273 ax_runtime::mp:79] [32mSecondary CPU 2 started.[m
+[m[37m[  9.635795 ax_runtime:334] [32mPrimary CPU 0 init OK.[m
+[m[37m[  9.635795 ax_runtime::mp:79] [32mSecondary CPU 3 started.[m
+[m[37m[  9.636527 ax_runtime::mp:107] [32mSecondary CPU 2 init OK.[m
+[m[37m[  9.639906 ax_runtime::mp:107] [32mSecondary CPU 3 init OK.[m
+[m[37m[  9.640520 0:2 ktracepoint:282] [32mtracepoint_data_start: 0xffffffff804f5c98, tracepoint_data_end: 0xffffffff804f5cf8[m
+[m[37m[  9.641515 0:2 ktracepoint:297] [32mtracepoint_data_len: 6[m
+[m[37m[  9.642060 0:2 ktracepoint:314] [32mtracepoint registered: sched:sched_process_exit[m
+[m[37m[  9.642835 0:2 ktracepoint:314] [32mtracepoint registered: sched:sched_process_fork[m
+[m[37m[  9.643563 0:2 ktracepoint:314] [32mtracepoint registered: sched:sched_switch[m
+[m[37m[  9.644253 0:2 ktracepoint:314] [32mtracepoint registered: syscalls:sys_clone[m
+[m[37m[  9.644942 0:2 ktracepoint:314] [32mtracepoint registered: syscalls:sys_enter_openat[m
+[m[37m[  9.645685 0:2 ktracepoint:314] [32mtracepoint registered: syscalls:sys_mkdirat[m
+[mInitialized 6 tracepoints
+kmod subsystem initialized
+[37m[  9.647913 0:2 starry_kernel::pseudofs:84] [32mInitialize pseudofs...[m
+[m[37m[  9.651207 0:2 starry_kernel::pseudofs::dev::tty::serial:343] [32mttyS9 registered: path=/serial@febc0000, alias=Some(9), paddr=0xfebc0000, mapped=0xffff0000febc0000, irq=IrqId { domain: IrqDomainId(7), hwirq: HwIrq(372) }, mode=interrupt[m
+[m[37m[  9.655687 0:2 starry_kernel::pseudofs::dev::tty::serial:343] [32mttyS2 registered: path=/serial@feb50000, alias=Some(2), paddr=0xfeb50000, mapped=0xffff0000feb50000, irq=IrqId { domain: IrqDomainId(7), hwirq: HwIrq(365) }, mode=interrupt[m
+[m[37m[  9.657612 0:2 starry_kernel::pseudofs::dev::tty::serial:264] [32m/dev/console bound to ttyS2[m
+[m[37m[  9.659265 0:2 starry_kernel::pseudofs:78] [32mMounted devfs at /dev[m
+[m[37m[  9.659882 0:2 starry_kernel::pseudofs::usbfs:51] [32musbfs: initializing manager[m
+[m[37m[  9.660611 0:2 starry_kernel::pseudofs::usbfs::manager:1401] [32musbfs: discovered 0 USB host(s)[m
+[m[37m[  9.661436 0:2 starry_kernel::pseudofs::usbfs:54] [32musbfs: no USB host found, skip mounting usbfs[m
+[m[37m[  9.662330 0:2 starry_kernel::pseudofs:78] [32mMounted tmpfs at /dev/shm[m
+[m[37m[  9.663587 0:2 starry_kernel::pseudofs:78] [32mMounted tmpfs at /tmp[m
+[m[37m[  9.664346 0:2 starry_kernel::dyn_debug:61] [32mdebug_init: initializing dynamic debug sites[m
+[m[37m[  9.665800 0:2 starry_kernel::dyn_debug:64] [32mdebug_init: found 191 dynamic debug sites[m
+[m[37m[  9.666581 0:2 starry_kernel::pseudofs::proc:77] [32mRead kallsyms, size: 1344KB[m
+[m[37m[  9.692649 0:2 starry_kernel::pseudofs:78] [32mMounted proc at /proc[m
+[m[37m[  9.693908 0:2 starry_kernel::pseudofs:78] [32mMounted sysfs at /sys[m
+[m[37m[  9.694733 0:2 starry_kernel::pseudofs:78] [32mMounted debug at /sys/kernel/debug[m
+[m[37m[  9.696583 0:2 starry_kernel::task::timer:399] [32mInitialize alarm...[m
+[m[37m[  9.698302 0:2 starry_kernel::entry:167] [32mInitialize cpufreq ondemand governor...[m
+[m[37m[  9.700128 0:2 ax_driver::soc::rockchip::ddr_dvfs:157] [33mddr-dvfs: SIP DRAM DVFS not supported (GET_VERSION status=-1); leaving DDR at boot rate[m
+[mWelcome to [96m[1mStarry OS[0m!
+USER=root
+HOSTNAME=starry
+HOME=/root
+TERM=xterm-256color
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+PWD=/
+
+Use [1m[3mapk[0m to install packages.
+
+root@starry:/root # echo REENABLE_BEGIN; /home/orangepi/thp_reenable; echo FULL_RUN_DONE; sleep 1; sync; reboot -f
+
+REENABLE_BEGIN
+THP_REENABLE_BEGIN
+A whole re-enable: mprotect(NONE)=0 mprotect(RW)=0 access_sig=0 => PASS
+B partial re-enable(1M): mprotect(NONE)=0 mprotect(RW,1M)=0 lo_sig=0 hi_sig=11 => PASS
+C partial munmap(1M): mprotect(NONE)=0 munmap(1M)=0 munmap(rest)=0 => PASS
+D whole-PROT_NONE + partial munmap: mprotect(NONE)=0 munmap(mid)=0 munmap(rest)=0 => PASS
+E whole-PROT_NONE + partial mprotect(RW): mprotect(NONE)=0 mprotect(RW,mid)=0 access_sig=0 => PASS
+F whole-PROT_NONE + whole re-enable: mprotect(NONE)=0 mprotect(RW)=0 access_sig=0 => PASS
+THP_REENABLE_DONE
+FULL_RUN_DONE
