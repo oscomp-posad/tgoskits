@@ -324,6 +324,61 @@ fn reclaim_batches_many_tables_no_double_free() -> PagingResult<()> {
     Ok(())
 }
 
+// A not-present huge block (mprotect(PROT_NONE) on a THP block) must be
+// splittable so a partial op can cut through it: `peek_not_present_huge_block`
+// exposes its frame, and `split_huge_page_with` splices in a leaf table
+// (break-before-make) WITHOUT freeing the block's data frame (the caller re-maps
+// its sub-frames as not-present leaves). TrackHandler panics on a foreign free.
+#[test]
+fn split_not_present_huge_block_preserves_frame() -> PagingResult<()> {
+    LIVE.with_borrow_mut(|it| it.clear());
+
+    let va = VirtAddr::from_usize(0x40_0000);
+    let d = PhysAddr::from_usize(0x1000_0000); // dummy data frame, never freed here
+    let mut pt = Pt::try_new().unwrap();
+
+    pt.cursor().map(va, d, PageSize::Size2M, RW)?;
+    pt.cursor().protect(va, MappingFlags::empty())?; // -> not-present huge block
+
+    // peek exposes the block's frame + size without mutating it.
+    let (paddr, _flags, size) = pt
+        .peek_not_present_huge_block(va)
+        .expect("peek must find the not-present huge block");
+    assert_eq!(size, PageSize::Size2M);
+    assert_eq!(paddr.as_usize(), d.as_usize());
+
+    // Split it (as commit_huge_split_2m does): splice in a fresh leaf table via the
+    // not-present fallback in split_huge_page_with.
+    let table = pt.alloc_intermediate_table()?;
+    pt.cursor()
+        .split_huge_page_with(va, table)
+        .expect("split of a not-present huge block must succeed");
+
+    // The block is now a table; install the 512 not-present leaves over its
+    // (exploded) sub-frames, preserving the empty/PROT_NONE flags.
+    {
+        let mut c = pt.cursor();
+        for i in 0..(HUGE_2M / PG) {
+            c.map(
+                va + i * PG,
+                PhysAddr::from_usize(d.as_usize() + i * PG),
+                PageSize::Size4K,
+                MappingFlags::empty(),
+            )?;
+        }
+    }
+
+    // A partial op can now cut through: unmap the first 4 KiB leaf hands back its
+    // frame (not-present-but-framed) at 4 KiB granularity.
+    let (p0, _, sz0) = pt.cursor().unmap(va)?;
+    assert_eq!(sz0, PageSize::Size4K);
+    assert_eq!(p0.as_usize(), d.as_usize());
+
+    drop(pt);
+    LIVE.with_borrow(|it| assert!(it.is_empty(), "leaked {} table frame(s)", it.len()));
+    Ok(())
+}
+
 #[test]
 fn thp_split_unmap_reclaims_empty_table_on_unmap() -> PagingResult<()> {
     LIVE.with_borrow_mut(|it| it.clear());

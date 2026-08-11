@@ -146,6 +146,14 @@ pub(crate) fn prepare_huge_split_2m(
     let (old_paddr, flags, size) = match pt.query(block_va) {
         Ok(v) => v,
         Err(PagingError::NotMapped) => return Ok(None),
+        // A not-present huge block (`mprotect(PROT_NONE)` over this THP block) is
+        // reported as `MappedToHugePage`; it still owns a frame and must be split
+        // (into not-present 4 KiB leaves, preserving its flags) so a partial op can
+        // cut through it. `query` hides it because it carries no live translation.
+        Err(PagingError::MappedToHugePage) => match pt.peek_not_present_huge_block(block_va) {
+            Some(v) => v,
+            None => return Ok(None),
+        },
         Err(_) => return Err(AxError::BadAddress),
     };
     if size != HUGE_2M {
