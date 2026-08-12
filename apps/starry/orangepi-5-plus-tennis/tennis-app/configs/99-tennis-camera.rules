@@ -1,0 +1,2 @@
+# Suyin HD Camera used by the Orange Pi 5 Plus tennis robot.
+SUBSYSTEM=="usb", ATTR{idVendor}=="1e45", ATTR{idProduct}=="8022", MODE="0660", GROUP="plugdev"
