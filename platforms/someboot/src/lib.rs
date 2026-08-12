@@ -32,6 +32,7 @@ pub mod arch;
 pub mod arch;
 
 mod acpi;
+pub mod boot_timing;
 mod cmdline;
 pub(crate) mod consts;
 #[cfg(efi)]
@@ -203,6 +204,11 @@ pub fn set_user_page_table(pt: PageTableInfo) {
 fn prime_entry() -> ! {
     fdt::setup_earlycon();
     let _ = acpi::earlycon::acpi_setup_earlycon();
+
+    // Now running cached (MMU on) with an early console — dump the pre-MMU
+    // uncached-phase timings captured via `boot_timing::mark` (no-op unless the
+    // `boot-timing` feature is on).
+    boot_timing::report();
 
     println!("Trap vector at {:#x}", arch::Arch::trap_addr());
 

@@ -18,10 +18,12 @@ mod pte;
 pub use pte::{Entry, Generic};
 
 pub fn enable_mmu() -> ! {
+    crate::boot_timing::mark(crate::boot_timing::Mark::TableBegin);
     if let Err(e) = setup_page_table() {
         println!("Failed to setup page table: {:?}", e);
         panic!();
     }
+    crate::boot_timing::mark(crate::boot_timing::Mark::TableEnd);
     // Use physical address to avoid virtual address mapping issues
     let mmu_entry_phys = super::entry::mmu_entry as *const () as usize;
     println!("MMU Entry point at physical address: {:#x}", mmu_entry_phys);
@@ -29,6 +31,11 @@ pub fn enable_mmu() -> ! {
     let meta = crate::smp::cpu_meta(crate::smp::early_current_cpu_idx()).unwrap();
     let v_sp = meta.stack_top_virt;
     let v_entry = __kimage_va(mmu_entry_phys) as usize;
+
+    // MMU about to be enabled: end of the measured uncached window. `mark` only
+    // reads the always-on generic-timer register (no UART), so it is safe inside
+    // the console-quiet window below.
+    crate::boot_timing::mark(crate::boot_timing::Mark::MmuOn);
 
     // Do not touch the debug UART in this final pre-relocation window. Some
     // boards can leave the early UART TX FIFO full here, and any console access

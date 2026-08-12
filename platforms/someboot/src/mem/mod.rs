@@ -142,7 +142,9 @@ pub(crate) fn _fixmap_io(paddr: usize) -> *mut u8 {
 }
 
 pub(crate) fn early_init() {
+    crate::boot_timing::mark(crate::boot_timing::Mark::FdtBegin);
     crate::fdt::init_memory_map();
+    crate::boot_timing::mark(crate::boot_timing::Mark::FdtEnd);
 
     let kernel_range = kimage_range();
     add_memory_descriptor(MemoryDescriptor {
@@ -171,7 +173,9 @@ pub(crate) fn early_init() {
     ram::init(free_range.expect("No free memory"));
 
     crate::fdt::save_fdt();
+    crate::boot_timing::mark(crate::boot_timing::Mark::PercpuBegin);
     crate::smp::alloc_percpu();
+    crate::boot_timing::mark(crate::boot_timing::Mark::PercpuEnd);
 }
 
 fn reserve_arch_early_ranges() {

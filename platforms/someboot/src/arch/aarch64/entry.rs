@@ -49,6 +49,10 @@ pub extern "C" fn el_entry(timer_mode_raw: usize) -> ! {
     let kernel_code_start_lma = ext_sym_addr!(_head);
     let kernel_code_end_lma = ext_sym_addr!(__kernel_code_end);
 
+    // Start of the measured pre-MMU (uncached) window. The generic timer was
+    // configured by `set_aarch64_timer_mode` above, so `systimer_tick` is valid.
+    crate::boot_timing::mark(crate::boot_timing::Mark::Start);
+
     crate::entry::primary_init_early(PrimaryCpuInitInfo {
         kernel_start: kernel_code_start_lma.into(),
         kernel_end: kernel_code_end_lma.into(),
