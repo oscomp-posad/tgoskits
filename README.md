@@ -18,6 +18,8 @@ TGOSKits is an integrated repository for operating system and virtualization dev
 
 Project site: [https://rcore-os.cn/tgoskits/](https://rcore-os.cn/tgoskits/). To understand the project scope and system relationships, start from the [TGOSKits documentation](https://rcore-os.cn/tgoskits/docs/introduction).
 
+> **Competition materials**: This repository holds Team Posad (Tsinghua University)'s entry for the national OS competition ("AIOS design and optimization for edge intelligence"). The **final-round** technical report and progress deck are in [`docs/final-round/`](docs/final-round/); the **preliminary-round** deck is at [`slides/进展汇报（初赛）.pdf`](slides/进展汇报（初赛）.pdf).
+
 ## 2. Repository
 
 TGOSKits brings multiple standalone subprojects into the root repository through Git Subtree and provides unified entry points for building, running, testing, and documentation. The main directories are:

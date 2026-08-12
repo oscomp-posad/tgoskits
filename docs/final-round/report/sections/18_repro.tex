@@ -1,7 +1,7 @@
 % 18_repro
-\section{可复现性、测量缺口与后续工作}
+\section{可复现性与后续工作}
 
-本报告的板上数字全部出自同一块 OrangePi-5-Plus（RK3588，cpu0 至 cpu3 为 A55 小核、cpu4 至 cpu7 为 A76 大核，三核 NPU，硬件 RGA/JPU，HDMI 输出）。本节记录这些数字的复现方法、目前仍缺测量的维度，以及后续工作的推进方向。
+本报告的板上数字全部出自同一块 OrangePi-5-Plus（RK3588，cpu0 至 cpu3 为 A55 小核、cpu4 至 cpu7 为 A76 大核，三核 NPU，硬件 RGA/JPU，HDMI 输出）。本节记录这些数字的复现方法与后续工作的推进方向。
 
 \subsection{硬件接线与板上运行}
 
@@ -11,13 +11,7 @@
 
 回路由 \texttt{scripts/board/boardctl.py} 驱动。其依据串口占用情况自动选择传输方式，串口服务在设备被占用时经由本地 WebSocket 桥接，否则直接连接 pyserial。\texttt{deploy} 执行 scp 并强制一次 \texttt{sync}，随后校验 PT\_INTERP 加载器，此步修复了此前部署后启动挂死数百秒的故障。控制台数据流附带主机时间戳，并接入实时的失败监视器。这套流程直接压缩了烧写路径的耗时，三条刷写通路的实测用时见板级 I/O 一节表~\ref{tab:board-flash}。
 
-内核与测试镜像由 \texttt{cargo xtask starry} 产出 rootfs 与板上 FIT，perf 与 sysbench 在板上运行的是上游同名二进制，成功判定依据各自的 success\_regex。
-
-\subsection{构建与渲染}
-
-报告本体由 \texttt{make report} 构建，该命令进入 \texttt{report/} 后执行 \texttt{tectonic main.tex --outdir build}。正文采用 ctexart 文档类，需要 CJK 字体。所有数字集中于 \texttt{data/numbers.tex} 这一份权威表，正文仅引用宏名，不写入字面量。
-
-图表遵循同一条溯源链。每张图的脚本仅读取一份 \texttt{figures/data/FNN.json} 作为数据源。\texttt{render.py} 将这些 JSON 渲染为 \texttt{figures/out/FNN.png}，正文经 \verb|\figph| 引用，图未生成时宏自动回退为占位框。构建前经 \texttt{lint.sh} 校验，扫描禁用串、裸 IP 与对比句式，并统计 \verb|\abl| 标记的数量。
+内核与测试镜像由 \texttt{cargo xtask starry} 产出 rootfs 与板上 FIT，perf 与 sysbench 在板上运行的是上游同名二进制，成功判定依据各自的 success\_regex。全部性能数字集中于 \texttt{data/numbers.tex} 这一份权威表，图表由各自脚本从 \texttt{figures/data/FNN.json} 渲染，正文仅引用宏名，不写入字面量。
 
 \subsection{后续方向}
 

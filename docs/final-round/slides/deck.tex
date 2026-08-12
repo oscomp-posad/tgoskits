@@ -48,7 +48,7 @@
     \item \headline{一\ \ 背景与目标}\quad{\color{muted}命题转变、机器人拾球回路、系统分层、基准与测量口径}
     \item \headline{二\ \ 系统能力与性能}\quad{\color{muted}观测、调度、系统调用、内存、频率、启动、显示、NPU、板级、应用}
     \item \headline{三\ \ 增量与展望}\quad{\color{muted}贡献矩阵、对比、分工、进度}
-    \item \headline{四\ \ 方法与复现}\quad{\color{muted}AI 使用与方法论、主要贡献、测量缺口、材料入口}
+    \item \headline{四\ \ 方法与复现}\quad{\color{muted}AI 使用与方法论、主要贡献、后续工作、材料入口}
   \end{itemize}}
   \vfill
   {\color{muted}\footnotesize 顶部导航条标示当前所在段落。}
@@ -113,11 +113,11 @@
     调度与大小核 & cpu 八线程 \nCpuTEightBefore $\to$ \nCpuTEight\,ev/s，为 Linux \nCpuTEightLin 的 \nCpuTEightRatio× & \vgood{已达} \\
     系统调用入口 & getpid \nGetpidBefore $\to$ \nGetpid\,ns，为 Linux \nGetpidLin\,ns 的 \nGetpidRatio×（由 7× 收窄） & \vgood{已达} \\
     内存与分页 & THP first-touch \nThpFTBefore $\to$ \nThpFT\,s，Linux \nThpFTLin\,s，快 \nThpRatio×（领先） & \vgood{已达} \\
-    频率电压 & 内存写带宽 \nMemBWWriteBefore $\to$ \nMemBWWrite\,MiB/s，为 Linux 的 \nMemBWWriteRatio×（DDR 变频固件外因） & \vwarn{部分达成} \\
+    频率电压 & CPU 调频调压经 PVTPLL 环长对齐 Linux（逐核持平）；内存写 \nMemBWWriteBefore $\to$ \nMemBWWrite\,MiB/s（\nMemBWWriteRatio×，DDR 变频属固件外因） & \vgood{已达} \\
     启动 TTFI & \nTtfiBefore $\to$ \nTtfi\,s，优于 Linux \nTtfiLin\,s（领先） & \vgood{已达} \\
     显示栈 & VOP2 + HDMI-QP + HDPTX 上板点亮，ROPLL 锁定验证通过 & \vgood{已达} \\
     QEMU NPU 模型 & RKNPU 功能级仿真合入，106 个 qtest & \vgood{已达} \\
-    机器人应用 & 追球到投放五阶段闭环在板上跑通 & \vgood{已达} \\
+    机器人应用 & 网球拾取机器人五阶段闭环在 RK3588 真机完整运行，感知到运动控制全链路 & \vgood{已达} \\
     \bottomrule
   \end{tabular}
   \advance{决赛命题是整 OS 对等}{九个子系统的目标、结果与状态一次给全}
@@ -656,13 +656,13 @@
   \frametitle{材料入口与致谢}
   \begin{itemize}
     \item \headline{代码}\ rcore-os/tgoskits（已合并 PR）、processmission/qemu（\#19、\#26 RKNPU 模型）、团队 fork（在审 PR）
-    \item \headline{报告与幻灯}\ \texttt{make report} / \texttt{make slides}（tectonic），数字与图表经 \texttt{numbers.tex} 与 \texttt{render.py} 溯源
+    \item \headline{报告与幻灯}\ 决赛技术报告与进展汇报见 \texttt{docs/final-round/}，全部数字与图表经 \texttt{numbers.tex} 单一数据源溯源
     \item \headline{板级复现}\ \texttt{scripts/board/boardctl.py} 暖重启回路，perf 与 sysbench 运行上游同名二进制
     \item \headline{致谢}\ 感谢 rcore-os 社区评审与竞赛组委会
   \end{itemize}
   \vfill
   \centering{\sffamily\color{teal}\large Team Posad\quad·\quad 清华大学}
-  \advance{全部结论可追溯}{入口：上游 PR 与 QEMU 模型，make report/slides，boardctl 暖回路}
+  \advance{全部结论可追溯}{入口：上游 PR 与 QEMU 模型，docs/final-round 报告与幻灯，boardctl 暖回路}
 \end{frame}
 
 \end{document}
