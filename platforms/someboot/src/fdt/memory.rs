@@ -1,12 +1,18 @@
 use core::ops::Range;
 
 use heapless::Vec;
+use kernutil::StaticCell;
 
 use crate::{
     consts::PAGE_SIZE,
     fdt::fdt_base,
     mem::{MemoryDescriptor, MemoryType, add_memory_descriptor},
 };
+
+/// RAM (Free) regions captured during `init_memory_map`'s FDT walk, so `memories()`
+/// can return them without re-walking the uncached pre-MMU FDT a second time. Sized
+/// to match the `memories()` result buffer.
+static RAM_REGIONS: StaticCell<Vec<Range<usize>, 128>> = StaticCell::new(Vec::new());
 
 pub fn init_memory_map() -> Option<()> {
     let fdt = super::fdt_base()?;
@@ -23,6 +29,9 @@ pub fn init_memory_map() -> Option<()> {
                 memory_type: MemoryType::Free,
             })
             .unwrap();
+
+            // Memoize so `memories()` reuses this instead of re-walking the FDT.
+            unsafe { RAM_REGIONS.update(|r| r.push(region.clone()).ok()) };
         }
     }
 
@@ -58,6 +67,14 @@ pub fn init_memory_map() -> Option<()> {
 }
 
 pub fn memories() -> impl Iterator<Item = Range<usize>> {
+    // Reuse the regions memoized during `init_memory_map` rather than re-walking
+    // the uncached FDT. Fall back to a fresh walk only if the memo is empty (e.g.
+    // `memories()` called before `init_memory_map`).
+    let memoized: Vec<Range<usize>, 128> = unsafe { RAM_REGIONS.update(|r| r.clone()) };
+    if !memoized.is_empty() {
+        return memoized.into_iter();
+    }
+
     let mut res = Vec::<_, 128>::new();
     if let Some(fdt) = fdt_base() {
         for memory in fdt.memory() {
