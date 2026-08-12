@@ -712,6 +712,7 @@ dependencies = [
  "rockchip-pwm",
  "rockchip-rga",
  "rockchip-soc",
+ "rockchip-vop2",
  "sdhci-cv1800",
  "sdhci-host",
  "sdio-host-cv1800",
@@ -2990,6 +2991,13 @@ name = "dunce"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
+
+[[package]]
+name = "dw-hdmi-qp"
+version = "0.1.0"
+dependencies = [
+ "log",
+]
 
 [[package]]
 name = "dwmmc-host"
@@ -6723,6 +6731,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rockchip-hdptx-phy"
+version = "0.1.0"
+dependencies = [
+ "log",
+]
+
+[[package]]
 name = "rockchip-jpeg"
 version = "0.1.3"
 dependencies = [
@@ -6784,6 +6799,13 @@ dependencies = [
  "mbarrier",
  "thiserror 2.0.18",
  "tock-registers 0.10.1",
+]
+
+[[package]]
+name = "rockchip-vop2"
+version = "0.1.0"
+dependencies = [
+ "log",
 ]
 
 [[package]]

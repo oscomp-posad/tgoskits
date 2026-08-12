@@ -31,6 +31,21 @@ k230 = [
 ]
 
 rknpu = ["ax-driver/rknpu", "starry-kernel/rknpu"]
+# Native RK3588 VOP2 display driver. `ax-runtime/display` compiles in the
+# display runtime path (ax-runtime `init_display`, devices.rs) exactly as the
+# `qemu` feature does; without it the registered display device is never taken up.
+rockchip-vop2 = [
+  "ax-driver/rockchip-vop2",
+  "starry-kernel/rockchip-vop2",
+  "ax-runtime/display",
+]
+# Full HDMI cold-init (own PHY+TX+CRU+GRF, no U-Boot reuse). Opt-in for a watched
+# display bring-up; board-validation pending. Implies the display runtime path.
+rockchip-vop2-coldinit = [
+  "ax-driver/rockchip-vop2-coldinit",
+  "starry-kernel/rockchip-vop2-coldinit",
+  "ax-runtime/display",
+]
 jpeg = ["ax-driver/jpeg", "starry-kernel/jpeg"]
 rk3588-pwm = ["starry-kernel/rk3588-pwm"]
 stack-protector = ["ax-std/stack-protector", "starry-kernel/stack-protector"]

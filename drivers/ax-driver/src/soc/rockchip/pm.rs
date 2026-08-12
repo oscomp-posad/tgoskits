@@ -124,6 +124,22 @@ fn map_pm_error(error: PmError) -> PowerError {
     }
 }
 
+/// Power on a power domain by its rdif id via the registered Rockchip power
+/// provider (the `rdif_power::Power<PowerDrv>` registered above). This is how a
+/// device driver ensures its power domain is up before touching MMIO on a cold
+/// boot (e.g. the VOP/VO1 domains for a from-scratch display bring-up).
+///
+/// Returns `Ok(true)` if powered on, `Ok(false)` if no provider is registered
+/// (e.g. the PMU node was absent), or the provider's error. Never panics.
+pub fn power_on_domain(id: u32) -> Result<bool, PowerError> {
+    let Some(dev) = rdrive::get_one::<rdif_power::Power>() else {
+        return Ok(false);
+    };
+    let mut guard = dev.try_lock().map_err(|_| PowerError::Busy)?;
+    guard.power_on(PowerDomainId::new(id as u64))?;
+    Ok(true)
+}
+
 fn domain_parent_map(
     root: rdrive::probe::fdt::NodeType<'_>,
 ) -> BTreeMap<PowerDomainId, PowerDomainId> {

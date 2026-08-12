@@ -25,10 +25,10 @@ mod pmic_i2c;
 mod pmic_spi;
 
 #[cfg(feature = "rockchip-soc")]
-mod cru;
+pub(crate) mod cru;
 
 #[cfg(feature = "rockchip-pm")]
-mod pm;
+pub(crate) mod pm;
 
 #[cfg(feature = "rockchip-soc")]
 mod pinctrl;
