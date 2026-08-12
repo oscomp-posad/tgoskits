@@ -1014,6 +1014,13 @@ impl DwMmc {
                 if stage == BlockRequestStage::Command {
                     let _ = self.take_command_response();
                 }
+                // The data has been clocked to the card (DATA_TRANSFER_OVER fired), but the card now
+                // holds DAT0 busy while it programs the block. The next data command is gated on
+                // `data_busy` and the controller raises no interrupt when the busy clears, so an
+                // IRQ-driven waiter on that next request would stall until the polling fallback
+                // times out. Wait the (typically sub-millisecond) program-out here so the write
+                // reports complete only once the card is idle.
+                self.wait_card_not_busy();
                 self.disable_idmac();
                 self.clear_all_int_status();
                 self.pending_data = None;
@@ -1262,6 +1269,17 @@ impl DwMmc {
         self.command_state = crate::command::CommandState::Idle;
         slot.complete(id)?;
         recovery
+    }
+
+    /// Spin until the card releases DAT0 (programming complete), bounded so a stuck card can never
+    /// hang the completion path. Used after a write so the next command is not gated on a busy card.
+    fn wait_card_not_busy(&self) {
+        for _ in 0..DMA_POLL_LIMIT {
+            if !self.regs.status().read().data_busy() {
+                return;
+            }
+            core::hint::spin_loop();
+        }
     }
 
     fn disable_idmac(&self) {

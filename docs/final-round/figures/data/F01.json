@@ -1,0 +1,100 @@
+{
+  "title": "跨子系统对等仪表盘",
+  "subtitle": "归一化性能比：吞吐类 = Starry/Linux，时延类 = Linux/Starry（数值越大越好）",
+  "x_label": "相对 Linux 的性能倍数",
+  "parity_line": 1.0,
+  "parity_label": "持平线 x=1.0",
+  "footnote": "注：各项均为 RK3588 整机实测，3 次重复取中位数",
+  "rows": [
+    {
+      "id": "thp_first_touch",
+      "label": "THP 首次触碰",
+      "value": 2.87,
+      "tag": "领先",
+      "direction": "latency",
+      "abl": false,
+      "note": "首次缺页建页耗时，Linux/Starry"
+    },
+    {
+      "id": "ttfi",
+      "label": "TTFI 首次推理耗时",
+      "value": 1.15,
+      "tag": "领先",
+      "direction": "latency",
+      "abl": false,
+      "note": "kernel 启动到首次推理完成，Linux/Starry"
+    },
+    {
+      "id": "single_a55",
+      "label": "单核 A55",
+      "value": 1.03,
+      "tag": "领先",
+      "direction": "throughput",
+      "abl": false,
+      "note": "单核吞吐，Starry/Linux"
+    },
+    {
+      "id": "single_a76",
+      "label": "单核 A76",
+      "value": 0.93,
+      "tag": "持平",
+      "direction": "throughput",
+      "abl": false,
+      "note": "单核吞吐 Starry 896 / Linux 962 ev/s"
+    },
+    {
+      "id": "cpu_8t",
+      "label": "CPU 8 线程",
+      "value": 0.96,
+      "tag": "持平",
+      "direction": "throughput",
+      "abl": false,
+      "note": "8 线程聚合吞吐 Starry 4987 / Linux 5222 ev/s"
+    },
+    {
+      "id": "wake_latency",
+      "label": "唤醒延迟",
+      "value": 0.75,
+      "tag": "持平",
+      "direction": "latency",
+      "abl": false,
+      "note": "调度唤醒 p50，Linux 6us / Starry 8us"
+    },
+    {
+      "id": "mutex",
+      "label": "mutex 争用",
+      "value": 0.57,
+      "tag": "仍有差距",
+      "direction": "throughput",
+      "abl": false,
+      "note": "sysbench mutex 8 线程耗时 Linux 0.481s / Starry 0.849s"
+    },
+    {
+      "id": "getpid",
+      "label": "getpid",
+      "value": 0.39,
+      "tag": "仍有差距",
+      "direction": "latency",
+      "abl": false,
+      "note": "系统调用耗时 Linux 167ns / Starry 431ns"
+    },
+    {
+      "id": "mem_bw",
+      "label": "内存带宽",
+      "value": 0.61,
+      "tag": "仍有差距",
+      "direction": "throughput",
+      "abl": false,
+      "note": "sysbench-memory 写 8 线程 Starry 34330 / Linux 56046 MiB/s"
+    },
+    {
+      "id": "schbench_rps",
+      "label": "schbench RPS",
+      "value": 1.71,
+      "tag": "领先",
+      "direction": "throughput",
+      "abl": false,
+      "note": "schbench m1:t4 每秒请求数 Starry 339 / Linux 199"
+    }
+  ]
+}

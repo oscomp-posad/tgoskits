@@ -1,0 +1,40 @@
+% 16_division
+\section{队员分工}
+
+本队共三名成员，按子系统分工，各自负责所辖模块的设计、实现、板级测量与复现。洪世金（Joseph Joshua Anggita）为队长，承担内核性能、内存与驱动的主体工作：性能观测 perf、调度器与大小核、频率与电压 DVFS、内存与 THP、页表与 TLB 正确性、RGA 与 JPU 驱动、原生显示栈、sysbench 基准套件与整机对比，并负责本报告的撰写与整体协调。王乙凡承担功能级仿真，将 RK3588 的 RKNPU \ours{实现为可执行的 QEMU 功能级模型}。徐子航承担板级使能，补齐板上运行真实负载所需的 I/O、网络与相机驱动，实现 reboot 系统调用。机器人拾球应用由王乙凡与徐子航共同完成。表~\ref{tab:division} 按成员列出各自负责的模块与交付物，各贡献的 PR 编号与合入状态见增量贡献一节。
+
+三名成员的工作在若干处交汇。板级测量依赖徐子航打通的 UART、SSH 与相机链路方能取得读数；洪世金的调度、DVFS 与内存结论为机器人应用提供算力预算与页表基础；机器人模型的推理性能在王乙凡的 RKNPU 模型上测得；机器人应用由王乙凡与徐子航在板级链路上共同实现。分工按模块划分，验证由全队共用一套板级与仿真环境完成。
+
+\begin{table}[H]\centering\small
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{2.4cm}>{\raggedright\arraybackslash}p{12.7cm}@{}}
+\toprule
+成员 & 负责模块与交付物 \\
+\midrule
+洪世金（队长） &
+\textbf{perf 观测} 单核 ARM PMUv3 硬件 PMU perf，多核与 big.LITTLE，软件事件与 HW\_CACHE，真实 tid 采样归属与 LOST，事件组、SAMPLE\_READ 与 \texttt{-a}，调用图，ftrace（板级 39/0、矩阵 56/0）。
+\textbf{调度器与大小核} 跨核互唤醒死锁修复、新建与唤醒线程的跨核分发、占用感知的派生与唤醒放置、CFS 对齐的 \texttt{wake\_affine}（跨核唤醒 1042 至 \nWake~µs）、\texttt{CLONE\_VM} 用户拷贝快路径（hackbench -T \nHackT×）。
+\textbf{DVFS 与 cpufreq} RK3588 ondemand CPU DVFS 加 PMIC 电压标定，PVTPLL 环长切换与 OPP 顶推（A76 \nDvfsAseven~MHz、A55 \nDvfsAfive~MHz）。
+\textbf{内存与 THP} 2\,MB 私有匿名 first-touch（\nThpFT~s，快 \nThpRatio×）、新建映射跳过 TLB flush、\texttt{MADV\_NOHUGEPAGE} 语义、COW 引用计数 u8 至 u32。
+\textbf{页表与 TLB 正确性} 共享跨内核 crate 上的 not-present huge block 误判 UAF 类修复、\texttt{dsb ishst} 存序、\texttt{vmalle1is} 广播回退、BBM 无分配拆分、空中间表回收与批量失效合并。
+\textbf{RGA 与 JPU 驱动} RGA2 二维加速器、JPU VDPU720 硬件 JPEG 解码、rknpu DRM ioctl 归并。
+\textbf{原生显示栈} VOP2、HDMI-QP、HDPTX PHY、CRU 扩展与 Qt6 冷启动编排。
+\textbf{sysbench 与整机对比}、\textbf{报告撰写与整体协调}。 \\
+\midrule
+王乙凡 &
+\textbf{QEMU RKNPU 功能级模拟器} PC/CNA/CORE/DPU/RDMA/PPU 全流水线及 IOMMU 与 INT8/FP 执行（106 qtests），多核协同执行，每次推理的 profiling 计数。
+\textbf{机器人拾球应用}（与徐子航共同）。 \\
+\midrule
+徐子航 &
+\textbf{板级 I/O 与网络驱动} RK3588 UART 初始化、USB-serial tty、TTY 输入 flush 与唤醒、PWM sysfs 执行器面、rtnetlink IPv4 与 RTL8125 多网卡及 regulator GPIO 共同打通板级 SSH、ax-net 数据报睡眠锁修复、RKNPU GEM 遵循 cache 标志的 mmap。
+\textbf{UVC 相机} USB 相机异步传输生命周期与测试迁移到 ax-sync。
+\textbf{reboot} reboot(2) 系统调用，支撑板级热重启循环。
+\textbf{机器人拾球应用}（与王乙凡共同）追球到投放的五阶段状态机、执行器后端、底盘电机编码器里程计定位回桶。 \\
+\bottomrule
+\end{tabular}
+\caption{三名成员按模块与交付物的分工，各贡献的 PR 编号与合入状态见增量贡献一节}
+\label{tab:division}
+\end{table}
+
+页表与内存的这些修复落在多套 OS 共享的跨内核 crate 上，风险面较大，每处改动在合并前均经过对抗式代理复核，每处由 7 至 26 名评审代理压测。页表 UAF 类误判、\texttt{dsb ishst} 存序、\texttt{vmalle1is} 广播回退、cpufreq 高频欠压这些真实缺陷均在复核中\ours{被定位并修复}，故将其独立列为一组交付物。
+
+QEMU RKNPU 模型已合并且功能完整，机器人模型的推理数据均在其上测得。原生显示栈的四个 driver-core crate 主机寄存器级验证通过，并已在 RK3588 上点亮验证通过（ROPLL 锁定、VP0 1080p60 光栅、\texttt{/dev/fb0} 彩条、Qt6 时钟原生运行）。

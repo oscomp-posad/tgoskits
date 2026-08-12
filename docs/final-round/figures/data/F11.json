@@ -1,0 +1,41 @@
+{
+  "chart": "F11_ttfi",
+  "title": "首次推理耗时 (TTFI) 拆解",
+  "unit": "s",
+  "note": "各阶段占比为估算切分（斜纹填充），整机数字待整板复测后更新；改造前/改造后/Linux 总耗时已由串口时间戳板测确认。",
+  "source": "05-time-to-first-inference.md; _raw/session-timelines/tennis-ttfi.md",
+  "linux": {"label": "Linux 基准", "value": 11.28, "abl": false},
+  "stage_order": ["pcie_probe", "block_irq_fallback", "model_init", "first_inference"],
+  "stage_labels": {
+    "pcie_probe": "PCIe 探测",
+    "block_irq_fallback": "块设备中断降级",
+    "model_init": "模型初始化",
+    "first_inference": "首次推理"
+  },
+  "series": [
+    {
+      "id": "before",
+      "label": "改造前",
+      "total": 19.22,
+      "total_abl": false,
+      "stages": {
+        "pcie_probe": {"value": 5.60, "abl": true},
+        "block_irq_fallback": {"value": 2.10, "abl": true},
+        "model_init": {"value": 1.60, "abl": true},
+        "first_inference": {"value": 9.92, "abl": true}
+      }
+    },
+    {
+      "id": "after",
+      "label": "改造后",
+      "total": 9.83,
+      "total_abl": false,
+      "stages": {
+        "pcie_probe": {"value": 0.18, "abl": true},
+        "block_irq_fallback": {"value": 0.03, "abl": true},
+        "model_init": {"value": 0.96, "abl": true},
+        "first_inference": {"value": 8.66, "abl": true}
+      }
+    }
+  ]
+}

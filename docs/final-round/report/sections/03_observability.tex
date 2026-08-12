@@ -1,0 +1,82 @@
+% 03_observability
+\section{性能观测 perf}
+
+perf 是性能剖析器。它读取 CPU 内建的硬件性能计数器，把周期、指令、缓存访问与分支这些事件归因到具体的函数与代码行，是在真机上定位性能瓶颈的标准手段。Linux 自带 perf；StarryOS 此前没有对应能力，调度与内存的行为只能靠打印与粗粒度计时间接推断，热点落在哪一层无从读出，本报告其余各节所依赖的板级测量也就缺少一件称手的工具。现已在 StarryOS 上\ours{实现完整的硬件 PMU perf}，覆盖单核 ARM PMUv3 计数、按簇的 big.LITTLE 拓扑、软件与缓存与组事件、带真实进程身份的采样、帧指针与 DWARF 调用栈、kprobe 与 tracepoint 动态跟踪以及 ftrace 函数跟踪，直至未经修改的上游 perf 6.1.0 二进制可直接在 StarryOS 上运行，产出有效的 \texttt{perf.data}、\texttt{perf report} 与 \texttt{perf top}。本节先说明 perf 的硬件基础与各项特性的机制，再说明各项的实现与板级验证。
+
+\figphl{../figures/out/Fperf.png}{perf 的分层结构，各层均为新增的内核侧实现}{fig:perf-arch}
+
+图~\ref{fig:perf-arch} 给出这套 perf 的分层结构。最底层是硬件计数器的编程，往上依次是 \texttt{perf\_event\_open} ABI 与其 mmap 环形缓冲、采样与归属、调用栈与动态跟踪。其中 \texttt{perf\_event\_open} ABI 与内核侧的 PMU、采样、跟踪逻辑为本队新增，用户态运行的是未经改动的上游 perf 二进制。
+
+\subsection{硬件基础：ARM PMUv3 与硬件计数}
+
+硬件计数的载体是 ARM 的性能监控单元 PMUv3。它在每个核上提供一组可编程的事件计数器，外加一个专用的 64 位周期计数器。计数器的数量由 \texttt{PMCR} 的 N 字段给出，RK3588 上 \texttt{PMCR.N=6}，即每核 6 个通用计数器加 1 个专用周期计数器。硬件计数的原理是：把一个待测事件的编号写入某个通用计数器对应的事件类型寄存器，此后该核每发生一次这类事件，硬件就在对应计数器上自增一次，软件只需在测量前后读取计数器差值，无需任何采样开销即可得到精确的事件总数。周期数走专用的周期计数器，指令、分支、缓存访问等则占用通用计数器。
+
+内核在这一层承担三件事。其一是计数器分配，把用户请求的事件编号绑定到某个空闲的通用计数器，用尽 6 个通用计数器后再打开的事件转入下文的时分复用。其二是用户态与内核态的区分：事件类型寄存器中的 exclude 位可将计数限定于用户态或内核态，\texttt{perf} 借此只统计被测程序自身而不含内核路径。这条过滤在真机上以极端比值得到验证，同一负载下用户态计数读到 160000055，内核态计数读到 28455，\keyres{相差约 5600 倍}，其间一处 off-by-one 也在真机上被订正。其三是溢出中断采样：\texttt{perf stat} 只需测量前后各读一次计数器，而 \texttt{perf record} 需要按事件密度定期采样，做法是给计数器预置一个接近溢出的初值，计数溢出时硬件抬起每核的 PMU 溢出中断（per-PE INTID 23），中断处理记录一次样本并重装初值，采样频率因此与事件发生率成正比。单核阶段还验证了周期计数器为满 64 位、不发生 32 位回绕。这一层以合并请求 \#1395 提交至上游，已合并。
+
+\subsection{perf\_event\_open ABI 与直接运行上游 perf}
+
+perf 的用户态接口是 \texttt{perf\_event\_open} 系统调用与其配套的 mmap 环形缓冲。用户态用 \texttt{perf\_event\_open} 传入一份事件描述（事件类型、编号、过滤位、采样周期等），拿回一个文件描述符，再 \texttt{mmap} 出一段环形缓冲；内核把采样记录连续写入这段缓冲，用户态顺序读出并解码。符号化不落在内核，用户态凭 \texttt{/proc/kallsyms} 把内核地址还原为函数名，凭 \texttt{/proc/<pid>/maps} 把用户地址还原为可执行文件与偏移。这一层为本队新增，也是整项工作的核心结论所在：StarryOS 的 \texttt{perf\_event\_open} ABI 与 Linux 对齐到足以让未经改动的\ours{上游静态 musl 版 \texttt{perf} 6.1.0 二进制直接运行}，无需为 StarryOS 定制一份 perf。该二进制在 CI 中由 linux-6.1 源码可复现地重建，其内置的 \texttt{tools/lib/traceevent} 静态链入，因而 \texttt{perf report} 与 \texttt{perf script} 能就地解码跟踪数据，剥离符号后约 2.78 MB。
+
+直接运行上游二进制的端到端结果如下。\texttt{perf stat true} 在真机上计出约 19.3M 周期、IPC 0.91（QEMU 因只建模周期一项计出 74027146 周期）。\texttt{perf record} 采得 751 个样本、产出 0.031 MB 的 \texttt{perf.data}；\texttt{perf report} 将内核热点逐行符号化，给出 \texttt{UserContext::run} 占 7.73\%、\texttt{memcpy} 占 5.57\%、\texttt{on\_exec\_sideband} 占 3.02\%，符号经 \texttt{/proc/kallsyms} 解析。\texttt{perf top --stdio} 在 4 核上以 \texttt{drop: 0/10115} 无丢样滚动，首行为 \texttt{100.00\% [kernel] [k] ax\_task::run\_idle}。ABI 对齐使工程量显著下降，perf 全部功能的验证都可直接以真实 perf 的输出为准。
+
+\subsection{多核与大小核}
+
+RK3588 是大小核架构，4 个 A55 小核（cpu0 至 cpu3）与 4 个 A76 大核（cpu4 至 cpu7）分属两簇，PMU 计数器为每核私有，跨核测量必须逐核编程。内核为每个核经 \texttt{percpu::ALLOC} 维护独立的计数器池，并以 \texttt{ensure\_core\_inited()} 在首次触及某核时惰性初始化其池。两簇的事件编码并不一致，同一事件在 A55 上存在而在 A76 上可能缺失，内核据 \texttt{MIDR} 识别核心身份加以区分：A55 的 part 号为 \texttt{0xd05}、归为 type 9，A76 的 part 号为 \texttt{0xd0b}、归为 type 10，事件的支持性检查因此按打开事件所在核所属的簇来判定。
+
+系统级测量 \texttt{perf stat -a} 需要同时在所有在线核上计数，内核经核间中断（IPI）把编程与读取请求按核扇出，每个核在本地完成计数器操作后回汇。每个事件绑定一个 home core，其计数器的编程与读取都在该核串行完成（home-core lock），跨核读取经 IPI 转发到 home core，避免两核并发触碰同一计数器。当某核上打开的事件数超过 6 个通用计数器时，内核在调度 tick 上按时间片轮转这些事件到有限的物理计数器，读数再按占用时间比例放大，得到与全程独占等效的估计，这与 Linux 的计数器复用一致。该层还实现了 \texttt{PERF\_FORMAT\_LOST}，把复用与缓冲写满造成的丢失计入读数。这部分以合并请求 \#1577 提交至上游，在审。
+
+\subsection{事件类型}
+
+perf 把可测事件按来源分为若干类，各类的取值口径与开销不同，以下逐类说明其机制与实现。
+
+\paragraph{硬件事件}
+硬件事件直接落到 PMUv3 的通用计数器，包括周期、指令、分支、各级缓存访问与命中等。它们由硬件精确计数，开销近乎为零，是 \texttt{perf stat} 与 \texttt{perf record} 的默认事件来源，机制见前文硬件基础一节。
+
+\paragraph{软件事件}
+软件事件不占用硬件计数器，由内核在关键路径上以纯原子操作按任务累加，包括 cpu-clock、task-clock、context-switches、cpu-migrations 与 page-faults。cpu-clock 计逝去的挂钟时间，task-clock 只计任务实际在核上运行的时间，故 task-clock 恒不超过 cpu-clock；context-switches 计上下文切换次数，cpu-migrations 计任务跨核迁移次数，page-faults 计缺页次数。实现落在新增的 \texttt{perf/sw.rs}，每个软件事件是一个每任务的原子量，在切换、迁移、缺页等钩子处自增。一次 QEMU 测量给出 cpu-clock 247 ms、task-clock 173 ms（小于 cpu-clock）、page-faults 513、context-switches 24、cpu-migrations 可读，语义自洽。软件事件在无 PMU 或 PMU 被占满时仍可用，是纯计算负载画像的基础。这部分随合并请求 \#1601 提交至上游，在审。
+
+\paragraph{缓存事件}
+\texttt{PERF\_TYPE\_HW\_CACHE} 以三元组编码一个缓存事件：缓存层级（L1D、L1I、LL、TLB 等）、访问类型（读、写、预取）与结果（访问、缺失）。内核以 \texttt{hw\_cache\_to\_arm(config)} 把这个组合映射到 PMUv3 上对应的原始事件编号，无对应硬件事件的组合如实报告为不支持。一组 20 项组合的解码单元测试通过，L1D-prefetch 这类无对应事件的组合被干净拒绝而不误路由。真机上 \texttt{CACHE-2} 的 L1D-load 计出 40524820（大于零），缓存计数只能在真机上取得，QEMU 的 PMU 仅建模周期一项。这部分同随合并请求 \#1601 提交至上游，在审。
+
+\paragraph{事件组}
+事件组把多个事件绑定为一组，保证它们被同时调度上同一组计数器，其读数才可在同一时间窗内相互换算，如以 instructions 除以 cycles 求 IPC。组的成员经 \texttt{group\_fd} 指向组长建立，\texttt{PERF\_FORMAT\_GROUP} 令一次 \texttt{read} 原子地取回全组读数，\texttt{PERF\_SAMPLE\_READ} 令组长的每个样本携带全组计数，组长采样时即可把成员计数一并快照。一次 QEMU 软件组测量得 \texttt{nr=2} 的 \texttt{\{task-clock,cpu-clock\}}，各成员按启用传播计数、id 正确解复用；采样读的样本值严格递增（819 个样本、末值 81900000，即 819 乘 100000）。组长采样在一处跨线程用后释放（use-after-free）上曾有隐患：组长把成员的每任务原子量裸指针烘入自己的每核样本槽，成员线程若退出并释放这些原子量，组长的硬中断处理仍会解引用。该处以\ours{一道同线程不变式}（\texttt{owner\_tid} 同线程门，跨线程成员返回 \texttt{EINVAL}）封堵，对齐 Linux 中组长与成员须同属一个上下文的约束。事件组随合并请求 \#1603 提交至上游，在审。
+
+\subsection{采样与归属}
+
+采样记录必须归属到正确的进程与线程，否则 \texttt{perf report} 的按进程聚合便失真。采样在硬中断上下文中完成，此时 \texttt{current()} 未必仍是被采样的任务，尤其在多核抢占下。为此内核在把某任务的时间片装载上核（slice-arm）时就记下它真实的进程号与线程号 \texttt{(tgid,tid)}，样本据此归属，跨核采样的归属因此准确。真机上 \texttt{TID-1} 以 1024 个样本验证，每个样本的 tid 与 tgid 均正确（pid=47、worker\_tid=158）。
+
+环形缓冲写满时新样本会丢失，若不记录丢失量，用户态无从判断画像是否被截断。内核以带内的 \texttt{PERF\_RECORD\_LOST} 记录在丢失发生处补入丢样计数，与后续样本一同顺序读出。真机上 \texttt{LOST-1} 得 2033 个有效样本、15 条 LOST 记录、累计丢失 3416426，丢样在压力下被如实计入而不静默。这部分随合并请求 \#1602 提交至上游，在审。
+
+\subsection{调用栈采样}
+
+只知道热点函数不足以定位问题，还需知道它经由哪条调用链被触及，即调用栈采样（\texttt{PERF\_SAMPLE\_CALLCHAIN}），其可视化即火焰图。内核实现两条互补的展开路径。
+
+第一条是帧指针路径。它是一个无分配的展开器，从中断入口发布的陷入帧取出帧指针 FP 与栈指针 SP，沿栈上串起的 FP 链逐帧上行读回各级返回地址，全程不申请内存，可安全运行于硬中断上下文。FP 与 SP 由 \texttt{axcpu} 在 IRQ 入口发布到每核槽位供展开器读取。裸解引用内核 FP 在硬中断中有风险，一个落在合法范围却已失效的 FP 会触发不可收场的异常，故内核 FP 的读取改走一条 IRQ 安全、不触发缺页的四级页表走查，并以物理内存范围核验拦住指向用户映射的 RGA、NPU、JPU 寄存器的伪地址，另设总步数上限防止畸形链导致的耗时失控。QEMU 上该路径可展开 8 层用户帧。用户帧展开有两处前置：用户测试须以 \texttt{-fno-optimize-sibling-calls} 编译，否则 -O2 下尾调用链会塌成 3 帧；深层内核展开须用带 \texttt{BACKTRACE=y} 的帧指针内核。真机上 \texttt{CHAIN-USER} 得 580 个样本、最深 7 层用户帧（至少 4 层 FP 帧），\texttt{CHAIN-KERNEL} 得 583 个样本、577 条内核链。
+
+第二条是 DWARF 路径。当目标未保留帧指针时改由 DWARF 展开：采样点采集一组寄存器与一段栈快照，随样本带回，交由用户态依据 DWARF 调试信息离线展开出完整调用栈。真机上 \texttt{DWARF-1} 得 1203 个样本，每样本 6 个用户寄存器、6 个有效（寄存器与栈均已采得）。两条路径合起来覆盖有无帧指针两种情形，与 Linux 一致。
+
+\subsection{动态跟踪：kprobe 与 tracepoint}
+
+除按周期采样外，perf 还能在特定内核事件上打点。kprobe 是内核动态探针，在运行时把内核任意函数入口处的指令替换为断点，命中时陷入并执行探针回调，无需重编译内核即可观察某函数被调用的时刻与参数；tracepoint 则是内核源码中预埋的静态跟踪点，开销更低但位置固定。两者命中时都直接发出一条 \texttt{PERF\_RECORD\_SAMPLE}，从而复用 perf 既有的采样、归属与符号化通路。对外，\texttt{perf probe} 与 \texttt{kprobe\_events} 经 tracefs 暴露，用户可在真机上按 \texttt{/proc/kallsyms} 的 \texttt{\_stext+offset} 动态注册探针。
+
+动态跟踪的一处关键在于过滤范围。早期未加过滤时，探针会把内核自身处理探针所触发的路径也一并采到，形成正反馈，一次 \texttt{perf record -e probe: -- cmd} 耗时达 233 s。\ours{引入每任务过滤}只对被测命令采样后，同一用例 \keyres{284 个样本在 12 s 内取毕}（11.97 s、284 个样本），\texttt{perf report} 与 \texttt{perf script} 均返回 0（报告为 \texttt{probe:hsc} 事件的 284 个样本，脚本 284 行）。真机上 \texttt{KPROBE-1} 以 \texttt{/proc/kallsyms} 定位探针，命中 501 次并正确移除。这部分连同 tracepoint 采样一并实现，探针命中经 perf 采样通路产出样本。
+
+\subsection{ftrace 函数跟踪}
+
+ftrace 是内核的函数跟踪器，它借编译期在每个函数入口埋下的可打补丁桩，在运行时改写这些桩以记录函数进入，本内核共有 11512 个可打补丁入口。全量跟踪每个函数开销极大，实用形态是过滤跟踪，即以 \texttt{set\_ftrace\_filter} 只保留少数感兴趣的函数，例如只跟 \texttt{handle\_syscall} 时得到 73 条记录，这也是 Linux 上的常用形态。
+
+全量函数跟踪暴露出一个只在真机 8 核上出现的活锁，QEMU 始终未能复现，因为 ftrace 的测试都跑在单核，而全量跟踪在模拟器下又过慢、无法在超时内跑完。定位时先排除了两个错误假设（通知风暴、\texttt{stop\_machine} 下的巨型 protect），gdb 抓到的现场显示四个核心全部停在 EL1 同步异常向量上，是一场递归异常风暴：每核的可重入保护本应在进入插桩回调时立即置位以阻断自触发，但它被安排在若干本身也已被插桩的、非内联的辅助函数返回之后才置位，这些辅助函数在保护尚未置位时被调用便再次触发插桩，层层嵌套直至死锁。修复方法是在回调序言最前处先\ours{以不带插桩的原子操作置位保护}，随后在真机 8 核上确认置位即返回、不再卡死。过滤式函数跟踪在 QEMU 与真机上都实用可靠。
+
+\subsection{板级验证}
+
+perf 子系统在 OrangePi-5-Plus 上做了两套硬件在环验证，验证脚本即机器可判定的判定门，一次运行产出一个可比对的通过计数。第一套是 big.LITTLE PMU 拓扑矩阵，最终 39 项通过、0 失败，两簇各自独立编程（A55 type 9、A76 type 10）、跨簇迁移、每核溢出采样与 rdpmc 均通过。单核阶段的 18 项锚定了真机 A55 上的计数通路：真实 \texttt{PMCR.N=6}、用户态与内核态计数约 5600 倍之差、复用轮转、64 位周期计数器无回绕。第二套是完整的 \texttt{perf\_event\_open} 特性矩阵，\keyres{56 项通过、0 失败}，覆盖软件事件、缓存计数、丢样记录、真实 tid 归属、事件组与组采样读、系统级采样与旁带、帧指针与 DWARF 调用栈以及 kprobe。上游 perf 二进制直接测得 IPC 0.91。缓存计数、tid 归属、组调度与 kprobe 命中只能在真机上取得，QEMU 的 PMU 仅建模周期一项。
+
+单核阶段的一项测量与直觉相反。压测所用的循环是一条内存串行的依赖链，A55 在这类负载上的 IPC 读到 1.60，高于 A76 的 1.30，顺序发射的小核在缺乏指令级并行时可以追平乱序的大核，A76 的 IPC 高于 A55 的假设只在指令级并行充足的负载上成立。核对后确认这是真实的硬件结果，遂如实记录，并把对应用例列为信息项。
+
+\subsection{硬件受限特性}
+
+一批 perf 特性受 RK3588 硬件限制无法提供，均按 Linux 在同一 SoC 上的行为如实拒绝，未伪造读数。分支栈采样 \texttt{PERF\_SAMPLE\_BRANCH\_STACK} 与 \texttt{perf record -b} 依赖 BRBE 分支记录扩展，该 SoC 未实现。\texttt{perf mem} 与 \texttt{perf c2c} 依赖 PEBS 类的带权重与数据源的采样（\texttt{WEIGHT}、\texttt{DATA\_SRC}），该 SoC 不具备。硬件断点的 \texttt{mem:} 事件因未接入调试异常向量而不提供，\texttt{ref-cycles} 因无真正的 ARM 参考周期事件而不提供。这些拒绝与 Linux 自身在这颗 SoC 上的不支持行为一致，perf 达到的是 RK3588 硬件实际支持范围内与 Linux 的功能对等。
+
+\subsection{板级运行中发现的 axtask 跨核互唤醒死锁}
+
+在这些板上跑 perf 期间，还发现并修复了 axtask 调度器的一处跨核互唤醒死锁。追查一个疑似 smp8 USB IRQ 风暴的现象时，一步对抗式验证先否定了该前提（真机上只有 12 次良性的 USB 枚举中断，启动照常完成），进而定位到真正的故障：\texttt{put\_task\_with\_state} 以 \texttt{while task.on\_cpu() \{ spin\_loop() \}} 忙等一个远端核把任务切出，而此时它正持有运行队列锁且关中断，两个核同时这样做即冻结整机。修复删去自旋，\ours{改为把入队推迟给拥有该任务的那个核}，并以一次 SeqCst 的 Dekker 握手保证恰有一侧入队，不丢唤醒也不重复唤醒（提交 \texttt{611529498}，合并请求 \#1495，已合并）。该死锁在 QEMU 上无法复现（QEMU 命中 0 次、真机 3 次里冻结 1 次），是一处只在真机上暴露的问题，这类问题正是构建 perf 的动因之一。此修复是负载均衡器的前置条件，其窃取与唤醒路径都经由同一函数，详见调度一节。

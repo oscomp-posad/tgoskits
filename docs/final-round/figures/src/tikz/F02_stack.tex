@@ -1,0 +1,40 @@
+\documentclass[border=12pt]{standalone}
+\usepackage{ctex}\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,fit,backgrounds,shapes.geometric,calc}
+\definecolor{navy}{HTML}{0D1B2A}\definecolor{teal}{HTML}{2DD4BF}\definecolor{amber}{HTML}{F59E0B}\definecolor{ink}{HTML}{EEF3F8}\definecolor{muted}{HTML}{8AA0B4}
+\setCJKmainfont{Songti SC}\setCJKsansfont{Heiti SC}
+\begin{document}
+\begin{tikzpicture}[show background rectangle,background rectangle/.style={fill=navy},
+  font=\sffamily,>=Stealth, every node/.style={text=ink}]
+
+\def\bw{12.5}
+
+% ---- bottom: hardware ----
+\node[draw=muted, line width=0.6pt, rounded corners=6pt, minimum width=\bw cm, minimum height=2.3cm, anchor=south] (hw) at (0,0) {};
+\node[anchor=north, yshift=-9pt, font=\sffamily\bfseries\large] at (hw.north) {RK3588 硬件};
+\node[anchor=south, yshift=10pt, text=muted, font=\sffamily\small] at (hw.south)
+  {A55×4 \ $\cdot$\ A76×4 \ $\cdot$\ 三核 NPU \ $\cdot$\ RGA \ $\cdot$\ JPU};
+
+% ---- connector 1 ----
+\draw[->, teal, line width=0.8pt] (0,2.3) -- (0,2.9);
+
+% ---- middle: kernel (this team's contribution) ----
+\node[draw=teal, line width=0.9pt, rounded corners=6pt, minimum width=\bw cm, minimum height=3.1cm, anchor=south] (krn) at (0,2.9) {};
+\node[anchor=north, yshift=-9pt, font=\sffamily\bfseries\large] at (krn.north) {StarryOS 内核（基于 ArceOS 组件）};
+\node[anchor=south, yshift=10pt, align=center, font=\sffamily\small] (krnrow1) at (krn.south)
+  {{\color{amber}\textbullet} 调度与大小核 \quad {\color{amber}\textbullet} 内存/THP \quad {\color{amber}\textbullet} 频率 DVFS};
+\node[anchor=south, yshift=6pt, align=center, font=\sffamily\small] at (krnrow1.north)
+  {{\color{amber}\textbullet} 观测 perf/ftrace \quad {\color{amber}\textbullet} 设备驱动};
+\node[anchor=north east, inner sep=3pt, draw=amber, line width=0.6pt, rounded corners=3pt,
+      text=amber, font=\sffamily\tiny, xshift=-8pt, yshift=-8pt] at (krn.north east) {本队贡献};
+
+% ---- connector 2 ----
+\draw[->, teal, line width=0.8pt] (0,6.0) -- (0,6.6);
+
+% ---- top: app ----
+\node[draw=muted, line width=0.6pt, rounded corners=6pt, minimum width=\bw cm, minimum height=2.0cm, anchor=south] (app) at (0,6.6) {};
+\node[anchor=north, yshift=-9pt, font=\sffamily\bfseries\large] at (app.north) {应用};
+\node[anchor=south, yshift=10pt, font=\sffamily\small] at (app.south) {网球拾取机器人 + 基准套件};
+
+\end{tikzpicture}
+\end{document}

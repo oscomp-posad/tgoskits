@@ -1,0 +1,55 @@
+% 14_baseline_contrib
+\section{基础版本与增量贡献}
+
+本节汇总增量工作及其相对基线的位置与状态；原生显示驱动栈（VOP2 与 HDMI）已完成主机侧验证与板级点亮（ROPLL 锁定），正整理为可独立拆分的 PR，稍后列入。基线取 \texttt{rcore-os/tgoskits} 的 \texttt{dev} 分支，commit \texttt{73409e079}，上游仓库为 \texttt{github.com/\allowbreak rcore-os/\allowbreak tgoskits}。其上运行的机器人应用移植自 \texttt{pengzechen/\allowbreak aka-rk3588}，模型转换与量化工具取自 \texttt{airockchip/\allowbreak rknn-toolkit2}。集成分支的首个提交即把基线固定于该提交点，此后每一处改动都以它派生，作为一个原子 PR 回到上游、对应的跨内核共享 crate 或 QEMU fork。改动拆到一次即可独立回归的粒度，每条都能对照固定基线单独核对得失，评审也只需关注单一处逻辑。
+
+全部改动分为两条并行推进的线。系统内核侧覆盖性能观测、调度、内存与页表正确性、CPU DVFS 与基准套件；仿真与板级侧覆盖 QEMU RKNPU 仿真器、加速器与图形驱动、串口与外设、网络及机器人应用。表~\ref{tab:contrib} 按子系统列出全部条目，状态分三档：已合并表示已并入对应目标仓库（上游或 QEMU fork），在审表示已提交并处于评审中，已准备表示已在集成分支实现、待拆分为独立 PR。
+
+\begin{table}[H]\centering\small
+\begin{tabular}{@{}p{0.56\linewidth} l l@{}}
+\toprule
+贡献 & 位置/PR & 状态 \\
+\midrule
+单核 ARM PMUv3 硬件 perf & \texttt{rcore\#1395} & 已合并 \\
+多核与 big.LITTLE 硬件 PMU perf & \texttt{rcore\#1577} & 在审 \\
+软件事件与 HW\_CACHE 缓存事件 & \texttt{rcore\#1601} & 在审 \\
+采样归属真实 tid 与丢样记录 & \texttt{rcore\#1602} & 在审 \\
+事件组与组采样读 & \texttt{rcore\#1603} & 在审 \\
+\midrule
+跨核互唤醒死锁修复 & \texttt{rcore\#1495} & 已合并 \\
+新建与被唤醒线程跨核分发 & \texttt{rcore\#1656} & 在审 \\
+\midrule
+sysbench big.LITTLE 套件与板级 harness & \texttt{rcore\#1658} & 在审 \\
+RK3588 CPU DVFS 与 PMIC 电压标定（cpufreq） & \texttt{rcore\#1657} & 已合并 \\
+\midrule
+RK3588 RGA2 二维加速器 & \texttt{rcore\#1388} & 已合并 \\
+RK3588 JPU（VDPU720）硬件 JPEG 解码 & \texttt{rcore\#1456} & 已合并 \\
+rknpu DRM ioctl 辅助函数整合 & \texttt{rcore\#1351} & 已合并 \\
+RKNPU GEM mmap 遵循 cache 标志 & \texttt{rcore\#1364} & 已合并 \\
+\midrule
+RK3588 RKNPU 功能级仿真 & \texttt{qemu\#19} & 已合并 \\
+RKNPU 多核协同执行 & \texttt{qemu\#26} & 已合并 \\
+\midrule
+\texttt{reboot(2)} 系统调用 & \texttt{rcore\#1358} & 已合并 \\
+USB-serial tty & \texttt{rcore\#1378} & 已合并 \\
+RK3588 UART 初始化 & \texttt{rcore\#1921} & 已合并 \\
+TTY 输入 flush 与唤醒修复 & \texttt{rcore\#1922} & 已合并 \\
+RK3588 PWM sysfs & \texttt{rcore\#1468} & 已合并 \\
+UVC 摄像头异步传输生命周期 & \texttt{rcore\#1924} & 已合并 \\
+UVC 测试迁移到 ax-sync & \texttt{rcore\#1961} & 已合并 \\
+\midrule
+rtnetlink IPv4 与多网卡 regulator GPIO & \texttt{rcore\#1497} & 已合并 \\
+ax-net 数据报睡眠互斥修复 & \texttt{rcore\#1963} & 已合并 \\
+\midrule
+图形合成器栈：Weston 于 StarryOS（DRM/KMS、evdev 输入、\texttt{AF\_UNIX} 传递、\texttt{epoll}/\texttt{timerfd}、Xwayland） & \texttt{rcore\#503}--\texttt{516}、\texttt{\#1160} & 已合并 \\
+\midrule
+THP 首次触碰与 fork/拆分正确性 & \texttt{starry-mm} & 已准备 \\
+页表与 TLB 正确性修复 & \texttt{page\_table\_multiarch} & 已准备 \\
+机器人应用（底盘里程计定位） & \texttt{apps/starry} & 已准备 \\
+\bottomrule
+\end{tabular}
+\caption{增量贡献一览，\texttt{qemu} 前缀指 \texttt{processmission/qemu} fork，其余为 \texttt{rcore-os/tgoskits} 上游}
+\label{tab:contrib}
+\end{table}
+
+三项已准备的工作已在集成分支实现并经 RK3588 板级验证，并将按同一原则拆分为独立 PR 回馈上游。内存侧为 \ours{THP 2MB 私有匿名首次触碰}及其在 fork 与拆分路径上的正确性修复；页表侧集中于跨内核共享的 \texttt{page\_table\_multiarch} 与 \texttt{page\_table\_entry}，含一类释放后使用、一处内存序缺陷与一处 SMP 广播漏项；应用侧为基于底盘电机编码器里程计的机器人桶位定位。

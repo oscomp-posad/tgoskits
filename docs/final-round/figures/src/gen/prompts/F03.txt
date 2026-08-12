@@ -1,0 +1,15 @@
+A clean flat technical vector diagram, dark navy background (#0D1B2A), off-white text (#EEF3F8), teal accent (#2DD4BF for the kernel subsystems this team optimized), muted gray (#8AA0B4 for the standard upstream benchmark tools). Crisp high-resolution, no photorealism, thin precise strokes, generous spacing, LARGE readable sans-serif labels. It is a two-column mapping table that pairs a standard benchmark with the kernel subsystem it exercises.
+
+Layout:
+- A title at the top center: "基准套件与子系统对照".
+- Two column headers: left "基准套件"（muted gray）, right "对应子系统"（teal）.
+- Five rows, each a muted-gray rounded box on the left connected by a single right-pointing teal arrow to a teal rounded box on the right:
+  1) "sysbench cpu"  →  "调度 + DVFS"
+  2) "sysbench memory"  →  "内存 / THP"
+  3) "hackbench -P / -T"  →  "调度 / fork"
+  4) "schbench"  →  "唤醒延迟"
+  5) "getpid 微基准"  →  "系统调用入口"
+- A single slim footnote line centered at the bottom in muted gray: "每项基准均在同一开发板上对同一 Linux 基线独立复测".
+- Do NOT put a repeated badge on every row; the baseline note appears only once, at the bottom.
+
+All text crisp and correctly spelled. Balanced, evenly spaced rows, plenty of whitespace.

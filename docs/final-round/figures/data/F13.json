@@ -1,0 +1,73 @@
+{
+  "chart": "F13_modelopt",
+  "title_zh": "模拟器实测：模型结构协同优化前后对比",
+  "subtitle_zh": "QEMU RKNPU 模拟器实测（board-free oracle）· INT8 · 285 图 / 382 框保留集 · conf 0.25 / NMS IoU 0.45",
+  "series_labels": {
+    "before": "原始（640×640, SiLU）",
+    "after": "协同优化后"
+  },
+  "series_colors": {
+    "before": "amber",
+    "after": "teal"
+  },
+  "metrics": [
+    {
+      "id": "mac",
+      "label_zh": "MAC 计算量",
+      "unit_zh": "GMac / 推理",
+      "fmt": "{:.2f}",
+      "before": {
+        "value": 3.15,
+        "abl": false
+      },
+      "after": {
+        "value": 2.06,
+        "abl": false
+      }
+    },
+    {
+      "id": "lut",
+      "label_zh": "LUT 任务数",
+      "unit_zh": "个 / 推理",
+      "fmt": "{:.0f}",
+      "before": {
+        "value": 107,
+        "abl": false
+      },
+      "after": {
+        "value": 3,
+        "abl": false
+      }
+    },
+    {
+      "id": "rknn_run",
+      "label_zh": "rknn_run 耗时",
+      "unit_zh": "ms",
+      "fmt": "{:.2f}",
+      "before": {
+        "value": 14.66,
+        "abl": false
+      },
+      "after": {
+        "value": 5.68,
+        "abl": false
+      }
+    }
+  ],
+  "map50_note": {
+    "label_zh": "mAP50 精度基本持平",
+    "unit_zh": "%",
+    "fmt": "{:.1f}",
+    "before": {
+      "value": 92.9,
+      "abl": false
+    },
+    "after": {
+      "value": 91.1,
+      "abl": false
+    }
+  },
+  "lever_note_zh": "影响最大的一步：SiLU → ReLU（消除大量 LUT 查表算子，rknn_run 近乎减半）",
+  "footnote_zh": "数值来自 QEMU RKNPU 功能模拟器逐推理 profiling；模拟器已随 processmission/qemu #19 / #26 合入上游，profiling 计数由一个在审的合并请求提供；均为模拟器实测定值，非板级消融占位（\"abl\": false）",
+  "source": "07-qemu-npu-model-and-model-opt.md"
+}

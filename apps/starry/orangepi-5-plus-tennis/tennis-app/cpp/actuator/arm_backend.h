@@ -15,22 +15,28 @@ enum class ArmAction {
     Ready,
 };
 
+enum class GrabResult {
+    Captured,
+    Empty,
+    Error,
+};
+
 const char *to_string(ArmAction a);
 
 class ArmBackend {
 public:
     virtual ~ArmBackend() = default;
-    virtual void grab() = 0;    // close gripper on the ball and lift
-    virtual void release() = 0; // open gripper to drop into the bucket
-    virtual void ready() = 0;   // return to home/open pose
+    virtual GrabResult grab() = 0; // close gripper, verify the ball, and lift
+    virtual bool release() = 0; // open gripper to drop into the bucket
+    virtual bool ready() = 0;   // return to the stowed pre-grab pose
 };
 
 // Virtual backend: emits structured command lines, no hardware.
 class TraceArmBackend final : public ArmBackend {
 public:
-    void grab() override;
-    void release() override;
-    void ready() override;
+    GrabResult grab() override;
+    bool release() override;
+    bool ready() override;
 };
 
 } // namespace tennis

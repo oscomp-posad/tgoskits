@@ -1,0 +1,52 @@
+\documentclass[border=12pt]{standalone}
+\usepackage{ctex}\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,fit,backgrounds,shapes.geometric,calc}
+\definecolor{navy}{HTML}{0D1B2A}\definecolor{teal}{HTML}{2DD4BF}\definecolor{amber}{HTML}{F59E0B}\definecolor{ink}{HTML}{EEF3F8}\definecolor{muted}{HTML}{8AA0B4}
+\setCJKmainfont{Songti SC}\setCJKsansfont{Heiti SC}
+\begin{document}
+\begin{tikzpicture}[show background rectangle,background rectangle/.style={fill=navy},
+  font=\sffamily,>=Stealth, every node/.style={text=ink},
+  bench/.style={draw=teal, line width=0.6pt, rounded corners=4pt, minimum width=4.4cm, minimum height=0.95cm, align=center, font=\sffamily\small},
+  subsys/.style={draw=muted, line width=0.6pt, rounded corners=4pt, minimum width=4.4cm, minimum height=0.95cm, align=center, font=\sffamily\small},
+  badge/.style={draw=amber, line width=0.5pt, rounded corners=3pt, text=amber, font=\sffamily\tiny, inner sep=3pt}]
+
+\node[font=\sffamily\bfseries\large] at (0,5.6) {基准 $\rightarrow$ 子系统对照};
+
+\node[font=\sffamily\small, text=muted] at (-3.2,4.85) {基准};
+\node[font=\sffamily\small, text=muted] at (3.2,4.85) {对应子系统};
+
+% row 1
+\node[bench] (b1) at (-3.2,3.9) {sysbench cpu};
+\node[subsys] (s1) at (3.2,3.9) {调度 + DVFS};
+\draw[->, teal, line width=0.6pt] (b1) -- (s1);
+\node[badge, right=0.35cm of s1] {自带 Linux 基线};
+
+% row 2
+\node[bench] (b2) at (-3.2,2.65) {sysbench memory};
+\node[subsys] (s2) at (3.2,2.65) {内存 / THP};
+\draw[->, teal, line width=0.6pt] (b2) -- (s2);
+\node[badge, right=0.35cm of s2] {自带 Linux 基线};
+
+% row 3
+\node[bench] (b3) at (-3.2,1.4) {hackbench -P / -T};
+\node[subsys] (s3) at (3.2,1.4) {调度 / fork};
+\draw[->, teal, line width=0.6pt] (b3) -- (s3);
+\node[badge, right=0.35cm of s3] {自带 Linux 基线};
+
+% row 4
+\node[bench] (b4) at (-3.2,0.15) {schbench};
+\node[subsys] (s4) at (3.2,0.15) {唤醒延迟};
+\draw[->, teal, line width=0.6pt] (b4) -- (s4);
+\node[badge, right=0.35cm of s4] {自带 Linux 基线};
+
+% row 5
+\node[bench] (b5) at (-3.2,-1.1) {getpid 微基准};
+\node[subsys] (s5) at (3.2,-1.1) {系统调用入口};
+\draw[->, teal, line width=0.6pt] (b5) -- (s5);
+\node[badge, right=0.35cm of s5] {自带 Linux 基线};
+
+\node[font=\sffamily\footnotesize, text=muted, align=center] at (0,-2.15)
+  {每项基准均在同一板上对同一 Linux 基线独立复测，报告中的比值均为板上直接对照};
+
+\end{tikzpicture}
+\end{document}

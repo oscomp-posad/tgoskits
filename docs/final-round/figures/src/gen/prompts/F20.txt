@@ -1,0 +1,18 @@
+A clean modern flat-vector finite-state-machine diagram on a dark navy (#0D1B2A) background. Six rounded-square state nodes are arranged evenly around one large circle and connected clockwise by curved teal (#2DD4BF) arrows. Off-white (#EEF3F8) labels, thin precise strokes, no photorealism, generous spacing, LARGE crisp readable labels.
+
+The six state nodes, clockwise starting at the TOP, each a rounded-square outline containing a simple teal line-icon with its label directly BELOW the square:
+1. TOP: a play-triangle icon — label 追球
+2. UPPER-RIGHT: a gear icon — label 抓取
+3. LOWER-RIGHT: a stop-square icon — label 回桶
+4. BOTTOM: a clock icon — label 找桶
+5. LOWER-LEFT: a circular-arrows (refresh) icon — label 趋近桶
+6. UPPER-LEFT: a flag icon — label 投放
+
+Curved teal arrows connect the nodes clockwise in this exact order: 追球 → 抓取 → 回桶 → 找桶 → 趋近桶 → 投放 → back to 追球.
+
+Exactly TWO amber (#F59E0B) pill-shaped badges sit centered ON two specific edges, each containing a tiny icon and amber text:
+- ON the edge from 追球 to 抓取 (the top-right arc): an amber pill labeled 刹车抓取
+- ON the edge from 趋近桶 to 投放 (the left arc): an amber pill labeled 刹车投放
+The other four connecting edges carry NO text badge.
+
+Every Chinese label must be crisp and correctly spelled, exactly: 追球, 抓取, 回桶, 找桶, 趋近桶, 投放, 刹车抓取, 刹车投放. Balanced circular composition, plenty of whitespace.

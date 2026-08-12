@@ -1,0 +1,10 @@
+A clean flat technical vector diagram, dark navy background (#0D1B2A), off-white text (#EEF3F8), teal accent (#2DD4BF for the team's autonomous test-bench parts), amber (#F59E0B for the out-of-band power and metering path), muted gray (#8AA0B4 for the always-on power domain). Crisp high-resolution, no photorealism, thin precise strokes, generous spacing, LARGE readable sans-serif labels. It depicts an autonomous hardware-in-the-loop test bench for a single-board computer, whose key feature is out-of-band power control by a metered smart plug.
+
+Layout:
+- LEFT: a workstation/host box outlined in teal, labeled on two lines "主机" and smaller "AI 回路 · 控制台". It sits on a muted-gray base bar labeled "常供电域（不受插座控制）".
+- RIGHT: a single-board computer outlined in teal labeled "RK3588 开发板", with a small power-brick box beside it labeled "专用电源".
+- TOP, between host and board: two stacked horizontal arrows. The upper arrow points host→board labeled "部署 scp / fatload". The lower arrow points board→host labeled "串口日志（跨复位连续）".
+- BOTTOM, an amber path: from the host an amber arrow goes down-right to a small SMART PLUG icon (a rounded AC socket/plug block) outlined in amber, labeled simply "米家智能插座" (nothing else on that label), and from the plug an amber power arrow goes up to the board's "专用电源". Label the host→plug arrow "带外断电冷复位". A small amber meter readout tag near the plug reads "功率计量 → events/焦耳".
+- A compact legend in a corner: teal square "本队自治测试台", amber square "带外电源与计量", gray square "常供电域".
+
+All text crisp and correctly spelled. Balanced composition, clear separation between the always-on (gray) host domain and the switched/metered (amber) board power.

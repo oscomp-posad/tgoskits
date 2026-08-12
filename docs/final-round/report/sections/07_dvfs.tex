@@ -1,0 +1,114 @@
+% 07_dvfs
+\section{频率与电压 DVFS/PVTPLL}
+
+频率与电压调节（DVFS）依负载动态调整 CPU 的运行频率与供电电压，在功耗约束下取得算力，是真机上算力对齐的前置条件。RK3588 的调频链路有其特殊之处：CPU 时钟是电压耦合的 PVTPLL，SCMI 只选定一个环形振荡器的频带，真正交付的频率随供电轨压变化，改频须按档设定电压；且 CPU 簇的时钟单元 CRU 由 BL31 保护，软件无法直接改写其分频。StarryOS 此前将全部 CPU 固定于上电时的约 816 MHz 工作点，既无 governor 也无电压管理，sysbench cpu 在任意线程数下均维持于 \nLadderBase{} 事件/秒附近，逐核约为同频 Linux 的 0.75 倍。现已实现按簇的 ondemand 调频、完整的 PMIC 电压标定与 PVTPLL 环长切换（\#1657，已合并），取回对齐频率，逐核算力与同频 Linux 持平；多线程内存带宽是唯一尚未对齐的一项，其根因在主线固件，驱动已实现。本节先说明 RK3588 调频链路的三级机制，再说明既有与新增各部分的实现与板级验证。
+
+\figphl{../figures/out/Fdvfs.png}{RK3588 调频链路：ondemand governor 依每核忙碌率评分选定工作点，PMIC 按该档标定供电轨压，PVTPLL 依请求的 SCMI 速率选定环长与频带；各段均为新增的内核侧实现}{fig:dvfs-arch}
+
+图~\ref{fig:dvfs-arch} 给出这套调频的三级结构。最上层是 ondemand governor，依每核忙碌率评分并选定目标工作点；中间是 PMIC 电压子系统，按该工作点经 I2C/SPI 标定 CPU 供电轨压；最底层是 SCMI 及其下的 PVTPLL，依请求的速率选定环形振荡器的环长与频带。三级中，governor、PMIC 子系统与环长切换均为本队新增，SCMI 时钟通路则为既有。三者协同方能取回与 Linux 对齐的交付频率。
+
+\subsection{电压耦合的 PVTPLL 与 BL31 保护的时钟}
+
+RK3588 的 CPU 时钟并非普通的整数分频 PLL。SCMI 在低档（约 600 MHz 以下）选定一个整数 PLL，在中高档则选定一个 PVTPLL 环形振荡器，其振荡周期取决于工艺、电压与温度。SCMI 只选定该环的环长与所属频带，环真正交付的频率随供电轨压开环变化：同一环长下抬高轨压即抬高交付频率。因此 RK3588 上的改频不能只写时钟，须为每一档设定与之匹配的电压。
+
+时钟单元 CRU 由 BL31 保护这一点可在板上直接读出。在 Linux 上经 \texttt{/dev/mem} 读取 B0PLL 寄存器仅得一份冻结的上电影子值（\texttt{m=272/p=2/s=2}，对应 816 MHz），而核心实际运行于 816、1200、1608、2016 MHz 时该寄存器逐字节保持不变。软件无从经 CRU 直接读写实际分频，交付频率只能经 PMU 周期计数器间接测得。电压耦合本身则以固定时钟、只扫轨压的方式判定：将 SCMI 时钟固定于 1200，交付频率随电压单调上升。
+
+\begin{table}[H]\centering\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+SCMI 时钟（固定） & 供电轨压 & PMU 实测交付频率 \\
+\midrule
+1200 MHz & 675 mV & 1.19 GHz（恰为 1200） \\
+1200 MHz & 725 mV & 1.32 GHz \\
+1200 MHz & 800 mV（上电） & 1.49 GHz \\
+\bottomrule
+\end{tabular}
+\caption{SCMI 时钟固定于 1200、只扫轨压，交付频率随电压单调上升，判定时钟与电压开环耦合}
+\end{table}
+
+由此可解释上电默认状态。上电轨压为约 800 mV（\texttt{boot VSEL} 经 U-Boot \texttt{i2c md} 读出为 \texttt{0x30}，即 48，按 $V = 500 + \text{VSEL}\times 6.25$ mV 折算为 800 mV），只上调 SCMI 时钟而沿用该电压时，设定的 1200 MHz 实测约为 1490 MHz，属一次安全的过压：约 1490 MHz 仅需约 710 mV，上电轨的 800 mV 提供约 90 mV 余量，未构成欠压。Linux 取得精确频率，在于其 OPP 框架按每档设定 PMIC 电压；StarryOS 沿用上电电压，因而出现约 1.24 倍的一致过冲。欲取回精确频率并解锁更高档位，须自行掌管电压轨。
+
+\subsection{既有的 SCMI 时钟通路}
+
+既有的 SCMI 通路只能经 SMC 下发时钟频率，无 governor、无电压管理，沿用上电电压。它决定了 StarryOS 未调频时的默认表现：Linux 的 A55 OPP 扫描将 StarryOS 的默认 \nLadderBase{} 事件/秒钉定于 816 MHz 上电档（408 MHz 78 事件/秒、600 MHz 118、816 MHz 161、1008 MHz 202），即上电工作点、无 DVFS。第一版仅上调 SCMI 时钟的驱动（A55 至 1008 MHz、A76 至 1200 MHz，沿用上电电压）取得 A55 约 1.46 倍、A76 约 1.83 倍的真实提升，但因前述电压耦合，PMU 读出核心运行快于所设定值，一致过冲约 1.24 倍。取回精确频率、并向更高档位攀升，须补齐电压侧，这是 \#1657 所做的工作。
+
+\subsection{ondemand 按簇调频（\#1657）}
+
+调频侧\ours{新增一个按簇的 ondemand governor}。每核忙碌 tick 在调度 tick 中以一个每核原子计数低开销累计（\texttt{BUSY\_TICKS}，\texttt{Relaxed}），真正的 apply 推迟至一个可睡眠的周期内核任务（\texttt{cpufreq-gov}，周期 \texttt{GOV\_PERIOD\_MS}=100 ms），因为 apply 需下发 SCMI-SMC 时钟并执行 PMIC 的 I2C/SPI 电压斜坡，无法在关中断的调度 tick 中完成。周期任务据每核忙碌率评分，以簇内最忙核心提升整簇频率，采用快升慢降策略，与 Linux 的 \texttt{schedutil} 一致。评分窗口最初取固定的 100 ms，一次迟到的轮询会高报负载并触发无谓的顶档跳变；现改为测量单调时钟给出的实际窗口（\texttt{LAST\_POLL\_NANOS}），迟到轮询不再高报。
+
+\subsection{PMIC 电压标定}
+
+电压侧\ours{新增完整的 PMIC 电压子系统}，依 \texttt{rk3588-cpufreq} 特性开关编译。StarryOS 缺少 i2c/spi/pinctrl 基础设施，每条 PMIC 总线均需三层初始化：时钟解门控、核心软复位去断言、引脚复用。两簇分走两条总线：
+
+\paragraph{A76 两路电压轨}
+经 \texttt{i2c@fd880000}（总线 0）上的 rk3x I2C 主控，驱动 \texttt{RK8602@0x42} 与 \texttt{RK8603@0x43} 的寄存器 \texttt{0x06}。写入钳位于 675 至 1000 mV、按 6.25 mV 整步进，升频时先写电压，并回读校验（\texttt{set\_vsel\_verify}）。
+
+\paragraph{A55 电压轨}
+经 \texttt{spi@feb20000}（CS0）上的 Rockchip rk3066 SPI 主控，驱动 \texttt{RK806} 的 DCDC2（\texttt{BUCK2\_ON\_VSEL}=\texttt{0x1B}）。
+
+\paragraph{频率读数通道}
+在 \texttt{components/axcpu} 的 aarch64 初始化中于 EL0 开启 \texttt{PMCCNTR\_EL0}，使 \texttt{cpuprobe mhz\_pmc} 读出真实交付的时钟。每一档 OPP 的电压均据此在板上标定与验证。
+
+\paragraph{事务式 apply}
+OPP 的 apply（\texttt{apply\_opp}）采用事务式流程：升频时先设电压后设时钟，降频时先设时钟后设电压，任一步骤失败即在该步终止；由此任何部分失败最坏只会过压，不会欠压。时钟变更在下调电压前先经 \texttt{scmi::clock\_rate} 回读确认已生效。
+
+A55 电压轨采用带上下限的开环写方式下发（\texttt{force\_write\_dcdc2}，钳位于 675 至 950 mV）。SPI 主控在时序、\texttt{CTRLR0}、引脚复用、时钟与复位上逐字节对齐 Linux，经 SPI 向 \texttt{RK806} 的 DCDC2 写入目标档位，事务完整下发，TX 回显、写入抵达芯片，可观测到相应的电压下降。开环写以钳位区间保证该轨不欠压：governor 仅凭 A76 回读成功即启用，A55 各档在 1008 MHz 以下最坏只令电压偏高，不会欠压。开环诊断路径默认关闭。
+
+\subsection{PVTPLL 环长切换}
+
+补齐电压后，仅凭抬压将 A76 推至 1725 MHz、A55 至 1523 MHz 即达电压天花板，逐核吞吐（sysbench cpu 8 线程 \nLadderB{}）约为同型号 Linux 的 0.75 倍。AVS/PVTM 分箱曾作为抬高天花板的候选，经验证被排除：A76 顶档（2256、2304、2352、2400）全部硬锁于 1000 mV、无 AVS 箱，主线亦无 Rockchip AVS 驱动。
+
+真正决定同电压下主频的是 PVTPLL 的环长，其表见于 TF-A 的 \texttt{rk3588\_clk.c}。低档（约 600 MHz 以下）走整数 PLL，环长为 0；1608 至 2400 MHz 整段 A76 频带的环长恒为 11，各档之间只有电压不同。StarryOS 原先将 SCMI 固定于 1200（环长 17），凭抬高该长环的电压方达 1725；请求更高的 SCMI 速率会把环重编为长度 11，同等电压下交付频率随之提升。同电压对照可见此机制：850 mV 下 ring1200（环长 17）的 1592 转为 ring1416（环长 11）的 1830（+238），\keyres{925 mV 下 ring1200 的 1725 转为 ring1608 的 \nDvfsAseven{}（+401，约 +23\%）}。
+
+沿此\ours{实施四步 OPP 提升}，全部在板上以 sysbench cpu 8 线程验证（\texttt{-{}-cpu-max-prime=20000}），零压降。
+
+\begin{table}[H]\centering\small
+\begin{tabular}{@{}llrrrr@{}}
+\toprule
+步骤 & 变更 & A76 MHz & A55 MHz & 8 线程事件/秒 & 对 Linux \nCpuTEightLin{} \\
+\midrule
+基线 & ring1200，1725/1523 & 1725 & 1523 & \nLadderB{} & 0.76 \\
+第 2 步 & A76 ring1608 @925 & \nDvfsAseven{} & 1523 & 约 4570 & 0.88 \\
+第 3 步 & + A55 ring1608 @950 & \nDvfsAseven{} & \nDvfsAfive{} & \nCpuTEight{} & \nCpuTEightRatio{} \\
+第 4 步 & A76 ring1608 @1000 & 约 \nDvfsAsevenTop{} & \nDvfsAfive{} & 约 5137 & \nPerCoreRatio{} \\
+\bottomrule
+\end{tabular}
+\caption{PVTPLL 环长切换的四步 OPP 提升，逐核吞吐 0.76 倍提升至 \nPerCoreRatio{} 倍，A55 \nDvfsAfive{} MHz 已超过 Linux 自身 A55 的 1800 MHz 上限}
+\end{table}
+
+board 上采纳进 \texttt{cpufreq.rs} 的 OPP 阶梯，两簇在 1608 MHz 处由长环切至 11 环：
+
+\begin{itemize}
+\item \textbf{A76}：408@675 / 816@675 / 1189@675（上电）/ 1318@725 / 1491@800 / 1592@850 / 1830@850（ring1416）/ \textbf{\nDvfsAseven{}@925（ring1608，governor 默认上限）} / \nDvfsAsevenTop{}@1000（ring1608，顶档，默认封闭）。
+\item \textbf{A55}：408@675 / 816@675 / 1021@675（上电）/ 1212@762.5 / 1285@800 / 1372@850 / 1695@850（ring1416）/ \textbf{\nDvfsAfive{}@950（ring1608，顶档，可达）}。
+\end{itemize}
+
+此前将高频挂起归因于 925 mV 下超过 1700 MHz 的压降，经查为误判：每一次板上挂起均为工具链错配（分支锁定 \texttt{nightly-2026-05-28}，强用 \texttt{nightly-2026-07-15} 会误编译 axcpu/axio 而在启动处卡死）。\nDvfsAseven{} MHz 已在 925 mV 下稳定达成。
+
+\subsection{逐核对齐与 governor 上限}
+
+取得对齐频率后，单核算力与同频 Linux 持平，多线程残差即频率比，单位频率的算力已对齐。逐核 A55 为 \nAfive{}，Linux 为 \nAfiveLin{}，\keyres{比值 \nAfiveRatio{}（超过 Linux）}；逐核 A76 为 \nAseven{}，Linux 为 \nAsevenLin{}，比值 \nAsevenRatio{}（图~\ref{fig:dvfs-opp}）。单线程为 0.94 倍，4 线程为 0.98 倍；8 线程在环长顶档为约 5137 事件/秒（\nPerCoreRatio{} 倍），在占用式调度配置下为 \nCpuTEight{} 事件/秒（Linux \nCpuTEightLin{}，\nCpuTEightRatio{} 倍）。0.72（1725/2400）为对齐前的基线频率比；两个 8 线程读数对应两种经验证的调度配置：部署默认档（A76 \nDvfsAseven{} MHz）八线程达 \nCpuTEightRatio{} 倍，环长顶档（A76 \nDvfsAsevenTop{} MHz）收敛至 \nPerCoreRatio{} 倍。频率固定关闭 cpufreq 时 8 线程约 2006 事件/秒，开启后约 \nCpuTEight{}，DVFS 一层约 2.49 倍，全为频率。逐核对等的完整对照表见调度一节，此处不再重列。
+
+\figphl{../figures/out/F10.png}{A55 与 A76 两簇逐核 sysbench CPU 吞吐对照（events/s，越高越好）；对齐频率后逐核算力与同频 Linux 持平（A55 \nAfiveRatio{}、A76 \nAsevenRatio{}）}{fig:dvfs-opp}
+
+顶档保留一条未经验证的安全上限。\nDvfsAsevenTop{} MHz @ 1000 mV 的 A76 顶档默认封闭（\texttt{A76\_CAP\_TO\_ALLCORE\_SAFE}=true，\texttt{gov\_max\_idx} 对大核返回 \texttt{len-2}），governor 封于 \nDvfsAseven{} MHz @ 925 mV。原因在于唯一冻结过的全核零压降快照位于 1592 MHz，而 StarryOS 无温度调节器，无温控封顶下不宜将全核 1.0 V 设为默认，待温控就位后方放开。
+
+\subsection{内存带宽的 DDR 变频固件外因}
+
+CPU 侧对齐后，多线程内存带宽是唯一尚未对齐的一项，其根因在主线固件，驱动已实现。经唤醒铺开与占用式放置将内存线程分散至多个控制器，聚合差距的大部已收回。单流 memcpy 受 DDR 上电低频所限，约为 Linux 的 \nMemBWMemcpyRatio{} 倍；多线程写带宽经放置铺开已回升至 \nMemBWWriteRatio{} 倍（sysbench memory 写入 8 线程 \nMemBWWrite{} MiB/s）。
+
+\begin{table}[H]\centering\small
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+内存带宽指标 & StarryOS & Linux & 比值 \\
+\midrule
+sysbench memory 写入，8 线程（MiB/s） & \nMemBWWrite{} & \nMemBWWriteLin{} & \nMemBWWriteRatio{} \\
+1M 块 memcpy 原始带宽（GB/s） & 13 到 20 & 约 55 & \nMemBWMemcpyRatio{} \\
+\bottomrule
+\end{tabular}
+\caption{多线程写带宽经放置铺开已回升至 \nMemBWWriteRatio{} 倍，单流 memcpy 残差 \nMemBWMemcpyRatio{} 倍同出于 DDR 未变频这一根因；首次触碰延迟属另一维度，见内存一节的 \nThpRatio{} 倍领先}
+\end{table}
+
+为此已\ours{实现 DDR/DMC 变频驱动}（\texttt{drivers/ax-driver/src/soc/rockchip/ddr\_dvfs.rs}，特性 \texttt{rk3588-ddr-dvfs}），逻辑本身正确。RK3588 的 DDR 频率不由 SCMI 控制，SCMI 的 DDR 时钟在 TF-A 中仅为空操作桩；真正的接口是 Rockchip 的 SIP DRAM 接口（SMC \texttt{0x82000008} 加共享页 \texttt{0x82000009}）。驱动按 \texttt{GET\_VERSION}、\texttt{SHARE\_MEM}、\texttt{DRAM\_INIT}、\texttt{GET\_FREQ\_INFO}、\texttt{SET\_RATE}、\texttt{MCU\_START}、\texttt{POST\_SET\_RATE} 的顺序执行，DDR 步进 \{528, 1068, 1560, 2112\} MHz，电压先行（\texttt{vdd\_ddr\_s0} 经 RK806 BUCK5 至 0.875 V，\texttt{vdd\_log\_s0} 经 BUCK3 至 0.75 V）。
+
+该驱动在板上受主线固件限制，驱动已实现。板上验证中 \texttt{GET\_VERSION} 返回 $-1$（\texttt{SMC\_UNKNOWN}），而同机 SCMI 的 SMC（\texttt{0x82000010}）正常，此即主线 TF-A 缺少 DRAM SIP 处理器的特征。打通须更换一版将 DRAM SIP 置于 EL3 的 rkbin BL31 并重刷开发板。驱动因此仅停留于探测态（\texttt{ENABLE\_SET\_RATE}=false），约 \nMemBWMemcpyRatio{} 倍的单流 memcpy 带宽差距源于板级固件缺少 DDR 变频接口，属 StarryOS 侧实现之外的制约。

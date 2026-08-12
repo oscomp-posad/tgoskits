@@ -1,0 +1,39 @@
+{
+  "chart": "F08_thp",
+  "title": "THP 首触建立映射耗时（越低越好）",
+  "y_label": "首触建立映射耗时（秒 / s）",
+  "unit": "s",
+  "bars": [
+    {
+      "key": "no_thp",
+      "label": "未开启 THP",
+      "value": 0.9,
+      "abl": true,
+      "role": "baseline",
+      "note": "占位值，等待整机 ablation 复测确认"
+    },
+    {
+      "key": "thp_on",
+      "label": "开启 THP",
+      "value": 0.030,
+      "abl": false,
+      "role": "final",
+      "note": "对应 numbers.tex \\nThpFT"
+    },
+    {
+      "key": "linux",
+      "label": "Linux",
+      "value": 0.086,
+      "abl": false,
+      "role": "reference",
+      "note": "对应 numbers.tex \\nThpFTLin"
+    }
+  ],
+  "annotation": {
+    "from": "thp_on",
+    "to": "linux",
+    "ratio_label": "2.87×",
+    "text": "开启 THP 比 Linux 快 2.87×"
+  },
+  "footnote": "* 未开启 THP 为占位值，等待整机 ablation 复测确认（不影响开启 THP / Linux 两侧已定值）"
+}

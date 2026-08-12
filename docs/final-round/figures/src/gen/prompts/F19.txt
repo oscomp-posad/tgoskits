@@ -1,0 +1,9 @@
+A clean flat technical vector diagram, dark navy background (#0D1B2A), off-white text (#EEF3F8), teal accent (#2DD4BF), amber (#F59E0B) for the tick bypass path. Crisp high-resolution, no photorealism, thin precise strokes, generous spacing, LARGE readable sans-serif labels. It depicts a robot perception-to-control closed loop.
+
+Main horizontal loop, left to right, teal rounded boxes joined by teal arrows:
+- "相机 · latest-frame 锁存"  →  "感知（二选一：球检测 / 桶检测）"  →  "状态机"  →  "dispatch 下发"  →  "差速底盘 / 舵机"
+- a teal return arrow curves from "差速底盘 / 舵机" back to "相机 · latest-frame 锁存", closing the loop.
+
+Tick bypass (draw this precisely): an AMBER arrow labeled "无帧时约 1 ms tick" starts near the camera/perception area and terminates ON the "状态机" box (it BYPASSES the 感知 box and does NOT go to dispatch); a small note beside it "仅推进定时时相". The amber arrowhead must land on the 状态机 node, not on dispatch.
+
+All Chinese labels crisp and correctly spelled. Balanced left-to-right composition with the closed return loop, plenty of whitespace.

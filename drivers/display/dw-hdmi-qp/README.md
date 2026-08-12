@@ -10,5 +10,7 @@ RGB/8bpc. So a "TX enable" is a handful of register writes + the AVI infoframe.
 
 Register offsets/values transcribed from mainline
 `drivers/gpu/drm/bridge/synopsys/dw-hdmi-qp.{c,h}` and host-tested (AVI byte
-packing + checksum + write order). Actual TMDS output is board-validated (needs
-the PHY + VOP2 + GRF up).
+packing + checksum + write order). TMDS output was board-validated on an
+OrangePi-5-Plus (RK3588) on 2026-08-12: with the HDPTX PHY locked and VOP2 VP0
+driving VP0→HDMI0, the display registered as `/dev/fb0` and scanned a 1080p60
+raster with color bars painted.

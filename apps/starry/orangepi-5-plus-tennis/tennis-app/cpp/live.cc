@@ -28,6 +28,7 @@
 #include "perception/bucket_detector.h"
 #include "perception/camera.h"
 #include "perception/tennis_detector.h"
+#include "actuator/actuator_factory.h"
 #include "actuator/arm_backend.h"
 #include "actuator/motor_backend.h"
 #include "time_utils.h"
@@ -101,11 +102,19 @@ int run_live(const Options &opts) {
     const int64_t t_cap1 = monotonic_ns();
 
     BucketDetector bucket(cfg);
-    TraceMotorBackend motor;
-    TraceArmBackend arm;
+    // Real hardware is the default (uart/pwm per opts); trace only with
+    // --virtual-actuators. Init fails hard so the robot never runs on stubs
+    // when hardware was expected.
+    Actuators actuators;
+    if (!make_actuators(opts, actuators)) {
+        std::fprintf(stderr, "TENNIS_ERROR actuator init failed\n");
+        det.deinit();
+        return 1;
+    }
     Metrics metrics;
     metrics.reserve(static_cast<size_t>(opts.duration_sec * opts.fps) + 16);
-    Controller controller(cfg, motor, arm, metrics, opts.log_every);
+    Controller controller(cfg, *actuators.motor, *actuators.arm, metrics,
+                          opts.log_every);
 
     const bool do_csv = opts.profile && !opts.profile_csv.empty();
     if (do_csv && !metrics.open_csv(opts.profile_csv.c_str())) {
@@ -116,7 +125,7 @@ int run_live(const Options &opts) {
     std::printf("TENNIS_BENCH_BEGIN mode=live model=%s fps=%d duration_sec=%.3f "
                 "core_mask=%s virtual_actuators=%d profile=%d affinity=%s\n",
                 opts.model.c_str(), opts.fps, opts.duration_sec,
-                opts.core_mask.c_str(), opts.virtual_actuators ? 1 : 0,
+                opts.core_mask.c_str(), uses_virtual_actuators(opts) ? 1 : 0,
                 opts.profile ? 1 : 0,
                 opts.infer_affinity.empty() ? "none"
                                             : opts.infer_affinity.c_str());

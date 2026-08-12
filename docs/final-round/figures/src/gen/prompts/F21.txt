@@ -1,0 +1,13 @@
+A clean flat technical vector diagram, dark navy background (#0D1B2A), off-white text (#EEF3F8), teal accent (#2DD4BF) and amber accent (#F59E0B). Crisp high-resolution, no photorealism, thin precise strokes, generous spacing, LARGE readable sans-serif labels. It depicts 2D odometry guidance: a robot navigating back to a bucket at the origin.
+
+Composition on a 2D plane:
+- At the lower-left, a filled origin dot labeled "桶 = 里程计原点（reset_anchor）".
+- A dashed teal circle around the origin, with a short label "到达半径 0.5 m".
+- At the upper-right, a small robot marker labeled "机器人 (x, y, heading)".
+- A bold teal arrow from the robot marker pointing to the origin dot, labeled along it "距离 = hypot(x, y)".
+- A small amber angular arc at the robot showing the bearing, labeled "方位 = atan2(−y, −x)".
+- An amber dashed callout arrow near the origin with the label "视觉一旦捕获桶立即抢占".
+
+A bold title at the top: "里程计引导回桶".
+
+All text crisp and correctly spelled. Uncluttered, plenty of whitespace.

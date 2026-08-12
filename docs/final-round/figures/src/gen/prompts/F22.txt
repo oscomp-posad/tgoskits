@@ -1,0 +1,11 @@
+A clean flat technical vector diagram, dark navy background (#0D1B2A), off-white text (#EEF3F8), teal accent (#2DD4BF for real hardware backends this team added), muted gray (#8AA0B4 for the pre-existing virtual backend), amber (#F59E0B for the fatal-on-failure rule). Crisp high-resolution, no photorealism, thin precise strokes, generous spacing, LARGE readable sans-serif labels. It depicts a robot actuator backend abstraction with two interfaces and swappable concrete backends.
+
+Layout, two columns:
+- LEFT column, top: a prominent teal-outlined interface box labeled on two lines, bold "MotorBackend" and smaller "底盘接口". Three downward arrows fan out from it to three backend boxes in a row below:
+  1) a muted-gray box "Trace 虚拟";
+  2) and 3) two teal boxes "PWM / DRV8833" and "ESP32-C3 UART" that are together enclosed by a single amber dashed rounded rectangle labeled at its top-left "DeadZone 死区装饰器".
+- RIGHT column, top: a prominent teal-outlined interface box labeled on two lines, bold "ArmBackend" and smaller "机械臂接口". Two downward arrows fan out to two backend boxes below: a muted-gray box "Trace 虚拟" and a teal box "ZP10S UART".
+- BOTTOM, spanning both columns: a wide amber-outlined banner box with amber text "主机 dry-run 锁定虚拟后端 · 真实后端初始化失败即致命，不回退虚拟".
+- A small legend in a corner: a teal square "本队新增真实后端", a gray square "既有虚拟后端".
+
+All text crisp and correctly spelled. Balanced two-column composition, plenty of whitespace.

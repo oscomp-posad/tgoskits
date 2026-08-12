@@ -1,0 +1,18 @@
+A clean flat technical vector diagram, dark navy background (#0D1B2A), off-white text (#EEF3F8), teal accent (#2DD4BF) and amber accent (#F59E0B). Crisp high-resolution, no photorealism, no gradients, thin precise strokes, generous spacing, sans-serif labels. It depicts a boot timeline (a horizontal chain of stages from power-on to first inference).
+
+Layout: a single horizontal timeline arrow running left to right across the middle. On it, five connected rounded-rectangle stage blocks in order, evenly spaced, each with a teal outline and a short label inside:
+1. "内核早期初始化"
+2. "副核启动与设备探测"
+3. "init 抵达应用"
+4. "模型初始化"
+5. "相机启动与首帧推理"
+
+At the far left, before block 1, a small start marker labeled "U-Boot 交接". At the far right, after block 5, a small end marker labeled "首帧 RKNN 推理".
+
+Two amber callout tags with thin leader lines pointing at the second block ("副核启动与设备探测"), stacked, reading exactly:
+"消除：空槽 PCIe 探测  −2.8 s"
+"消除：块设备 IRQ 回退  −2.1 s"
+
+A bold caption centered above the whole timeline: "TTFI 19.22 s → 9.83 s（领先 Linux）".
+
+All text crisp and correctly spelled. Balanced horizontal composition.

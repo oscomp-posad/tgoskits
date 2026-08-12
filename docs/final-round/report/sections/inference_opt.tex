@@ -1,0 +1,91 @@
+% inference_opt
+\section{推理链路优化}
+
+推理链路是这套视觉应用的主体。相机取来一帧，做颜色空间转换与缩放补边，送入 NPU 前向推理，再取回输出并解码为检测框，逐帧给出结果。整条链路由一个用户态 C++ 应用串起，各阶段依次为 \texttt{capture}（取帧）、\texttt{decode}（YUYV 转 RGB）、\texttt{letterbox}（缩放补边）、\texttt{inputs\_set}（写入 NPU 输入并维护缓存）、\texttt{run}（NPU 前向）、\texttt{outputs\_get}（取回输出并重排）与 \texttt{postprocess}（DFL 解码与 NMS）。链路本身、RKNN 运行时 \texttt{librknnrt}、用户态 \texttt{librga} 库、NPU 硬件以及 \texttt{/dev/card1} 上的 RKNPU 驱动均为既有部分；相机取流复用 Starry 既有的 xHCI 主机栈。两侧 OS 对测的是同一份未经改动的 ELF，观测到的差异因此只归于运行环境，应用本身两侧相同。StarryOS 此前在这份负载上端到端落后 Linux 约 6.3 倍，热点散布在链路各阶段，无从直接读出，本节先逐阶段说明各阶段的作用与开销来源，再说明两种输入尺寸的口径，随后以真机剖析把成本归因到确切位置，最后逐项说明现已实现的优化及其机制与收益。
+
+\figphl{../figures/out/Finfer.png}{两种输入尺寸各自的端到端时延阶梯，各与对应尺寸的 Linux 基线比较}{fig:infer-ladder}
+
+图~\ref{fig:infer-ladder} 分别给出 640×640 与 480×640 两种输入尺寸各自的端到端时延阶梯，每条阶梯从 StarryOS 默认配置起，逐项叠加本节的优化，各与对应尺寸的 Linux 基线比较。其中链路的运行时、用户态库与 NPU 硬件为既有部分，四项优化以及配套的内核 \texttt{/dev/rga} 驱动、JPU 驱动与全链路剖析插桩为本队新增。
+
+\subsection{推理链路各阶段}
+
+一帧从相机到检测框依次经过七个阶段，各阶段承担一件事，其开销来源各不相同，以下逐阶段说明。
+
+\paragraph{capture 取帧}
+链路的第一级是经 xHCI 主机栈以等时传输从 UVC 相机取一帧。相机交付两种格式：YUYV 是未压缩的 4:2:2 原始像素，每帧约 614\,KB，取来只需一次颜色转换；MJPEG 把每帧各自压成一张独立的 JPEG，每帧约 30\,KB，取来须先解码。取帧速率受相机与 USB 供帧上限约束，在 USB2 上 YUYV 的供帧上限约 30\,fps。这一级本身不做计算，其开销体现在 USB 带宽与供帧节奏上；在 StarryOS 未绑核时，取帧线程与后续阶段争抢同一个核，实测取帧速率被拖到约 12\,fps。
+
+\paragraph{decode 颜色转换}
+相机交付的是 YUV 排布的像素，检测网络要求连续的 RGB 平面，因此须做一次 YUYV 到 RGB888 的颜色空间转换。在 CPU 上这是对整帧逐像素做定点算术，A76 大核上约 5.7\,ms。开销正比于像素数与每像素的转换算术量，是绑核之后 CPU 侧最高的阶段。
+
+\paragraph{letterbox 缩放补边}
+模型只接受固定的输入分辨率，因此须把相机帧等比缩放到模型尺寸并以灰边补齐（letterbox），使长宽比不失真。CPU 路径逐像素做双线性重采样，一帧的开销与一次推理相当，在 StarryOS 未接入用户态 RGA 时，A55 上高达 75.5\,ms，是两侧 OS 之间绝对差距最大的单一阶段（Linux 上走 RGA 硬件为 1.38\,ms）。开销正比于重采样的像素数。
+
+\paragraph{inputs\_set 写入输入并维护缓存}
+推理前须把整理好的输入帧写入 NPU 的输入缓冲，并做一次缓存维护，把 CPU 侧写入的数据刷回内存，使 NPU 读到最新内容。开销由一次内存拷贝加一次缓存刷回构成。稳态下这一阶段很轻，真机实测 0.84\,ms，内核侧的缓存维护 ioctl（\texttt{mem\_sync}）仅 0.082\,ms；批量定像素跑法下曾观察到的 51.73\,ms 是首帧 DMA 分配的冷启动伪量，长跑稳态并不出现。
+
+\paragraph{run NPU 前向}
+整理好的一帧送入 NPU 做前向推理，这一阶段的计时包住向内核提交作业的 ioctl 与等待完成。640×640 模型的 NPU 纯计算约 16\,ms，算子级瀑布显示其为卷积主导，因此只有模型级改动能压缩它。这一阶段的墙钟时间不只含 NPU 计算，还含主机侧的调度等待：内核侧的提交 ioctl（\texttt{submit}）仅 0.36\,ms，而在 StarryOS 未绑核、与取帧解码争抢同一个 A55 小核时，实测 \texttt{run} 膨胀到 71\,ms，反映的是被测线程迟迟得不到调度以观察完成，绑定到空闲的 A76 核后随即回落到接近 NPU 计算底线。
+
+\paragraph{outputs\_get 取回并重排}
+推理完成后须把 NPU 的输出张量取回。NPU 以硬件分块布局 NC1HWC2 写出张量，而解码器要求标准的 NCHW 排布，因此每个元素都要按新布局重新聚拢；若再要求浮点输出，还须把全部张量从 INT8 反量化为 FP32。640×640 模型有 9 个输出张量、约 40 万个数值，其中三个 \texttt{[1,64,H,W]} 的框 DFL 张量占大头。这一重排与反量化在 CPU 上完成，在 StarryOS 默认单核上高达 14.3\,ms，是仅次于 letterbox 与 run 的第三高阶段，其开销正比于被重排与反量化的元素总数。
+
+\paragraph{postprocess 后处理}
+最后一阶段把 NPU 输出解码为检测框：先做 DFL 解码，将每个网格单元的框分布对数按加权求和还原为坐标，再做 NMS 抑制相互重叠的候选框。这一阶段很轻，约 1\,ms，其开销正比于通过分数门限的候选单元数，而密集网格中通过门限的单元通常只有约 30 个。
+
+\subsection{两种输入尺寸的口径}
+
+链路涉及两种输入尺寸，对应两条互不通约的口径，任何图表都不能把它们并入同一条曲线。一条是 640×640 的重型 YOLOv8 检测模型，8400 个锚点，用于与通用检测口径对齐，其 Linux 深剖基线端到端 \nEteBigLin~ms，其中 NPU 前向占推理时间的 79\%。另一条是与相机分辨率一致的 480×640，6300 个锚点，用于取球应用的单类检测，其 Linux 基线端到端 \nInferTennisLin~ms。两者的模型规模、锚点数量、检测头算量与后处理量都不同，各自的 Linux 参照也不同，因此本节始终按尺寸分列，绝对时延只在同一尺寸的两侧 OS 之间比较。
+
+\subsection{基线剖析与瓶颈归因}
+
+优化之前先在真机上把成本归因到确切阶段。最初一份二手口径的对比表给出了若干直觉性归因（letterbox 33 倍出自缺少 RGA、outputs\_get 35 倍出自缓存同步、run 2 倍出自 DVFS），这些归因一律作为待测假设处理，逐条以真机测量核对，其中两条被测量修正。
+
+\paragraph{NPU 算子瀑布}
+对 640×640 模型做算子级剖析，108 个算子中 \texttt{ConvExSwish} 一类占 72\%，Concat、Split、Add 等合计不足两成，模型为卷积主导。这一结论确立了一条边界：\texttt{run} 阶段的时间由模型的乘加量决定，任何软件层改动都无法压缩它，只有模型级改动（分辨率与激活）能触及，直接指向后文的原生分辨率与 ReLU 两项。
+
+\paragraph{消融测量}
+逐次只改一个变量。NPU 核掩码从 1 核到全 3 核，2 核相对 1 核提速 11\%，第 3 核起不再有增益，说明这颗小模型有效只用一到两个 NPU 核。调频策略在 ondemand 与 performance 之间读数一致，NPU 全程锁在 1.0\,GHz，NPU 时钟不是波动来源。letterbox 走 RGA 硬件为 1.72\,ms，走 CPU 为 15.82\,ms，硬件路径省约 14\,ms、约 9.2 倍，这正是两侧 OS 之间 letterbox 差距的机制来源。张量 I/O 的拷贝与零拷贝两种模式在 Linux 上分别为 23.83 与 24.65\,ms，零拷贝并未更快，因为它虽消去了 \texttt{inputs\_set}，却把 NC1HWC2 到 NCHW 的重排推给了 CPU。
+
+\paragraph{冷启动、调度与内存带宽}
+首次推理的冷启动为 450\,ms，其中模型初始化 15\,ms、取流初始化 93\,ms、首帧等待 300\,ms、首次推理 42\,ms；首帧等待占大头，来自相机流协商，属硬件行为。调度器剖析显示被测进程的调度延迟平均 0.021\,ms、最大 0.162\,ms，因此端到端的队龄长尾出自取最新帧的槽位策略，与 CPU 饥饿无关。内存带宽方面，NPU 流量约 1.06\,GB/s，CPU 缓存缺失率 2.3\%，远低于 LPDDR 约 17 至 32\,GB/s 的上限，链路不受内存带宽约束。
+
+\paragraph{内核 ioctl 计时}
+在内核侧对 NPU 的 ioctl 单独累计计时：提交作业 \texttt{submit} 平均 0.36\,ms、缓存维护 \texttt{mem\_sync} 平均 0.082\,ms、DMA 分配 \texttt{mem\_create} 平均 2.41\,ms。\texttt{submit} 远小于 \texttt{run} 的约 20\,ms，说明内核 NPU 通路不是成本中心；\texttt{mem\_sync} 仅 0.082\,ms，说明定像素跑法下 \texttt{inputs\_set} 与 \texttt{outputs\_get} 上观察到的几十毫秒是用户态的缓冲处理与重排，不是内核缓存同步。这条测量把成本准确定位在用户态取回与重排，直接指向后文的整数取回路径。真机默认配置下 StarryOS 端到端 \nEteDefault~ms，相对 Linux 的 \nEteBigLin~ms 为 6.3 倍，letterbox 与 outputs\_get 两阶段占据了这段差距的主体。
+
+\subsection{将最重的推理绑定到 A76 大核}
+
+StarryOS 的 axtask 把新建与唤醒的线程放在当前核上，且此前无负载均衡；应用不做任何绑定时，取帧到后处理的整条链路串行落在 cpu0，即一个 A55 小核上，与之竞争的取帧、解码线程也在同一核上排队。\ours{将推理线程绑定到 A76 大核簇}（\texttt{4-7}）后，\texttt{sched\_setaffinity} 在 StarryOS 上被如实执行。这里有一个次序约束：\texttt{rknn\_init} 与 USB 初始化在非引导核上会挂起，因此亲和性须在模型与相机初始化完成之后、进入推理循环之前设置。绑定后 640×640 端到端\keyres{由 \nEteDefault~ms 降到 \nEteBig~ms，约 \nAffinitySpeedup 倍}，其中 \texttt{run} 71.1→24.5、letterbox 75.5→26.4、outputs\_get 14.3→2.7，仍高于 Linux 的 \nEteBigLin~ms。核驻留直方图确认推理 100\% 落在 cpu4：掩码被如实执行，但无均衡器时整条链路仍堆在单一 A76 核上，残差因此集中在这一核上的用户态 letterbox 与重排，进而引出后两项优化。
+
+\figph{../figures/out/Fstage.png}{绑定 A76 大核前后推理链路三大阶段的 p50 时延（640×640）：\texttt{run}、\texttt{letterbox}、\texttt{outputs\_get} 三个 CPU 侧阶段主导端到端时延，绑核把整链由 \nEteDefault~ms 压到 \nEteBig~ms，三段各降约 2.9、2.9、5.3 倍}
+
+\subsection{以整数路径取回输出}
+
+YOLOv8 的密集网格中超过 99\% 为背景，640 尺寸下 8400 个单元里通常只有约 30 个携带真实检测。原先的单类解码器以 \texttt{want\_float=1} 调用 \texttt{rknn\_outputs\_get}，迫使运行时把全部 9 个输出张量从 INT8 反量化为 FP32 并从 NC1HWC2 重排为 NCHW，约 40 万个数值几乎全是背景。\ours{改以 \texttt{want\_float=0} 取回原始 INT8}：先在 INT8 域以一次单字节比较对分数分支做门限筛除背景，仅对通过门限的存活单元的约 64 个 DFL 值做仿射反量化，反量化量由约 40 万降到约 30 个单元、每单元 64 值。\texttt{outputs\_get} 由约 12\,ms 降到约 1\,ms，端到端\keyres{由约 23\,ms 降到约 11\,ms}，285 张测试图的检测与浮点路径逐张一致，无精度损失。这是纯软件改动，不依赖任何硬件或内核支持。
+
+\subsection{RGA 硬件解码并零拷贝直写 NPU 输入}
+
+绑定大核之后，YUYV 到 RGB888 的颜色转换（\texttt{decode}）成为最高的 CPU 阶段，A76 上约 5.7\,ms，已超过这颗小模型的 NPU 计算。\ours{将其交给 RGA2 二维引擎}（\texttt{imcvtcolor}），并以 Path-A 真零拷贝把结果直接写入 NPU 的输入 dma-buf：NPU 关闭 IOMMU 运行，其 \texttt{dma\_addr} 即物理地址，RGA 可直接以该物理地址为目的地写入，这一步同时消去了 \texttt{inputs\_set}。\texttt{decode} \keyres{由约 5.7\,ms 降到约 0.77\,ms，为 \nRgaSpeedup 倍}，\texttt{inputs\_set} 归零，检测全程一致（415/415 与 336/336 逐帧一致）。这条路径经过 14 轮在板调试才打通：跨分配器的文件描述符导入失败，改以物理地址导入；设备树暴露三个 RGA 核，拼接一度锁到 RGA3 核，须按核选择修正；最终的决定性问题是 \texttt{librga} 会填入一个恒等旋转矩阵（\texttt{cosa=65536}，即 16.16 定点下的 cos\,0°），ABI 解析误将其判为非法，修正为仅在 \texttt{rotate\_mode != 0} 时才走旋转分支。内核 \texttt{/dev/rga} 驱动以合并请求 \#1388 提交至上游并已合并，通过 5/5 项硬件自检；驱动内部见视觉感知流水线一节。
+
+\subsection{原生分辨率模型与 ReLU 激活}
+
+这一项针对 \texttt{run} 阶段，因为算子瀑布已表明只有模型级改动能压缩 NPU 前向。一个 RKNN 只为固定输入形状编译，把 480×640 的相机帧送进 640×640 的模型会把它再缩放补边放大，NPU 反而要在灰边上做卷积。\ours{将模型按 480×640 原生分辨率导出}后，像素数由 409{,}600 降到 307{,}200，锚点由 8400 降到 6300，检测头约 0.75 倍算量；训练仍用方形 640 加马赛克增强，仅在导出时设定矩形形状。同时以 ReLU 替换 SiLU 激活：SiLU 为 \texttt{sigmoid(x)}$\cdot$\texttt{x}，在 NPU 上更慢且 INT8 量化有损，而 ReLU 的 NPU 前向约快 2.5 倍且量化干净，mAP50 为 0.881 对 0.885，二者相当，INT8 余弦保真度 0.998 至 1.000。两项与前述整数取回路径、A76 绑定叠加后，480×640 端到端 p50 \keyres{由 30.6\,ms 降到 \nInferTennis~ms}。
+
+\subsection{JPU 硬件 MJPEG 解码}
+
+取帧格式改为 MJPEG 可把 USB 字节数压缩约 20 倍（614\,KB 降到约 30\,KB），抬高约 14\,fps 的取帧上限，解码则交给 RK3588 集成的硬件 JPEG 单元 JPU（\texttt{jpegd@fdb90000}，位于 IOMMU 之后），经瑞芯微 MPP 库的 \texttt{/dev/mpp\_service} 会话协议下达，输出 NV12/NV16，理想情形下直接喂给 NV12 输入的 RKNN 以省去颜色转换。独立验证中，未经改动的 \texttt{mpi\_dec\_test} 在 StarryOS 上经\ours{本队新增的 \texttt{/dev/mpp\_service}} 解码，输出与 Linux 逐字节一致（\texttt{OUT\_CKSUM 2712426383}），\keyres{持续 395\,fps、约 2.5\,ms/帧}，驱动本身经真机验证；其中一处 dma32 修复解决了 32 位引擎无法触及 4\,GiB 以上堆缓冲导致的取值失败。JPU 驱动内部见视觉感知流水线一节。
+
+\subsection{已否定与在设计中的方案}
+
+\paragraph{张量 I/O 零拷贝：已否定}
+一度尝试以 \texttt{rknn\_create\_mem} 把 NPU 的输入与输出都绑为 DMA 缓冲，以省去主机与 NPU 之间的拷贝和缓存同步。测量结果为两侧 OS 均净亏：Linux 由 23.83 升到 24.65\,ms，StarryOS 由 217.63 升到 266.08\,ms。原因是零拷贝把 NC1HWC2 到 NCHW 的输出重排强行压到慢的单核上，而内核缓存维护本就只有 0.082\,ms/次，可省的拷贝成本很小。据此保留拷贝路径，零拷贝二进制仅作为 A/B 对照留存；由于它绑定的是每上下文私有的 DMA 缓冲，必须拒绝多 worker，否则共享输入缓冲会被覆写。
+
+\paragraph{全链路多 worker 并行：在设计中}
+推理路径是单线程串行地做解码到后处理，即便内核均衡器完美也只能把它放到一个核上。设想把它表达为 N 个相互独立的整链 worker，每个 worker 持有自己的 \texttt{rknn\_dup\_context}（在 cpu0 上创建后再迁移），分别绑定到不同的 A76 核。已识别的上限是：NPU 的 \texttt{run} 阶段无论是否 \texttt{dup\_context}，都在 rdrive 的单一设备锁上串行（\texttt{Error::Busy}），CPU 阶段（解码、缩放补边、后处理）仍可在 A76 各核上并行，因此在 RGA 之前 letterbox 与 run 相当时，多 worker 仍能提升吞吐；真正的 NPU 并发须依赖内核作业队列。此项已成设计，为推理侧横向扩展的下一步。
+
+\subsection{结果}
+
+两条口径分别收敛，见图~\ref{fig:infer-ladder}。640×640 上，端到端由 \nEteDefault~ms 经大核绑定降到 \nEteBig~ms，相对 Linux 的 \nEteBigLin~ms 由 6.3 倍收窄到约 2.1 倍，残差为单一 A55/A76 核上的用户态 letterbox 与输出重排。480×640 上，A76 绑定、整数取回路径与原生分辨率加 ReLU 模型三项叠加后，端到端 p50 为 \nInferTennis~ms，与 Linux 的 \nInferTennisLin~ms 持平；再加 RGA 硬件解码零拷贝后，逐帧命令时延 p50 降到 9.65\,ms、约 28\,fps，转为受相机供帧上限约束。综合而言，重型 640 模型上的差距由 6.3 倍收窄到约 2.1 倍，小模型经由 Linux 同样具备的用户态优化\keyres{从约 2.68 倍收敛到持平}，残差是单核上的用户态工作。本节不主张快于 Linux，主张的是一个研究型 OS 在真实加速器硬件上达到与 Linux 的功能与性能对等。
+
+\subsection{剖析方法}
+
+全部数据以同一份未经改动的 ELF 在两侧 OS 上对测，观测差异因此归于运行环境。全链路按阶段记录分位数并逐帧留痕，端到端与各阶段均取 p50 比较。带算子级插桩的诊断运行与干净运行分开采集，诊断插桩会把总量抬高到约 23\,ms（干净约 15.4\,ms），因此只读其份额、不读绝对值。内核侧对 NPU 的 ioctl 单独累计计时，把内核成本与用户态成本分离开，据此判定成本集中在用户态取回与重排。真机运行在 OrangePi-5-Plus 上，由机器可判定的判定门驱动，一次运行在同一次启动内扫过默认、绑 A55、绑 A76 三种配置并记录核驻留直方图。上游同步 76 个提交后按 ±2\% 容差复测，端到端 25.81 对 25.90、漂移 0.3\%，RGA 约 9.2 倍与张量零拷贝不更快两项消融结论均复现。

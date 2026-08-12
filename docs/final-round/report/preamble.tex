@@ -1,0 +1,30 @@
+\usepackage{graphicx,booktabs,array,xcolor,tikz,float,caption}
+\usepackage{amsmath}
+\usepackage[hidelinks]{hyperref}
+\usepackage[margin=2.4cm]{geometry}
+\usepackage{fontspec}
+\input{../style/tokens.tex}
+\input{../data/numbers.tex}
+\captionsetup{font=small,labelfont=bf}
+% Long inline monospace identifiers (PERF_SAMPLE_CALLCHAIN, dma_heap paths, register names)
+% overflow the right margin because underscores are not break points. Make the text underscore
+% a break opportunity so such identifiers wrap instead of running off the page edge.
+\DeclareRobustCommand{\_}{\textunderscore\allowbreak}
+\emergencystretch=3em
+% Compact the multi-subsection TOC so it lays out in clean whole pages (no orphan tail).
+\usepackage{tocloft}
+\setlength{\cftbeforepartskip}{0.8ex}
+\setlength{\cftbeforesecskip}{0.28ex}
+\setlength{\cftbeforesubsecskip}{0.04ex}
+\renewcommand{\cftpartfont}{\bfseries}
+\renewcommand{\cftsecfont}{\bfseries}
+\newcommand{\ours}[1]{\textbf{#1}}% 本队贡献
+\newcommand{\keyres}[1]{\textbf{#1}}% 关键结果
+\newcommand{\figph}[2]{% #1=path relative to report/  #2=caption
+  \begin{figure}[htbp]\centering
+  \IfFileExists{#1}{\includegraphics[width=0.72\linewidth,height=0.42\textheight,keepaspectratio]{#1}}{\fbox{\parbox[c][3cm][c]{0.72\linewidth}{\centering\color{muted}[图待生成: #1]}}}
+  \caption{#2}\end{figure}}
+\newcommand{\figphl}[3]{% #1=path  #2=caption  #3=label (label INSIDE float so \ref resolves to the figure number)
+  \begin{figure}[htbp]\centering
+  \IfFileExists{#1}{\includegraphics[width=0.72\linewidth,height=0.42\textheight,keepaspectratio]{#1}}{\fbox{\parbox[c][3cm][c]{0.72\linewidth}{\centering\color{muted}[图待生成: #1]}}}
+  \caption{#2}\label{#3}\end{figure}}

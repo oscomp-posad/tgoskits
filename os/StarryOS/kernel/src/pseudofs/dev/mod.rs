@@ -11,6 +11,7 @@ mod drm;
 #[cfg(feature = "input")]
 pub mod event;
 mod fb;
+mod irq_byte_ring;
 mod kmsg;
 #[cfg(feature = "k230-kpu")]
 mod kpu;
@@ -592,6 +593,17 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
             SimpleDir::new_maker(fs.clone(), Arc::new(dma_heap_dir)),
         );
     }
+
+    #[cfg(feature = "rga")]
+    root.add(
+        "rga",
+        Device::new(
+            fs.clone(),
+            NodeType::CharacterDevice,
+            DeviceId::new(252, 16), // CONFIRM ON BOARD: real /dev/rga major/minor
+            Arc::new(rga::RgaDevice::new()),
+        ),
+    );
 
     // This is mounted to a tmpfs in `new_procfs`
     root.add(

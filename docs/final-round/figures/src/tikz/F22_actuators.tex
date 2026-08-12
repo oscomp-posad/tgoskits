@@ -1,0 +1,44 @@
+\documentclass[border=12pt]{standalone}
+\usepackage{ctex}\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,fit,backgrounds,shapes.geometric,calc}
+\definecolor{navy}{HTML}{0D1B2A}\definecolor{teal}{HTML}{2DD4BF}\definecolor{amber}{HTML}{F59E0B}\definecolor{ink}{HTML}{EEF3F8}\definecolor{muted}{HTML}{8AA0B4}
+\setCJKmainfont{Songti SC}\setCJKsansfont{Heiti SC}
+\begin{document}
+\begin{tikzpicture}[show background rectangle,background rectangle/.style={fill=navy},
+  font=\sffamily,>=Stealth, every node/.style={text=ink},
+  iface/.style={draw=teal, line width=1pt, rounded corners=5pt, minimum width=3.6cm,
+                minimum height=1.0cm, align=center, font=\sffamily\bfseries\small},
+  impl/.style={draw=muted, line width=0.6pt, rounded corners=4pt, minimum width=3.1cm,
+               minimum height=0.9cm, align=center, font=\sffamily\small}]
+
+\node[font=\sffamily\bfseries\large] at (0.9,6.9) {执行器后端分层};
+
+% ---- interfaces ----
+\node[iface] (motorif) at (-4.6,5.3) {MotorBackend};
+\node[iface] (armif)   at ( 5.4,5.3) {ArmBackend};
+
+% ---- motor side ----
+\node[impl] (mtrace) at (-7.6,2.6) {Trace（虚拟）};
+\node[impl] (pwm)    at (-4.6,0.9) {PWM-DRV8833};
+\node[impl] (esp32)  at (-1.5,0.9) {ESP32-C3 UART};
+
+\node[draw=amber, dashed, line width=0.7pt, rounded corners=6pt, fit=(pwm)(esp32), inner sep=10pt] (deadzone) {};
+\node[font=\sffamily\footnotesize\bfseries, text=amber, anchor=south, yshift=2pt] at (deadzone.north) {DeadZone 装饰器（包裹真实电机后端）};
+
+\draw[->, teal, line width=0.7pt] (motorif) -- (mtrace);
+\draw[->, teal, line width=0.7pt] (motorif) -- (deadzone.north -| motorif);
+
+% ---- arm side ----
+\node[impl] (atrace) at (3.6,2.6) {Trace（虚拟）};
+\node[impl] (zp10s)  at (7.2,2.6) {ZP10S UART};
+
+\draw[->, teal, line width=0.7pt] (armif) -- (atrace);
+\draw[->, teal, line width=0.7pt] (armif) -- (zp10s);
+
+% ---- fatal-no-fallback note ----
+\node[draw=amber, line width=0.8pt, rounded corners=5pt, minimum width=13.2cm, minimum height=0.9cm,
+      align=center, font=\sffamily\small\bfseries, text=amber] at (0.9,-1.6)
+  {真实后端初始化失败即致命，绝不回退虚拟（工厂 ready() 失败直接 fatal）};
+
+\end{tikzpicture}
+\end{document}

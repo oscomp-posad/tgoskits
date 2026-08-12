@@ -23,6 +23,7 @@
 #include <cstring>
 #include <string>
 
+#include "actuator/actuator_factory.h"
 #include "actuator/arm_backend.h"
 #include "actuator/motor_backend.h"
 #include "app_options.h"
@@ -135,19 +136,28 @@ static int run_dry_run(const Options &opts) {
     const size_t expected = static_cast<size_t>(opts.duration_sec * fps) + 16;
 
     const int64_t t_proc_start = monotonic_ns();
-    TraceMotorBackend motor;
-    TraceArmBackend arm;
+    // Dry-run is a synthetic benchmark: force the trace backends regardless of
+    // CLI defaults (real hardware would just block the simulated loop).
+    Options dry = opts;
+    dry.motor_backend = "virtual";
+    dry.arm_backend = "virtual";
+    Actuators actuators;
+    if (!make_actuators(dry, actuators)) {
+        std::fprintf(stderr, "TENNIS_ERROR actuator init failed\n");
+        return 1;
+    }
     Metrics metrics;
     metrics.reserve(expected);
     if (opts.profile && !opts.profile_csv.empty()) {
         metrics.open_csv(opts.profile_csv.c_str());
     }
-    Controller controller(cfg, motor, arm, metrics, opts.log_every);
+    Controller controller(cfg, *actuators.motor, *actuators.arm, metrics,
+                          opts.log_every);
     SyntheticScene scene(cfg);
 
     std::printf("TENNIS_BENCH_BEGIN mode=dry-run fps=%d duration_sec=%.3f "
                 "virtual_actuators=%d profile=%d affinity=%s\n",
-                fps, opts.duration_sec, opts.virtual_actuators ? 1 : 0,
+                fps, opts.duration_sec, uses_virtual_actuators(dry) ? 1 : 0,
                 opts.profile ? 1 : 0,
                 opts.infer_affinity.empty() ? "none"
                                             : opts.infer_affinity.c_str());
@@ -228,7 +238,11 @@ static void usage(const char *prog) {
         "  --width/--height <n>     capture size (default 640x480)\n"
         "  --fps <n>                capture fps (default 30)\n"
         "  --duration-sec <f>       run duration (default 60)\n"
-        "  --virtual-actuators      use the Trace motor/arm backends (default)\n"
+        "  --virtual-actuators      use the Trace motor/arm backends (no hardware)\n"
+        "  --motor-backend <kind>   uart|pwm|virtual (default uart = real hardware)\n"
+        "  --motor-device <spec>    UART device or PWM chip list (default platform)\n"
+        "  --arm-backend <kind>     uart|virtual (default uart = real hardware)\n"
+        "  --arm-device <path>      arm UART device (default /dev/ttyS3)\n"
         "  --ball-class <n>         class id of the ball (0 tennis model; 32 COCO)\n"
         "  --min-confidence <0-100> detection confidence threshold (default 50)\n"
         "  --log-every <n>          emit per-frame lines every Nth frame\n"
@@ -284,6 +298,10 @@ static int parse_options(int argc, char **argv, Options &o) {
             continue;
         }
         if (std::strcmp(argv[i], "--virtual-actuators") == 0) { o.virtual_actuators = true; continue; }
+        if (arg_val(argc, argv, i, "--motor-backend", o.motor_backend)) continue;
+        if (arg_val(argc, argv, i, "--motor-device", o.motor_device)) continue;
+        if (arg_val(argc, argv, i, "--arm-backend", o.arm_backend)) continue;
+        if (arg_val(argc, argv, i, "--arm-device", o.arm_device)) continue;
         if (std::strcmp(argv[i], "--help") == 0 || std::strcmp(argv[i], "-h") == 0) {
             usage(argv[0]);
             std::exit(0);
@@ -291,6 +309,10 @@ static int parse_options(int argc, char **argv, Options &o) {
         std::fprintf(stderr, "TENNIS_ERROR unknown argument: %s\n", argv[i]);
         usage(argv[0]);
         return 2;
+    }
+    if (o.virtual_actuators) {
+        o.motor_backend = "virtual";
+        o.arm_backend = "virtual";
     }
     o.cfg.frame_w = o.width;
     o.cfg.frame_h = o.height;
