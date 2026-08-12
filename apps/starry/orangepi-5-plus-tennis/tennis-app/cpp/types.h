@@ -140,6 +140,16 @@ struct Config {
     // overcomes stall. Lives in the abstract Motor layer, not the backend.
     int motor_min_speed = 15;
 
+    // Optional wheel-RPM odometry. The generic default remains off; the
+    // calibrated Orange Pi live configuration enables it explicitly.
+    bool odometry_enabled = false;
+    double odometry_wheel_radius_m = 0.03;
+    double odometry_wheel_base_m = 0.18;
+    int odometry_sample_ms = 100;
+    int odometry_stale_ms = 500;
+    int odometry_max_gap_ms = 500;
+    int odometry_max_rpm = 300;
+
     // Brief settle windows (frames) for the otherwise-instant virtual arm moves,
     // so GRAB/DEPOSIT are observable states rather than zero-width transitions.
     int grab_settle_frames = 3;
