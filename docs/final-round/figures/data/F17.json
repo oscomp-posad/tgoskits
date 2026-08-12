@@ -1,0 +1,87 @@
+{
+  "chart": "F17_timeline",
+  "title": "开发时间线（7 月 – 8 月）",
+  "subtitle": "StarryOS / RK3588 关键里程碑，日期为该能力落地的代表性节点",
+  "range_start": "2026-07-06",
+  "range_end": "2026-08-15",
+  "categories": {
+    "parity": { "label": "性能 / 调度对齐", "color": "TEAL" },
+    "infra": { "label": "系统基础设施", "color": "AMBER" },
+    "support": { "label": "工具与验证", "color": "MUTED" }
+  },
+  "milestones": [
+    {
+      "key": "perf_multicore",
+      "date": "2026-07-10",
+      "label": "perf 多核",
+      "detail": "big.LITTLE 双簇 HW-PMU\n整机验证通过 (39/39)",
+      "category": "parity",
+      "side": "up",
+      "abl": false
+    },
+    {
+      "key": "ttfi",
+      "date": "2026-07-14",
+      "label": "TTFI 优化",
+      "detail": "首帧推理 9.83s\n领先 Linux 11.28s",
+      "category": "support",
+      "side": "down",
+      "abl": false
+    },
+    {
+      "key": "qemu_npu",
+      "date": "2026-07-15",
+      "label": "QEMU NPU 建模",
+      "detail": "虚拟 RKNPU 设备模型\nStarryOS 整机启动",
+      "category": "support",
+      "side": "up",
+      "abl": false
+    },
+    {
+      "key": "dvfs",
+      "date": "2026-07-20",
+      "label": "DVFS 电压标定",
+      "detail": "A76/A55 峰值 OPP\n(2256 / 1881 MHz)",
+      "category": "infra",
+      "side": "down",
+      "abl": false
+    },
+    {
+      "key": "occ_sched",
+      "date": "2026-08-05",
+      "label": "占用调度",
+      "detail": "occupancy-aware 唤醒放置\n对齐 Linux CFS",
+      "category": "parity",
+      "side": "up",
+      "abl": false
+    },
+    {
+      "key": "thp",
+      "date": "2026-08-06",
+      "label": "THP",
+      "detail": "2MB 大页首触\n2.87× 快于 Linux",
+      "category": "infra",
+      "side": "down",
+      "abl": false
+    },
+    {
+      "key": "sysbench_parity",
+      "date": "2026-08-09",
+      "label": "sysbench parity",
+      "detail": "8 线程 0.88× Linux\n单核持平/领先",
+      "category": "parity",
+      "side": "up",
+      "abl": false
+    },
+    {
+      "key": "correctness",
+      "date": "2026-08-11",
+      "label": "正确性攻坚",
+      "detail": "跨内核页表 UAF /\nTLB 一致性修复",
+      "category": "infra",
+      "side": "down",
+      "abl": false
+    }
+  ],
+  "footnote": "里程碑日期取自开发过程中该项工作首次整机/QEMU 验证通过的代表性节点；具体数值随复测可能微调（当前均为已定值，无 ablation 依赖）。"
+}

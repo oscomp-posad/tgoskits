@@ -1,0 +1,11 @@
+A clean flat technical vector diagram, dark navy background (#0D1B2A), off-white text (#EEF3F8), teal accent (#2DD4BF for parts this team changed) and muted gray (#8AA0B4 for existing parts). Crisp high-resolution, no photorealism, no gradients, thin precise strokes, generous spacing, LARGE readable sans-serif labels. It depicts a three-layer system stack (three wide horizontal bands stacked vertically).
+
+Layer 1 (TOP band, muted gray outline), one large centered label: "应用层：网球机器人感知与控制".
+
+Layer 2 (MIDDLE band, the tallest, with a teal outline and a bold band title on its left edge "StarryOS 内核"): inside it, a row of SIX evenly-spaced rounded boxes with teal outlines, each with a clear label: "调度 / 大小核", "内存 / THP", "频率 / DVFS", "系统调用", "观测 perf", "设备驱动". Below that row, a single thin muted-gray sub-band labeled "硬件抽象层 axhal".
+
+Layer 3 (BOTTOM band, muted gray outline, with a bold label on its left edge "硬件 RK3588"): inside it, a row of SIX small muted boxes labeled: "A76 ×4", "A55 ×4", "NPU ×3", "JPU", "RGA", "HDMI".
+
+Thin vertical connector lines link the three bands down the center. A small legend in a corner: a teal square labeled "本队改动集中层" and a gray square labeled "既有".
+
+All text crisp and correctly spelled. Balanced, symmetric composition, plenty of whitespace so labels never crowd.

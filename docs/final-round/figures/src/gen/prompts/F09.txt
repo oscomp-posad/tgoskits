@@ -1,0 +1,12 @@
+A clean flat technical vector diagram, dark navy background (#0D1B2A), off-white text (#EEF3F8), teal accent (#2DD4BF) and amber accent (#F59E0B). Crisp high-resolution, no photorealism, no gradients, thin precise strokes, generous spacing, sans-serif labels. It shows a shared low-level fix fanning out to many targets.
+
+Layout, three horizontal bands:
+- TOP band: three rounded-rectangle nodes with teal outline, evenly spaced, labeled exactly "ArceOS", "StarryOS", "Axvisor". Above them a small muted caption "消费者：三大系统".
+- CENTER: one prominent large rounded-rectangle with a bold amber outline and navy fill, containing two lines of text: a bold title "页表 / TLB 修复" and a smaller subtitle "共享多架构 crate · page_table_multiarch".
+- BOTTOM band: four rounded-rectangle nodes with muted gray outline, evenly spaced, labeled exactly "aarch64", "riscv64", "x86_64", "loongarch64". Below them a small muted caption "目标架构：四种".
+
+Arrows: three teal arrows rising from the top edge of the center box to each of the three OS nodes; four thinner gray arrows descending from the bottom edge of the center box to each of the four architecture nodes.
+
+At the very bottom, one centered amber caption line: "一处底层修复 → 3 个系统 × 4 种架构同时受益".
+
+All text must be crisp and correctly spelled. Balanced, symmetric composition.

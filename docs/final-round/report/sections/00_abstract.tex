@@ -1,0 +1,4 @@
+% 00_abstract
+\begin{abstract}
+本工作的起点，是将一台网球拾取机器人的操作系统由基于 C 语言的 Linux 迁移至采用 Rust 实现的 StarryOS，运行平台为 RK3588（OrangePi-5-Plus）。工作设定两个目标：其一，使机器人在 StarryOS 上恢复运行；其二，使整套 StarryOS 在与机器人无关的通用负载上同样追平 Linux。两侧采用同一份遵循 Linux ABI 的可执行文件进行对照测试，8 线程 sysbench cpu 吞吐达到 Linux 的 \nCpuTEightRatio 倍，单核 A55 达到 \nAfiveRatio 倍并小幅领先，THP first-touch 建立映射较 Linux 快 \nThpRatio 倍，机器人自上电至首帧推理的 TTFI 为 \nTtfi s，优于 Linux 的 \nTtfiLin s。上述结果均源自内核侧对调度、DVFS、分页与启动路径的改造。基线为 rcore-os/tgoskits 的 dev 分支（commit 73409e079），全部工作由 Team Posad（清华大学）完成。
+\end{abstract}

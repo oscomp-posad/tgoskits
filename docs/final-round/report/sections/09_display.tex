@@ -1,0 +1,90 @@
+% 09_display
+\section{原生显示栈 VOP2 / HDMI-QP / HDPTX}
+
+显示栈是从内存中的一帧像素到点亮一台物理显示器的整条驱动通路：一段帧缓冲经显示控制器按视频时序扫出、经发送器打包为传输协议、经物理层串化为差分信号，最终在连接器上驱动屏幕。StarryOS 在 OrangePi-5-Plus 上此前没有通向真实 HDMI 帧缓冲的路径。现有的 \texttt{card0}（starry-simpledrm）只是叠加在 \texttt{axdisplay} 之上的 KMS 前端，真正经 \texttt{rdif-display} 注册一块真实帧缓冲的后端仅有 virtio-gpu；因此在板端 \texttt{has\_display()} 返回 false，\texttt{/dev/fb0} 并不存在，任何依赖标准帧缓冲的图形程序都无从运行。现已\ours{从零实现一套 \texttt{\#![no\_std]} 的 RK3588 显示驱动栈}，覆盖 VOP2 显示控制器、HDMI-QP 发送器与 HDPTX 组合 PHY，目标是使一份标准的 Qt6 QtWidgets 指针时钟经 \texttt{/dev/fb0} 显示于物理显示器。此项工作属于驱动开发，其证据为 QEMU 渲染通过、主机寄存器级测试计数与逐字核对主线的寄存器数值，硬件点亮的时序已写就并推导完毕，尚未在 RK3588 上验证。本节先深入说明这条通路的四段链路及每一段的内部机制，再区分既有与新增，最后给出已验证与待板验的部分。
+
+\figphl{../figures/out/Fdisplay.png}{RK3588 四级显示链路：VOP2 输出显示时序，HDMI-QP 打包，HDPTX PHY 串化为 TMDS；148.5 MHz 像素时钟由 HDPTX 的 ROPLL 产生，为整条链路上唯一尚未上板验证的环节}{fig:disp}
+
+\subsection{显示通路：四段链路及其机制}
+
+图~\ref{fig:disp} 给出这条通路的四段链路。像素从帧缓冲出发，经 VOP2 生成显示时序，经 HDMI-QP 打包为 HDMI 协议，经 HDPTX PHY 串化为 TMDS 差分信号，最后经连接器抵达显示器。四段各对应一个独立的 driver-core crate，以下逐段说明其内部结构与工作机制。
+
+\paragraph{VOP2 显示控制器}
+VOP2 是像素与时序的源头。它以内部的 AXI 主设备从 DRAM 中的帧缓冲取像素，并驱动一个视频端口（VP）按光栅时序扫出。其内部有三层结构。其一是视频端口，每个 VP 负责为一路输出产生完整的行场时序，即水平总长、有效区、同步与前后消隐，垂直方向同理；1080p60 下水平总长为 2200、垂直总长为 1125，配合 148.5 MHz 的像素时钟得到 60 Hz 刷新。其二是图层与窗口，VOP2 提供 Esmart 与 Cluster 两类窗口，经 overlay 与 layer-sel 选择哪个窗口馈入哪个 VP；本驱动使用 Esmart0 窗口，格式为 XRGB8888，其 \texttt{REGION0\_CTRL} 置 \texttt{0x1} 使能窗口，\texttt{CTRL1} 的 AXI 读写 id 打包为 \texttt{0xB0A0}。其三是 config-done 影子锁存，VOP2 的时序与图层寄存器为影子寄存器，软件把配置写入影子后置 config-done 位，硬件在下一帧边界原子地把影子锁存为活动值，从而避免半改动的时序被扫出；VP0 的 config-done 字为 \texttt{0x18001}，其中 \texttt{GLB\_CFG\_DONE\_EN}（BIT15）是使能该锁存的关键位。VOP2 另提供帧起始中断用于同步。本驱动完成的是 VP0 至 HDMI0 的整套 modeset，即时序计算、Esmart0 窗口装配、层选择与锁存的一次性编程。
+
+\paragraph{HDMI-QP 发送器}
+HDMI-QP TX 接收 VOP2 送出的并行像素与时序，将其打包为 HDMI 传输协议。它先经 \texttt{LINK\_CONFIG0} 设定工作模式，区分 DVI 与 HDMI 两种链路语义；随后在消隐区插入信息帧，其中 AVI infoframe 携带视频标识码 VIC，1080p60 对应 VIC-16，信息帧按定长打包为若干 DWORD 并附带校验和，由 PKTSCHED 调度其在消隐区的插入时机。内容保护 HDCP 在此旁路（HDCP2 bypass），使链路进入无加密的直通传输。QP 是 RK3588 上较新一代的 DesignWare HDMI 控制器变体，其寄存器布局与旧代不同，本驱动按该变体的 \texttt{LINK\_CONFIG0}、AVI 打包与 PKTSCHED 使能三处逐一编程。
+
+\paragraph{HDPTX 组合 PHY}
+HDPTX 是物理层，基址 \texttt{0xfed60000}，为 Samsung 组合 PHY IP。它承担两件事：把并行 TMDS 符号串化为高速差分信号，以及产生像素时钟。像素时钟由其内部的 ROPLL（环形振荡器锁相环）从参考时钟合成，经 mdiv、refdiv、sdiv 三个分频参数确定输出频率，1080p60 下取 mdiv=123、refdiv=1、sdiv=3 得到 148.5 MHz。串化路径由若干 TMDS 通道构成，各通道及公共部分需装载大量模拟微调值。PHY 的上电经 GRF（通用寄存器文件）配置完成，锁定状态经两次轮询确认，先查询 \texttt{O\_PHY\_CLK\_RDY}（BIT2），再查询 \texttt{O\_PHY\_RDY}（BIT1）与 \texttt{O\_PLL\_LOCK\_DONE}（BIT3）。这两次轮询是判断 PHY 是否真正拉起时钟并锁相的唯一运行期判据。
+
+\paragraph{连接器与显示器}
+四段链路的末端是连接器与显示器。连接器一段仅做定频直通。
+
+\subsection{像素时钟归属}
+
+这条通路结构上的关键在于像素时钟由谁产生。RK3588 上 148.5 MHz 的显示时钟 \texttt{dclk} 由 HDPTX PHY 的 ROPLL 产生，以时钟名 \texttt{clk\_hdmiphy\_pixel0} 暴露；CRU 仅将该时钟选通至 VOP，V0PLL 与 CRU 本身不产生此频率。由此可知 PHY 位于整条链路的最上游，也是其中唯一真正不确定的环节，冷启动时须首先把它拉起并锁定，其后才谈得上 CRU 选通与 VOP2 扫出。CRU 侧的接线由\ours{新增的 \texttt{Cru::vop\_hdmi0\_clocks\_setup}} 完成：把 \texttt{DCLK\_VOP0} 选通到 \texttt{clk\_hdmiphy\_pixel0}（选通字 \texttt{0x01800080}），并放开 VOP 的时钟门控（\texttt{CLKGATE\_CON52} 掩码 \texttt{0x230F}）。像素时钟归属的这一事实决定了下文冷启动的编程顺序。
+
+\subsection{既有与新增}
+
+既有的部分是上层的 KMS 抽象与注册框架。\texttt{card0} 前端、\texttt{axdisplay} 中间层与 \texttt{rdif-display} 注册接口沿用 StarryOS 原有实现，它们定义了帧缓冲如何向系统注册、如何暴露为 \texttt{/dev/fb0}，此前只对 virtio-gpu 一个后端生效。新增的部分是整条硬件链路的\ours{四个 driver-core crate 及其 OS 胶合层}，把这套注册接口接到了真实的 RK3588 硬件之上。OS 胶合层落在 \texttt{ax-driver}：\texttt{display/rockchip\_vop2.rs} 完成 FDT 探测、DMA 帧缓冲分配与 \texttt{register\_display\_with\_info} 注册，\texttt{display/hdmi\_coldinit.rs} 承担冷启动编排，\texttt{soc/rockchip} 下的电源域与共享 CRU 访问器提供上电与时钟原语。四个 driver-core crate 均为 \texttt{\#![no\_std]}，各自附带主机测试，\keyres{合计 39 项通过}，构成本章目前的主要证据。
+
+\begin{table}[H]\centering\small
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{3.4cm}>{\raggedright\arraybackslash}p{7.4cm}>{\raggedright\arraybackslash}p{1.3cm}@{}}
+\toprule
+Crate & 职责 & 主机测试 \\
+\midrule
+\texttt{rockchip-vop2} & VP 时序计算、Esmart0 窗口、层选择、config-done 锁存、VP0$\to$HDMI0 全量 modeset & 23 \\
+\texttt{dw-hdmi-qp} & HDCP2 旁路、\texttt{LINK\_CONFIG0} 工作模式、AVI infoframe（VIC-16）、PKTSCHED 使能 & 6 \\
+\texttt{rockchip-hdptx-phy} & Samsung 组合 PHY 的 193 条主线初始化写、ROPLL 148.5 MHz 行、GRF 上电、两次锁定轮询 & 7 \\
+\texttt{rockchip-soc} CRU 扩展 & \texttt{DCLK\_VOP0}$\to$\texttt{clk\_hdmiphy\_pixel0} 选通并放开 VOP 门控 & 3 \\
+\bottomrule
+\end{tabular}
+\caption{显示栈四个 driver-core crate 的职责与主机测试计数，合计 39 项}
+\end{table}
+
+\texttt{rockchip-vop2} 的测试随实现阶段逐步扩充，由核心的 8 项增至加入复核护栏后的 9 项，再至加入 Stage-2 时序与中断的 17 项，最终随全量 modeset 达到 23 项。
+
+\subsection{193 条 PHY 写序及其判据}
+
+HDPTX PHY 的初始化是对主线 \texttt{phy-rockchip-samsung-hdptx.c} 的逐字移植，共 193 条寄存器写，取自该驱动的 \texttt{reg\_sequence} 数组，按类别为 69 条 common-cmn、43 条 tmds-cmn、4 条 sb、5 条 lntop-lowbr、52 条 common-lane 与 20 条 tmds-lane，寄存器偏移为下标乘四。这些数值属于无文档的模拟微调值，其正确性判据只有一条，即与主线逐位一致，任何偏差都无从从语义上验证。运行期的唯一判据仍是前述两次 HDPTX-GRF 锁定轮询，因而上板时判定 ROPLL 是否锁定的板级 oracle 就是那两条串口读数，辅以一次 VOP2 寄存器转储。
+
+modeset 侧的寄存器数值由一名独立复核代理重新推导，全部与主线吻合。表~\ref{tab:disp-regs} 列出 1080p60 下的核心值，均为独立再推导后与主线匹配的结果。
+
+\begin{table}[H]\centering\small
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{4.6cm}>{\raggedright\arraybackslash}p{4.4cm}>{\raggedright\arraybackslash}p{3.2cm}@{}}
+\toprule
+寄存器 & 1080p60 值 & 含义 \\
+\midrule
+\texttt{DSP\_HTOTAL\_HS\_END} & \texttt{0x0898002C} & 水平总长 2200、HS\_END 44 \\
+\texttt{DSP\_HACT\_ST\_END} & \texttt{0x00C00840} & 有效区起 192、止 2112 \\
+\texttt{DSP\_VTOTAL\_VS\_END} & \texttt{0x04650005} & 垂直总长 1125、VS\_END 5 \\
+\texttt{DSP\_VACT\_ST\_END} & \texttt{0x00290461} & 有效区起 41、止 1121 \\
+\texttt{CFG\_DONE}（VP0） & \texttt{0x18001} & 含 \texttt{GLB\_CFG\_DONE\_EN}（BIT15） \\
+Esmart0 \texttt{REGION0\_CTRL} & \texttt{0x1} & 窗口使能、XRGB8888 \\
+Esmart0 \texttt{CTRL1} & \texttt{0xB0A0} & AXI 读写 id \\
+AVI 打包 DWORD & \texttt{0x000D0200} / \texttt{0x00281027} & 校验和 \texttt{0x27} \\
+ROPLL（148.5 MHz） & mdiv=123、refdiv=1、sdiv=3 & PHY 像素时钟 \\
+CRU 选通字 & \texttt{0x01800080} & \texttt{DCLK\_VOP0}$\to$\texttt{clk\_hdmiphy\_pixel0} \\
+CRU 放门掩码 & \texttt{0x230F} & \texttt{CLKGATE\_CON52} \\
+\bottomrule
+\end{tabular}
+\caption{独立再推导后与主线匹配的 1080p60 核心寄存器值}
+\label{tab:disp-regs}
+\end{table}
+
+\subsection{两条启用路径与安全取舍}
+
+驱动提供两个互斥的可选特性，对应两条不同的启用路径。adopt 路径（\texttt{rockchip-vop2}）复用 U-Boot 已经建立的 \texttt{dclk}、GRF、TX 与 PHY，仅重指 VOP2 并重编 modeset，其风险面最小，可在共享的 OrangePi 板级配置上按需启用。from-scratch 冷启动路径（\texttt{rockchip-vop2-coldinit}）自行掌管 PHY、TX、CRU 与 GRF，按像素时钟归属所定的依赖顺序依次拉起：先给电源域上电（VOP 电源域 24、VO1 电源域 26），再由 HDPTX PHY 完成 \texttt{power\_on\_1080p60} 并锁定，随后经 CRU \texttt{vop\_hdmi0\_clocks\_setup} 把像素时钟选通到 VOP 并放门，再配置 GRF 选路，接着执行 VOP2 modeset，最后使能 HDMI-QP TX。
+
+默认启用 adopt 路径，复用 U-Boot 已建立的 \texttt{dclk} 与 PHY；冷启动路径作为可选特性按需启用，暂不纳入共享的板级配置。做出这一取舍是因为该 OrangePi 配置同时供 rknpu 与 tennis 板级测试使用，不应因显示驱动而受损。冷启动因此仅在有人值守的显示点亮会话中启用。两种内核均可干净链接：adopt 路径 16.26 s 构建、无回归，冷启动路径 31.28 s release 构建、已将 \texttt{rockchip-hdptx-phy} 编入。
+
+\subsection{已验证的部分与板级待验}
+
+真正在目标平台上运行过的仅有 Stage 0，即 Qt 在 QEMU 上的渲染。日志显示 linuxfb 平台插件加载成功，完整经历 \texttt{QT\_DEMO\_STARTED} 至 \texttt{QT\_DEMO\_PASSED}，客户机为 Alpine v3.23 配 \texttt{qt6-qtbase-6.10.3-r0}（与构建容器 ABI 对齐），时钟为 82~KB 的 aarch64 musl 动态 PIE，运行于原生 arm64 的 \texttt{qemu-system-aarch64} 11.0.2。为使 Qt 就位，离线安装了 109 个包共 276~MiB，并把 rootfs 由 2048~MiB 扩至 3072~MiB。Stage 1 至 4 为主机测试过的寄存器算术与干净的内核链接。
+
+上板之前的对抗式复核发现并\ours{修复了两个真实的 HIGH 缺陷}，均在任何板级运行之前完成。其一为帧缓冲缓存一致性：扫描输出的帧缓冲起初分配为 \texttt{ContiguousArray}（带缓存的流式内存）且缺少缓存维护，又与非缓存的 \texttt{/dev/fb0} mmap 别名同一段物理内存，在 ARMv8 上构成可缓存性不匹配，会把陈旧的 RAM 内容送上面板，改为 \texttt{CoherentArray}（非缓存）后消除。其二为 config-done 锁存：\texttt{cfg\_done\_value()} 遗漏了缺乏写掩码保护的 \texttt{GLB\_CFG\_DONE\_EN}（BIT15），裸写会将其清除，使影子至活动的锁存被禁用，此后每次重指都静默失效，补成 \texttt{0x18001} 后修复。对抗式复核共进行四轮：第一轮 19 个代理在分支上提出 23 项，收敛为 3 项确认、8 项判为误报；时序再推导由新代理复核 6 项寄存器全部匹配；modeset 再核对由第二名新代理确认全部匹配、含两处次要修正；第二轮针对冷启动胶合层的 5 项发现中，1 项 HIGH 经核验为误报、3 项修复、1 项记为文档说明。经核验为误报的那项声称冷启动的 PHY 复位 id 解码到了错误的 CRU 寄存器，实际上厂商寄存器编码的 id（\texttt{0xc003b} 至 \texttt{0xc003d}）经 \texttt{+0x30000} 的 PHP-CRU 模型正确解码到 \texttt{php\_softrst\_con(3)} 的 11 至 13 位，已记录以免再次误报。
+
+开发过程中另有若干路线更正。片上直接安装 \texttt{qt6-qtbase-dev} 会膨胀到 250 余个包而不可行，故改为在与分支匹配的 Alpine 容器中交叉编译时钟并只投递二进制；一处“27 errors”安装失败根因为 rootfs 满（空闲 135~MiB 而需 276~MiB），扩容至 3072~MiB 后解决；\texttt{apk} 在字体配置触发器的良性失败下仍返回非零，故把成功判定门由退出码改为 \texttt{libqlinuxfb.so} 产物是否存在。此外，落后于 \texttt{upstream/dev} 的主检出多次带来模式漂移，\texttt{plat\_dyn} 字段已被移除、\texttt{ax-feat/} 更名为 \texttt{ax-runtime/}、\texttt{RockchipPM} 现由 \texttt{rdif\_power::Power} 包裹（使裸 \texttt{get\_one::<RockchipPM>()} 的上电成为静默空操作，相应死代码已删除），均已随之校正。
+
+尚未验证的部分需如实说明。四个驱动阶段均未上板，PHY 的 193 个模拟微调值、全部 reset/GRF/MMIO 常量以及整套时序均为尽力对齐主线的最优推断，从未在 RK3588 上运行，上板判据落在那两次 HDPTX-GRF 锁定轮询与一次 VOP2 寄存器转储。板载 DTB 中 \texttt{route\_hdmi0} 标记为 disabled，冷启动据此采用完整的原生初始化路径，由驱动自行依序拉起整条流水线。当前作用域硬编码为 1080p60，未支持 DDC/EDID 与热插拔，留待上板后再行加固。所有约 24 至 25 个提交均在工作树分支本地，尚未推送、尚未开 PR。作为一项广度贡献，该显示栈的定位为主机寄存器级测试 39 项通过、板级 ROPLL 像素时钟锁定待验证，本章不对其作出超出这一状态的判断。

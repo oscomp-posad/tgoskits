@@ -1,0 +1,19 @@
+{
+  "chart": "F05_residency",
+  "title_zh": "核心占用率：负载均衡优化前后对比",
+  "ylabel_zh": "运行时占比 (%)",
+  "legend_zh": { "before": "优化前", "after": "优化后" },
+  "cluster_labels_zh": { "A55": "A55（小核）", "A76": "A76（大核）" },
+  "abl": false,
+  "abl_note_zh": "RK3588 八线程实测每核忙碌 tick，归一化至该轮最忙核",
+  "cores": [
+    { "id": "cpu0", "cluster": "A55", "before_pct": 4,   "after_pct": 96,  "abl": false },
+    { "id": "cpu1", "cluster": "A55", "before_pct": 0,   "after_pct": 100, "abl": false },
+    { "id": "cpu2", "cluster": "A55", "before_pct": 0,   "after_pct": 97,  "abl": false },
+    { "id": "cpu3", "cluster": "A55", "before_pct": 0,   "after_pct": 98,  "abl": false },
+    { "id": "cpu4", "cluster": "A76", "before_pct": 2,   "after_pct": 95,  "abl": false },
+    { "id": "cpu5", "cluster": "A76", "before_pct": 100, "after_pct": 97,  "abl": false },
+    { "id": "cpu6", "cluster": "A76", "before_pct": 75,  "after_pct": 94,  "abl": false },
+    { "id": "cpu7", "cluster": "A76", "before_pct": 41,  "after_pct": 90,  "abl": false }
+  ]
+}

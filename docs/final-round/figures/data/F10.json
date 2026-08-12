@@ -1,0 +1,33 @@
+{
+  "chart": "F10_dvfs",
+  "title_cn": "DVFS 分核性能追平 Linux",
+  "subtitle_cn": "sysbench CPU · events/s（越高越好）· RK3588 分簇实测",
+  "unit_cn": "吞吐 (events/s)",
+  "series_order": ["starry", "linux"],
+  "series_labels_cn": {
+    "starry": "StarryOS",
+    "linux": "Linux"
+  },
+  "clusters": [
+    {
+      "id": "A55",
+      "label_cn": "A55（小核）",
+      "opp_ceiling_mhz": 1881,
+      "series": {
+        "starry": { "value": 359, "abl": false },
+        "linux": { "value": 349, "abl": false }
+      }
+    },
+    {
+      "id": "A76",
+      "label_cn": "A76（大核）",
+      "opp_ceiling_mhz": 2256,
+      "series": {
+        "starry": { "value": 896, "abl": false },
+        "linux": { "value": 962, "abl": false }
+      }
+    }
+  ],
+  "pending_note_cn": "† 消融占位值，待板级验证后更新",
+  "opp_annotation_cn": "OPP 上限：A76 2256（治理档 2126）／ A55 1881 MHz"
+}

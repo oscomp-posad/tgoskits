@@ -1,0 +1,42 @@
+{
+  "chart": "F07_getpid",
+  "title": "getpid 系统调用入口延迟阶梯",
+  "y_label": "延迟（纳秒 / ns）",
+  "unit": "ns",
+  "linux_ref": {
+    "label": "Linux 参考",
+    "value": 167,
+    "abl": false
+  },
+  "stages": [
+    {
+      "key": "baseline",
+      "label": "初始基线",
+      "value": 1200,
+      "abl": false,
+      "role": "baseline"
+    },
+    {
+      "key": "ptrace_fastpath",
+      "label": "+ ptrace\n快路径",
+      "value": 900,
+      "abl": true,
+      "role": "step"
+    },
+    {
+      "key": "skip_poll_timer",
+      "label": "+ 跳过\npoll_process_timer",
+      "value": 853,
+      "abl": true,
+      "role": "step"
+    },
+    {
+      "key": "lockfree_timer_state",
+      "label": "+ 无锁\ntimer_state",
+      "value": 431,
+      "abl": false,
+      "role": "final"
+    }
+  ],
+  "footnote": "* 初始基线与中间两级为实现当期单次测量，最终值与 Linux 参考取三次重复中位数"
+}

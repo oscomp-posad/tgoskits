@@ -1,0 +1,100 @@
+\documentclass[border=12pt]{standalone}
+\usepackage{ctex}\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,fit,backgrounds,shapes.geometric,calc}
+\definecolor{navy}{HTML}{0D1B2A}\definecolor{teal}{HTML}{2DD4BF}\definecolor{amber}{HTML}{F59E0B}\definecolor{ink}{HTML}{EEF3F8}\definecolor{muted}{HTML}{8AA0B4}
+\setCJKmainfont{Songti SC}\setCJKsansfont{Heiti SC}
+\newcommand{\merged}{\textcolor{teal}{\textbullet}}
+\newcommand{\open}{\textcolor{amber}{$\circ$}}
+\newcommand{\sess}{\textcolor{muted}{--}}
+\begin{document}
+\begin{tikzpicture}[show background rectangle,background rectangle/.style={fill=navy},
+  font=\sffamily,>=Stealth, every node/.style={text=ink}]
+
+% ---- column boundaries ----
+\def\xA{0}\def\xB{2.9}\def\xC{8.6}\def\xD{14.3}
+% ---- row boundaries (top to bottom, y descends) ----
+\def\yTop{0}
+\def\yHdr{-0.9}
+\def\yPerf{-2.2}
+\def\ySched{-3.3}
+\def\yDvfs{-4.2}
+\def\yMem{-5.1}
+\def\yCorrect{-6.0}
+\def\yDriver{-6.9}
+\def\yIO{-8.2}
+\def\yNpu{-9.1}
+\def\yRobot{-10.0}
+
+\node[font=\sffamily\bfseries\large] at (7.15,0.9) {PR 归属矩阵：子系统 $\times$ 贡献者};
+
+% ---- outer frame + grid lines ----
+\draw[muted, line width=0.6pt, rounded corners=4pt] (\xA,\yTop) rectangle (\xD,\yRobot);
+\foreach \y in {\yHdr,\yPerf,\ySched,\yDvfs,\yMem,\yCorrect,\yDriver,\yIO,\yNpu}{
+  \draw[muted, line width=0.3pt] (\xA,\y) -- (\xD,\y);
+}
+\draw[muted, line width=0.3pt] (\xB,\yTop) -- (\xB,\yRobot);
+\draw[muted, line width=0.3pt] (\xC,\yTop) -- (\xC,\yRobot);
+
+% ---- header row ----
+\node[font=\sffamily\bfseries\small] at (1.45,-0.45) {子系统};
+\node[font=\sffamily\bfseries\small, text=teal] at (5.75,-0.45) {系统内核侧};
+\node[font=\sffamily\bfseries\small, text=teal] at (11.45,-0.45) {仿真与板级侧};
+
+% ---- row: perf ----
+\node[font=\sffamily\bfseries\footnotesize, anchor=west] at (0.2,-1.55) {perf};
+\node[align=left, font=\sffamily\footnotesize, text width=5.3cm] at (5.75,-1.55)
+  {\merged\ \#1395\\ \open\ \#1577 \ \#1601 \ \#1602 \ \#1603};
+\node[text=muted, font=\sffamily\footnotesize] at (11.45,-1.55) {--};
+
+% ---- row: 调度 ----
+\node[font=\sffamily\bfseries\footnotesize, anchor=west] at (0.2,-2.75) {调度};
+\node[align=left, font=\sffamily\footnotesize, text width=5.3cm] at (5.75,-2.75)
+  {\merged\ \#1495\\ \open\ \#1656 \ \#1658};
+\node[text=muted, font=\sffamily\footnotesize] at (11.45,-2.75) {--};
+
+% ---- row: DVFS ----
+\node[font=\sffamily\bfseries\footnotesize, anchor=west] at (0.2,-3.75) {DVFS};
+\node[align=left, font=\sffamily\footnotesize] at (5.75,-3.75) {\merged\ \#1657};
+\node[text=muted, font=\sffamily\footnotesize] at (11.45,-3.75) {--};
+
+% ---- row: 内存 ----
+\node[font=\sffamily\bfseries\footnotesize, anchor=west] at (0.2,-4.65) {内存};
+\node[align=left, font=\sffamily\footnotesize, text width=5.3cm] at (5.75,-4.65)
+  {\sess\ 会话中（未开 PR）};
+\node[text=muted, font=\sffamily\footnotesize] at (11.45,-4.65) {--};
+
+% ---- row: 正确性 ----
+\node[font=\sffamily\bfseries\footnotesize, anchor=west] at (0.2,-5.55) {正确性};
+\node[align=left, font=\sffamily\footnotesize, text width=5.3cm] at (5.75,-5.55)
+  {\sess\ 会话中（未开 PR）};
+\node[text=muted, font=\sffamily\footnotesize] at (11.45,-5.55) {--};
+
+% ---- row: 驱动 RGA/JPU ----
+\node[font=\sffamily\bfseries\footnotesize, anchor=west, text width=2.5cm] at (0.2,-6.45) {驱动 RGA/JPU};
+\node[align=left, font=\sffamily\footnotesize] at (5.75,-6.45) {\merged\ \#1388 \ \#1456};
+\node[text=muted, font=\sffamily\footnotesize] at (11.45,-6.45) {--};
+
+% ---- row: 板级 I/O ----
+\node[font=\sffamily\bfseries\footnotesize, anchor=west, text width=2.5cm] at (0.2,-7.55) {板级 I/O};
+\node[text=muted, font=\sffamily\footnotesize] at (5.75,-7.55) {--};
+\node[align=left, font=\sffamily\footnotesize, text width=5.3cm] at (11.45,-7.55)
+  {\merged\ \#1358 \ \#1378 \ \#1921 \ \#1922 \ \#1468\\ \#1924 \ \#1961 \ \#1497 \ \#1963};
+
+% ---- row: QEMU-NPU ----
+\node[font=\sffamily\bfseries\footnotesize, anchor=west, text width=2.5cm] at (0.2,-8.65) {QEMU-NPU};
+\node[text=muted, font=\sffamily\footnotesize] at (5.75,-8.65) {--};
+\node[align=left, font=\sffamily\footnotesize, text width=5.3cm] at (11.45,-8.65)
+  {\merged\ processmission/qemu\#19 \ \#26};
+
+% ---- row: 机器人 ----
+\node[font=\sffamily\bfseries\footnotesize, anchor=west] at (0.2,-9.55) {机器人};
+\node[text=muted, font=\sffamily\footnotesize] at (5.75,-9.55) {--};
+\node[align=left, font=\sffamily\footnotesize, text width=5.3cm] at (11.45,-9.55)
+  {\sess\ 会话中（未开 PR）};
+
+% ---- legend ----
+\node[font=\sffamily\footnotesize, text=muted] at (7.15,-10.7)
+  {\merged\ 合并 \qquad \open\ 在审 \qquad \sess\ 会话（尚未开 PR，见贡献路线图 Tier 3）};
+
+\end{tikzpicture}
+\end{document}

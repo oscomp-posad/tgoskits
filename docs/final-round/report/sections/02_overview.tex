@@ -1,0 +1,37 @@
+% 02_overview
+\section{系统总览与测量方法}
+
+StarryOS 复用 ArceOS 的模块层，在其上补齐 Linux 兼容的系统调用、进程与信号，并按设备类型对驱动分层。系统内核侧的改动集中于调度与大小核、系统调用入口、分页与内存、频率电压以及观测；仿真与板级侧\ours{新增 QEMU 的 RKNPU 功能级模型}、若干 RK3588 驱动与显示栈，并承担全部真机验证。两条主线的落点见图~\ref{fig:arch}。
+
+\figphl{../figures/out/F02.png}{StarryOS 在 RK3588 上的分层结构，本队改动集中于调度、DVFS、分页与观测等层}{fig:arch}
+
+机器人负载的闭环起始于相机成帧，依次经 JPU 解码、RGA 预处理、NPU 推理，直至定位与运动控制，再返回相机。帧到指令延迟即该闭环运行一周的端到端时间，各子系统的改动最终都汇入这一个数字。
+
+\figph{../figures/out/F01.png}{跨子系统对 Linux 的性能比值仪表盘（越接近或超过 1.0 越好）}
+
+每个子系统各用一套业界基准测量，并各自配一条同机同频的 Linux 基线：sysbench cpu 考察调度分发与 DVFS 频率，sysbench memory 的 first-touch 考察分页与 THP，其写带宽考察 DDR 侧 DVFS（频率电压），hackbench 考察高并发下的 fork 与调度，schbench 考察唤醒延迟，getpid 等空系统调用单独测量系统调用入口的开销。基准套件与子系统的对应见图~\ref{fig:bench}。
+
+\figphl{../figures/out/F03.png}{各子系统的基准套件与其所测子系统的对应关系（每项均配同机 Linux 基线）}{fig:bench}
+
+测量口径本身亦予固定。基线版本冻结后，每轮改动均重新复测；两次读数漂移超过 ±2\% 即判为环境噪声并重测。两侧使用同一份 ELF，以免编译差异混入结论。每个数据点取 N$\geq$5 次的 p50，不采用最优值。per-core 与聚合分别测量，先验证单核算力对齐，再考察多核堆叠。主线采用累计阶梯，逐层叠加改动以观察每一步的增量；对相互影响的改动项，再单独做正交消融，将各自的贡献逐一厘清。
+
+下表按能力域汇总前置目标的完成情况，结果列直接引用全局数据宏，状态分已达、进行中、受阻三档，口径列标明各项的测量方法。
+
+\begin{table}[H]\centering\small
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{2.3cm}>{\raggedright\arraybackslash}p{5.4cm}>{\raggedright\arraybackslash}p{1.7cm}>{\raggedright\arraybackslash}p{4.0cm}@{}}
+\toprule
+能力域 & 结果 & 状态 & 口径 \\
+\midrule
+观测（perf/ftrace） & 硬件 PMU perf 与 ftrace 已在真机运行，big.LITTLE 全量通过 & 已达 & 板级 perf-validate（39/0、56/0） \\
+调度与大小核 & cpu t8 \nCpuTEight ev/s，为 Linux \nCpuTEightLin 的 \nCpuTEightRatio× & 已达 & sysbench cpu 8 线程 p50 \\
+系统调用入口 & getpid \nGetpid ns，为 Linux \nGetpidLin ns 的 \nGetpidRatio× & 已达（有残差） & getpid 微基准 p50 \\
+内存与分页 & THP first-touch \nThpFT s，Linux 为 \nThpFTLin s，快 \nThpRatio×（领先） & 已达 & 128 MB first-touch \\
+频率电压 & 内存带宽 \nMemBWWrite MiB/s，为 Linux 的 \nMemBWWriteRatio×（DDR DVFS 固件受阻） & 部分受阻 & sysbench memory 写 8 线程 \\
+启动 TTFI & \nTtfi s，优于 Linux \nTtfiLin s（领先） & 已达 & 上电到首帧推理 \\
+显示栈 & VOP2 与 HDMI-QP 主机测试通过，真机待验 & 进行中 & 主机寄存器测试 + 板级 ROPLL 待验 \\
+QEMU NPU 模型 & RKNPU 功能级模型已合并，106 项 qtest & 已达 & qtest 回归 \\
+机器人应用 & 追球到投放五阶段闭环在真机通过 & 已达 & 帧到指令延迟 \\
+\bottomrule
+\end{tabular}
+\caption{前置目标完成情况}
+\end{table}

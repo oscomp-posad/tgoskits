@@ -1,0 +1,37 @@
+\documentclass[border=12pt]{standalone}
+\usepackage{ctex}\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,fit,backgrounds,shapes.geometric,calc}
+\definecolor{navy}{HTML}{0D1B2A}\definecolor{teal}{HTML}{2DD4BF}\definecolor{amber}{HTML}{F59E0B}\definecolor{ink}{HTML}{EEF3F8}\definecolor{muted}{HTML}{8AA0B4}
+\setCJKmainfont{Songti SC}\setCJKsansfont{Heiti SC}
+\begin{document}
+\begin{tikzpicture}[show background rectangle,background rectangle/.style={fill=navy},
+  font=\sffamily,>=Stealth, every node/.style={text=ink}]
+
+% ---- three cycle nodes ----
+\node[draw=muted, line width=0.7pt, rounded corners=6pt, minimum width=4.0cm, minimum height=1.3cm,
+      align=center, font=\sffamily\small] (human) at (0,5.0) {人：规格 / 架构 / 验收};
+
+\node[draw=teal, line width=0.7pt, rounded corners=6pt, minimum width=4.0cm, minimum height=1.3cm,
+      align=center, font=\sffamily\small] (ai) at (-4.6,-0.3) {AI：实现 / 调试};
+
+\node[draw=amber, line width=0.9pt, rounded corners=6pt, minimum width=4.2cm, minimum height=1.3cm,
+      align=center, font=\sffamily\small] (gate) at (4.6,-0.3) {机器可判定闸门\\（板上 / QEMU）};
+
+% ---- cyclic arrows ----
+\draw[->, ink, line width=0.7pt] (human) to[bend left=15] node[midway, above left, font=\sffamily\tiny, text=muted] {下发规格} (ai);
+\draw[->, teal, line width=0.7pt] (ai) to[bend left=15] node[midway, below, font=\sffamily\tiny, text=muted] {提交实现} (gate);
+\draw[->, amber, line width=0.7pt] (gate) to[bend left=15] node[midway, above right, font=\sffamily\tiny, text=muted] {判定结果反馈} (human);
+
+% ---- oracle detail box around the gate ----
+\node[draw=amber, dashed, line width=0.5pt, rounded corners=5pt, align=left, font=\sffamily\footnotesize,
+      text width=5.2cm, anchor=north] (oracles) at (4.6,-1.6)
+  {\textcolor{amber}{\textbullet} sysbench 回归门\\
+   \textcolor{amber}{\textbullet} schbench 延迟阈值\\
+   \textcolor{amber}{\textbullet} 板上无死锁评审\\
+   \textcolor{amber}{\textbullet} CRC/校验和\\
+   \textcolor{amber}{\textbullet} s\_frac 计时};
+\draw[amber, line width=0.4pt] (gate.south) -- (oracles.north);
+\node[font=\sffamily\tiny, text=muted] at (4.6,-4.75) {闸门判据（全部机器可判定，无需人工目测）};
+
+\end{tikzpicture}
+\end{document}

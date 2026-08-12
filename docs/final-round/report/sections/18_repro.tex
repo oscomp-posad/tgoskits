@@ -1,0 +1,50 @@
+% 18_repro
+\section{可复现性、测量缺口与后续工作}
+
+本报告的板上数字全部出自同一块 OrangePi-5-Plus（RK3588，cpu0 至 cpu3 为 A55 小核、cpu4 至 cpu7 为 A76 大核，三核 NPU，硬件 RGA/JPU，HDMI 输出）。本节记录这些数字的复现方法、目前仍缺测量的维度，以及后续工作的推进方向。
+
+\subsection{硬件接线与板上运行}
+
+该板具备两条访问通道。其一为 USB 转串口的调试控制台，工作于 1.5 Mbaud。其二为经 RTL8125 网口的 SSH 登录（\#1497 合入后可用）。两条通道均需保留，一旦 StarryOS 的用户 shell 占用串口 tty，内核的 warn/info 便不再到达控制台，而 \texttt{/dev/kmsg} 仅可写入，此时只有 SSH 可观测运行态。
+
+上板迭代须无人值守。常规一轮走暖复位回路：从 StarryOS shell 执行 \texttt{reboot -f} 返回 Linux（依赖 \#1358 的 reboot 系统调用），在 Linux 侧执行 \texttt{ssh reboot} 转入 U-Boot，随后 \texttt{fatload} 预置的 FIT 并 \texttt{bootm}，全程无需断电。改动挂死到 shell、SSH 与 U-Boot 均不可达时，板卡专用电源经一只计量式智能插座带外硬断电冷复位，恢复与被测软件状态无关；插座只切板卡一路，主机与 USB 串口适配器另接常供电，故断板电不致令串口适配器重新枚举、控制台日志跨复位连续，专用足额电源亦为 8 核冷启提供浪涌余量。整套测试台的构成与分级恢复见 AI 方法一节图~\ref{fig:harness}。
+
+回路由 \texttt{scripts/board/boardctl.py} 驱动。其依据串口占用情况自动选择传输方式，串口服务在设备被占用时经由本地 WebSocket 桥接，否则直接连接 pyserial。\texttt{deploy} 执行 scp 并强制一次 \texttt{sync}，随后校验 PT\_INTERP 加载器，此步修复了此前部署后启动挂死数百秒的故障。控制台数据流附带主机时间戳，并接入实时的失败监视器。这套流程直接压缩了烧写路径的耗时，三条刷写通路的实测用时见板级 I/O 一节表~\ref{tab:board-flash}。
+
+内核与测试镜像由 \texttt{cargo xtask starry} 产出 rootfs 与板上 FIT，perf 与 sysbench 在板上运行的是上游同名二进制，成功判定依据各自的 success\_regex。
+
+\subsection{构建与渲染}
+
+报告本体由 \texttt{make report} 构建，该命令进入 \texttt{report/} 后执行 \texttt{tectonic main.tex --outdir build}。正文采用 ctexart 文档类，需要 CJK 字体。所有数字集中于 \texttt{data/numbers.tex} 这一份权威表，正文仅引用宏名，不写入字面量，尚待板上消融补齐的条目以 \verb|\abl{}| 标出，以与已测数据区分。
+
+图表遵循同一条溯源链。每张图的脚本仅读取一份 \texttt{figures/data/FNN.json} 作为数据源，JSON 中带有 \texttt{"abl": true} 的记录为消融待补的占位值，消融完成后由真实测量覆盖，并将该字段置为 \texttt{false}。\texttt{render.py} 将这些 JSON 渲染为 \texttt{figures/out/FNN.png}，正文经 \verb|\figph| 引用，图未生成时宏自动回退为占位框。构建前经 \texttt{lint.sh} 校验，扫描禁用串、裸 IP 与对比句式，并统计 \verb|\abl| 标记的数量。
+
+\subsection{尚未测量的维度}
+
+目前有四条轴仅有定性观测，尚无可比数字。四者按补测优先级排列，此处仅列出观测，不填入编造的数据。
+
+\begin{table}[H]\centering\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+补测轴 & 现有观测 & 状态 \\
+\midrule
+功耗 / perf-per-watt & 计量插座提供墙上功率，机制就位、数值待采 & 待测 \\
+常驻内存 RSS & 初赛测得 Starry 约 19 MB、Linux 约 31 MB & 决赛待复测 \\
+网络吞吐 & RTL8125 链路通、SSH 可用，无 iperf 数 & 待测 \\
+文件系统对等 & 块 IO 完成停顿已修，吞吐未做基准 & 待测 \\
+\bottomrule
+\end{tabular}
+\caption{四条补测轴目前均为待测状态}
+\end{table}
+
+功耗一轴的补测价值最高。CPU 侧的算力已对齐 Linux，同步采集板级功率即可将 events 每秒换算为 events 每焦耳，与 Linux 做 perf-per-watt 对比。测试台的计量式智能插座已提供墙上功率的同步采样通路（见图~\ref{fig:harness}），口径为整机墙上功率；数值随 sysbench 与推理负载的整机复测一并采齐。常驻内存方面，初赛在同负载下测得 StarryOS 常驻集约 \keyres{19 MB}、Linux 约 31 MB，约省四成，反映精简的 Rust 内核相对通用发行版的内存足迹优势；决赛内核在更多特性合入后尚未复测。网络一轴链路已通、SSH 可用，尚缺 iperf/netperf 的吞吐数据。文件系统一轴此前已将块 IO 的完成停顿从约 2 s 修复至约 20 ms，而 ext4 吞吐与 fio 的对等基准尚未完成。
+
+\subsection{后续方向}
+
+调度侧的下一步是实现全量负载均衡。当前上板运行的是安全的纯放置子集（容量感知的产生与唤醒放置，不含迁移），其原因在于完整的空闲拉取、推送与唤醒改向在 RK3588 上使 sysbench 单线程降至 0.46 倍，根因为迁移抖动。实现路径是为迁移引入代价门限与迟滞，使其仅在收益为正时跨核迁移任务。
+
+DVFS 的 Phase 2 是电压闭环。A55 轨以带上下限的开环电压写入下发，仅保证不欠压；Phase 2 将接入闭环电压回读与温控，方可放开全核 1.0 V 的顶档。A76 顶档亦封定于 \nDvfsAseven{} MHz @ 925 mV，因为唯一冻结过的全核零压降快照位于 1592 MHz，且板上尚无温度调节器。同一层的 DDR 变频受阻于主线 TF-A 缺少 DRAM SIP 处理器，需替换为将 DRAM SIP 置于 EL3 的 rkbin BL31，届时 \nMemBWWriteRatio{} 倍的写带宽短板方可解决。
+
+内存侧的下一步是把首次触碰 THP 强化为通用 THP。首次触碰的 THP 已将 128 MB 私有匿名内存压缩至 \nThpFT{} s，快于 Linux 的 \nThpFTLin{} s，领先 \nThpRatio{} 倍，这是一项真实的领先。后续需补足后台合并、madvise 提示，以及真实负载下 split/merge 的稳健性。
+
+加速器侧需将 NPU 三核并发推进到真机。三核协同的正确性已由仿真与板级侧在 QEMU RKNPU 模拟器上完成多核验证，真机上的三核并发推理尚未运行，打通后可将推理吞吐按核数横向扩展。与之配套的是将这套 QEMU 设备模型上游化。RKNPU 模拟器已合入 \texttt{processmission/qemu}（\#19 与 \#26 多核，106 个 qtest，含真实 INT8/FP 执行与 IOMMU），下一步是将其构建为主线 QEMU 中一个规整的平台总线设备，使后续开发者无需真机即可开发 NPU 驱动。

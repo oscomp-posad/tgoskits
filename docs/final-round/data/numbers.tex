@@ -1,0 +1,35 @@
+% CANONICAL NUMBER SET. Direction = Starry/Linux (higher=better unless a time). \abl{}=pending ablation run.
+% Board-measured, 3-rep medians from the 2026-08-12 ablation; frozen Linux 6.1.43-rockchip baseline.
+\newcommand{\nCpuTEight}{4987}          \newcommand{\nCpuTEightLin}{5222}   \newcommand{\nCpuTEightRatio}{0.96}
+\newcommand{\nLadderBase}{160}      \newcommand{\nLadderA}{3668} \newcommand{\nLadderB}{3991}
+\newcommand{\nLadderFloor}{361} \newcommand{\nLadderPlace}{4987} \newcommand{\nLadderOcc}{4995} \newcommand{\nLadderCoalesce}{3523}
+\newcommand{\nAfive}{359}  \newcommand{\nAfiveLin}{349}  \newcommand{\nAfiveRatio}{1.03}
+\newcommand{\nAseven}{896} \newcommand{\nAsevenLin}{962} \newcommand{\nAsevenRatio}{0.93}
+\newcommand{\nThpFT}{0.030} \newcommand{\nThpFTLin}{0.086} \newcommand{\nThpRatio}{2.87}
+\newcommand{\nGetpid}{431} \newcommand{\nGetpidLin}{167} \newcommand{\nGetpidRatio}{2.6}
+\newcommand{\nWake}{8} \newcommand{\nWakeLin}{6}
+\newcommand{\nTtfi}{9.83} \newcommand{\nTtfiLin}{11.28}
+\newcommand{\nMemBWWrite}{34330} \newcommand{\nMemBWWriteLin}{56046} \newcommand{\nMemBWWriteRatio}{0.61}
+\newcommand{\nMemBWMemcpyRatio}{0.36} \newcommand{\nMemBWAggRatio}{0.24}
+\newcommand{\nSchRps}{339} \newcommand{\nSchRpsLin}{199} \newcommand{\nSchRpsRatio}{1.71}
+\newcommand{\nMemBwTwo}{0.78}
+\newcommand{\nHackT}{10.2} \newcommand{\nDvfsAseven}{2126} \newcommand{\nDvfsAsevenTop}{2256} \newcommand{\nDvfsAfive}{1881}
+\newcommand{\nPerCoreRatio}{0.98}
+% 推理链路（初赛，已在板上验证）
+\newcommand{\nEteDefault}{162.7} \newcommand{\nEteBig}{55.2} \newcommand{\nEteBigLin}{25.8}
+\newcommand{\nInferTennis}{11.75} \newcommand{\nInferTennisLin}{11.4}
+\newcommand{\nRgaSpeedup}{7.4} \newcommand{\nAffinitySpeedup}{3}
+\newcommand{\nMutexRatio}{1.76}
+% StarryOS 优化前基线（before），for 前 -> 后 -> Linux 三段对照 (from report ladders/baselines).
+\newcommand{\nCpuTEightBefore}{160}   % boot-freq, placement off (= \nLadderBase)
+\newcommand{\nGetpidBefore}{1200}
+\newcommand{\nWakeBefore}{1042}
+\newcommand{\nSchRpsBefore}{231}
+\newcommand{\nMemBWWriteBefore}{15040}   % pre wake-spread (0.27x Linux)
+\newcommand{\nTtfiBefore}{19.22}
+\newcommand{\nMutexBefore}{1.69} \newcommand{\nMutexAfter}{0.85} \newcommand{\nMutexLin}{0.481}
+\newcommand{\nAfiveBefore}{251} \newcommand{\nAsevenBefore}{693}   % freq-limited pre-align (~0.72x Linux)
+\newcommand{\nThpFTBefore}{0.8 到 1.3}
+% Removed dead placeholders \nCpuTfour (sysbench cpu 4-thread never run — harness does only 1T/8T)
+% and \nThreadsTEight (sysbench threads --threads=8 hard-hangs StarryOS, #59 wake-storm); neither was
+% ever referenced in prose, so both were non-rendering. See sysbench-board ABLATION.md / CAMPAIGN_LOG.md.

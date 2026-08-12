@@ -1,0 +1,75 @@
+\documentclass[border=12pt]{standalone}
+\usepackage{ctex}\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,fit,backgrounds,shapes.geometric,calc}
+\definecolor{navy}{HTML}{0D1B2A}\definecolor{teal}{HTML}{2DD4BF}\definecolor{amber}{HTML}{F59E0B}\definecolor{ink}{HTML}{EEF3F8}\definecolor{muted}{HTML}{8AA0B4}
+\setCJKmainfont{Songti SC}\setCJKsansfont{Heiti SC}
+\begin{document}
+\begin{tikzpicture}[show background rectangle,background rectangle/.style={fill=navy},
+  font=\sffamily,>=Stealth, every node/.style={text=ink},
+  state/.style={draw=teal, line width=0.8pt, rounded corners=5pt, minimum width=3.6cm,
+                minimum height=1.15cm, text width=3.3cm, align=center, font=\sffamily\bfseries\scriptsize, inner sep=4pt},
+  phase/.style={draw=amber, line width=0.8pt, rounded corners=5pt, minimum width=3.6cm,
+                minimum height=1.15cm, text width=3.3cm, align=center, font=\sffamily\bfseries\scriptsize, inner sep=4pt},
+  elab/.style={font=\tiny, align=center, fill=navy, inner sep=1pt, text width=3.2cm}]
+
+\node[font=\sffamily\bfseries\Large] at (0,12.6) {拾球状态机（6 主状态 + 2 定时时相）};
+
+\node[state] (chase) at (0,9.5)          {CHASE\_BALL};
+\node[phase] (bfg)   at (6.72,6.72)      {BrakeForGrab};
+\node[state] (grab)  at (9.5,0)          {GRAB};
+\node[state] (ret)   at (6.72,-6.72)     {RETURN\_TO\_\\BUCKET};
+\node[state] (find)  at (0,-9.5)         {FIND\_BUCKET};
+\node[state] (appr)  at (-6.72,-6.72)    {APPROACH\_\\BUCKET};
+\node[phase] (bfd)   at (-9.5,0)         {BrakeForDeposit};
+\node[state] (dep)   at (-6.72,6.72)     {DEPOSIT};
+
+% ================= main ring transitions =================
+\draw[->, teal, line width=0.7pt] (chase) -- (bfg)
+  node[elab, pos=0.35, right] {连续3帧 0.28$\le$area$<$0.50 且 $|$cx-410$|\le$20\\{\color{muted}\textrightarrow\ Brake，到期发 Grab}};
+
+\draw[->, teal, line width=0.7pt] (bfg) -- (grab)
+  node[elab, midway, right] {now$\ge$deadline (350ms)\\{\color{muted}\textrightarrow\ Standby + ArmAction::Grab}};
+
+\draw[->, teal, line width=0.7pt] (grab) -- (ret)
+  node[elab, midway, right] {+100ms 后 odometry.valid\\{\color{muted}\textrightarrow\ Standby}};
+
+\draw[->, teal, line width=0.7pt] (ret) -- (find)
+  node[elab, pos=0.6, below right, text width=3.8cm] {bucket.found / !valid / 超时15s / dist$\le$0.5 / dist$\ge$10\\{\color{muted}\textrightarrow\ Brake}};
+
+\draw[->, teal, line width=0.7pt] (find) -- (appr)
+  node[elab, pos=0.4, below left] {连续3帧 bucket.found\\{\color{muted}\textrightarrow\ Standby}};
+
+\draw[->, teal, line width=0.7pt] (appr) -- (bfd)
+  node[elab, midway, left] {bucket area$\ge$0.90\\{\color{muted}\textrightarrow\ Brake，到期发 Release}};
+
+\draw[->, teal, line width=0.7pt] (bfd) -- (dep)
+  node[elab, midway, left] {now$\ge$deadline (350ms)\\{\color{muted}\textrightarrow\ Standby + ArmAction::Release}};
+
+\draw[->, teal, line width=0.7pt] (dep) -- (chase)
+  node[elab, pos=0.65, above left, text width=3.8cm] {+500ms 后\\{\color{muted}\textrightarrow\ Standby + ArmAction::Ready + reset\_odometry}};
+
+% ================= branch / chord transitions =================
+\draw[->, amber, line width=0.7pt, dashed] (grab) to[bend right=32]
+  node[elab, pos=0.32, above right] {+100ms 后 !odometry.valid\\{\color{muted}\textrightarrow\ Standby}} (find);
+
+\draw[->, amber, line width=0.7pt, dashed] (grab) to[bend left=22]
+  node[elab, pos=0.5, above, yshift=4pt] {arm.grab() 返回 Empty\\{\color{muted}\textrightarrow\ Standby}} (chase);
+
+\draw[->, amber, line width=0.7pt, dashed] (appr) to[bend right=38]
+  node[elab, pos=0.55, below] {连续$>$10帧 !bucket.found\\{\color{muted}\textrightarrow\ Standby}} (find);
+
+% ================= self loops =================
+\draw[->, muted, line width=0.6pt] (chase) to[out=60,in=120,looseness=8]
+  node[elab, above, text=muted] {球丢失/倒车太近/对准pivot/直行（自环，见阶梯1-5）} (chase);
+
+\draw[->, muted, line width=0.6pt] (ret) to[out=-75,in=-15,looseness=8]
+  node[elab, right, text=muted] {$|$heading误差$|>15^\circ$ pivot\\否则直行（自环）} (ret);
+
+\draw[->, muted, line width=0.6pt] (find) to[out=-120,in=-60,looseness=8]
+  node[elab, below, text=muted] {!bucket.found 原地旋转搜索（自环）} (find);
+
+\draw[->, muted, line width=0.6pt] (appr) to[out=-165,in=-105,looseness=8]
+  node[elab, left, text=muted] {比例趋近（自环）} (appr);
+
+\end{tikzpicture}
+\end{document}

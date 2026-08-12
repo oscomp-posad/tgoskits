@@ -1,0 +1,10 @@
+A sleek isometric 3D technical illustration of a computer-vision pipeline, on a very dark navy background (#0D1B2A). Five glowing isometric device "boards" stand in a left-to-right row, each on a thin isometric base plate, rendered with fine teal (#2DD4BF) edge lines and subtle amber (#F59E0B) internal accents, no photorealism, clean glossy dark surfaces. Between adjacent boards flows a horizontal stream of small square data packets (teal fading to amber), showing data moving down the pipeline. Under each board is a LARGE crisp teal sans-serif label. High resolution, generous spacing.
+
+The five boards, left to right, with the label under each:
+1) a compact machine-vision CAMERA with a round lens — label "相机".
+2) a decoder chip: a square silicon die with a fine pixel grid glowing on top and rows of golden pins on two sides — label "JPU 解码".
+3) a scaling board: a rectangular image frame with a smaller inset frame and diagonal resize arrows, plus a tiny row of color swatches — label "RGA 缩放与转换".
+4) a neural-network board: a graph of glowing amber nodes connected by teal edges in several layers — label "NPU 推理".
+5) a RESULT board that clearly shows a tennis-picking robot scene: a green court floor in isometric perspective with THREE bright yellow-green TENNIS BALLS scattered on it, each tightly enclosed by a thin teal rectangular detection bounding box with a small corner tag, and one dark collection bucket at the back corner — label "检测结果".
+
+Make the last board unmistakably tennis balls on a court with detection boxes, NOT cars or pedestrians or a street. All text crisp and correctly spelled. Balanced isometric composition.

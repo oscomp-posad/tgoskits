@@ -1,0 +1,33 @@
+\documentclass[border=12pt]{standalone}
+\usepackage{ctex}\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,fit,backgrounds,shapes.geometric,calc}
+\definecolor{navy}{HTML}{0D1B2A}\definecolor{teal}{HTML}{2DD4BF}\definecolor{amber}{HTML}{F59E0B}\definecolor{ink}{HTML}{EEF3F8}\definecolor{muted}{HTML}{8AA0B4}
+\setCJKmainfont{Songti SC}\setCJKsansfont{Heiti SC}
+\begin{document}
+\begin{tikzpicture}[show background rectangle,background rectangle/.style={fill=navy},
+  font=\sffamily,>=Stealth, every node/.style={text=ink},
+  loopnode/.style={draw=teal, line width=0.7pt, rounded corners=5pt, minimum width=3.0cm,
+                    minimum height=1.3cm, align=center, font=\sffamily\small, text width=2.9cm}]
+
+\node[font=\sffamily\bfseries\large] at (0,6.1) {拾球回路闭环};
+
+\node[loopnode] (cam)  at (0,5.0)          {相机\\（latest-frame latch）};
+\node[loopnode] (perc) at (4.33,2.5)       {感知\\（BALL: YOLOv8 /\\ BUCKET: HSV，二选一）};
+\node[loopnode] (fsm)  at (4.33,-2.5)      {状态机};
+\node[loopnode] (disp) at (0,-5.0)         {dispatch\\（电机去重 + 机械臂）};
+\node[loopnode] (act)  at (-4.33,-2.5)     {底盘 / 机械臂};
+\node[loopnode] (env)  at (-4.33,2.5)      {环境};
+
+\draw[->, teal, line width=0.7pt] (cam)  -- (perc);
+\draw[->, teal, line width=0.7pt] (perc) -- (fsm);
+\draw[->, teal, line width=0.7pt] (fsm)  -- (disp);
+\draw[->, teal, line width=0.7pt] (disp) -- (act);
+\draw[->, teal, line width=0.7pt] (act)  -- (env);
+\draw[->, teal, line width=0.7pt] (env)  -- (cam);
+
+% bypass: no new frame -> controller.tick() drives the state machine directly
+\draw[->, amber, line width=0.7pt, dashed] (cam) to[bend right=48]
+  node[midway, sloped, font=\sffamily\tiny, text=amber, fill=navy, inner sep=1pt] {1ms 控制 tick（无新帧旁路感知）} (fsm);
+
+\end{tikzpicture}
+\end{document}

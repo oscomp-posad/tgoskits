@@ -1,0 +1,10 @@
+A clean flat technical vector diagram, dark navy background (#0D1B2A), off-white text (#EEF3F8). Two-color semantic scheme, applied strictly: teal (#2DD4BF) ONLY for the kernel interfaces this team added; muted gray (#8AA0B4) for pre-existing userspace components. Crisp high-resolution, no photorealism, thin precise strokes, generous spacing, LARGE readable sans-serif labels. It depicts a Wayland compositor on a kernel.
+
+Layout:
+- TOP: two MUTED-GRAY client boxes side by side, "GTK4 客户端" and "Xwayland (xeyes)". A downward arrow from them into the center; label the arrow in TEAL "AF_UNIX 套接字 · fd 传递" (this is a kernel-provided interface, so teal).
+- CENTER: one large MUTED-GRAY box (existing userspace) labeled on two lines: "Weston 合成器" and a smaller "epoll / timerfd 事件循环" (render the words "epoll / timerfd" in teal since they are kernel interfaces, but the Weston box itself is gray).
+- LEFT: an input-discovery cluster feeding the center. A teal kernel node "evdev /dev/input/eventN" and a muted-gray box "libudev (sysfs)" BOTH point with arrows into a single muted-gray box "libinput"; then one arrow goes from "libinput" rightward into the Weston box. (So events flow evdev→libinput→Weston, with libudev as a side discovery input into libinput.) A small teal label above the cluster: "输入发现".
+- BOTTOM: a downward arrow from the Weston box to a TEAL kernel box "DRM/KMS · /dev/dri/card0", then an arrow to a MUTED-GRAY box "显示器".
+- A legend in a corner: a teal square "本队新增内核接口" and a gray square "既有用户态".
+
+Color rule to obey exactly: Weston, libinput, libudev, GTK4 客户端, Xwayland, 显示器 = muted gray. evdev /dev/input/eventN, DRM/KMS /dev/dri/card0, AF_UNIX, epoll, timerfd = teal. All text crisp and correctly spelled. Balanced composition, plenty of whitespace.

@@ -1,0 +1,114 @@
+% beamerthemeposad.sty - Posad 决赛进展汇报 dark theme
+% Navy background, ink text, teal/amber accents, Songti(body)/Heiti(headings) CJK.
+% Persistent top nav bar (4 segments) + "听众已知 → 本页推进" footer.
+\ProvidesPackage{beamerthemeposad}[2026/08/12 Posad dark deck theme]
+\mode<presentation>
+
+\RequirePackage{tikz}
+\RequirePackage{colortbl}
+
+% ---- Palette (defined here per spec; hexes mirror ../style/tokens.tex) ----
+\definecolor{navy}{HTML}{0D1B2A}
+\definecolor{teal}{HTML}{2DD4BF}
+\definecolor{amber}{HTML}{F59E0B}
+\definecolor{ink}{HTML}{EEF3F8}
+\definecolor{muted}{HTML}{8AA0B4}
+
+% \abl{} marks board-pending (ablation) values, used by ../data/numbers.tex.
+\providecommand{\abl}[1]{{\color{amber}#1}}
+
+% ---- Fonts: Songti SC body, Heiti SC headings (via \sffamily) ----
+\usefonttheme{professionalfonts}
+\setCJKmainfont{Songti SC}
+\setCJKsansfont{Heiti SC}
+
+% ---- Colors ----
+\setbeamercolor{background canvas}{bg=navy}
+\setbeamercolor{normal text}{fg=ink,bg=navy}
+\setbeamercolor{alerted text}{fg=amber}
+\setbeamercolor{structure}{fg=teal}
+\setbeamercolor{frametitle}{fg=teal,bg=navy}
+\setbeamercolor{title}{fg=ink,bg=navy}
+\setbeamercolor{itemize item}{fg=teal}
+\setbeamercolor{itemize subitem}{fg=amber}
+\setbeamercolor{enumerate item}{fg=teal}
+\setbeamercolor{block title}{fg=navy,bg=teal}
+\setbeamercolor{block body}{fg=ink,bg=navy}
+\setbeamercolor{caption name}{fg=muted}
+
+\setbeamerfont{frametitle}{series=\bfseries}
+\setbeamerfont{footline}{size=\scriptsize}
+\setbeamertemplate{navigation symbols}{}
+\setbeamertemplate{caption}[numbered]
+\setbeamercolor{caption}{fg=muted}
+
+% booktabs / colortbl rules must be visible on navy
+\arrayrulecolor{muted}
+
+% teal itemize markers, tighter list spacing
+\setbeamertemplate{itemize item}{\small\raise0.15ex\hbox{\color{teal}$\blacktriangleright$}}
+\setbeamertemplate{itemize subitem}{\footnotesize\raise0.1ex\hbox{\color{amber}\textbullet}}
+% dense data slides pack 4 bullets in a half column; shrink list body + tighten
+% inter-item spacing so nothing spills off the bottom of the slide.
+\setbeamertemplate{itemize/enumerate body begin}{\small}
+\setbeamertemplate{itemize/enumerate body end}{}
+\setbeamertemplate{itemize/enumerate subbody begin}{\footnotesize}
+\setbeamertemplate{itemize/enumerate subbody end}{}
+\setlength{\parskip}{0pt}
+
+% ---- Navigation state: \navsegment{n}, 0 = cover/toc (no chrome) ----
+\gdef\posad@nav{0}
+% \navsegment{n}: set active nav segment AND reset the per-frame footer line.
+% Called early in each content-frame body, before any \advance{}{} footer.
+\newcommand{\navsegment}[1]{\gdef\posad@nav{#1}\gdef\posadKnown{}\gdef\posadNext{}}
+
+\newcommand{\posad@navcell}[2]{%
+  \ifnum\posad@nav=#1\relax
+    \tikz[baseline]{\node[fill=teal,text=navy,rounded corners=2pt,inner xsep=6pt,inner ysep=2pt,font=\sffamily\bfseries]{#2};}%
+  \else
+    {\sffamily\color{muted}#2}%
+  \fi}
+
+\setbeamertemplate{headline}{%
+  \ifnum\posad@nav>0\relax
+    \vskip4pt
+    \hbox to\paperwidth{\hskip1.4em\footnotesize
+      \posad@navcell{1}{背景与目标}\hfill
+      \posad@navcell{2}{系统能力与性能}\hfill
+      \posad@navcell{3}{增量与展望}\hfill
+      \posad@navcell{4}{方法与复现}%
+      \hskip1.4em}%
+    \vskip4pt
+    {\color{muted}\hbox to\paperwidth{\hskip1.2em\vrule height0.4pt width\dimexpr\paperwidth-2.4em\relax\hskip1.2em}}%
+    \vskip2pt
+  \fi}
+
+% ---- Frametitle: Heiti, teal, underline; also resets the footer line ----
+\setbeamertemplate{frametitle}{%
+  \vskip13pt
+  \begingroup\sffamily\bfseries\color{teal}\large\insertframetitle\endgroup
+  \vskip4pt{\color{teal}\hbox to\dimexpr\paperwidth-2.4em\relax{\vrule height1pt width\dimexpr\paperwidth-2.4em\relax}}%
+  \vskip2pt}
+
+% ---- Footer: "听众已知 X  →  本页推进 Y"  +  page number ----
+% \advance{已知}{推进} - guarded so it only intercepts the brace form; the TeX
+% primitive (\global\advance ..., \stepcounter, ...) still works untouched.
+% Installed at begin-document so the kernel's own math-setup \advance scans
+% (\hexnumber@ etc.) run against the untouched primitive first.
+\gdef\posadKnown{}\gdef\posadNext{}
+\long\def\posad@setfoot#1#2{\gdef\posadKnown{#1}\gdef\posadNext{#2}}
+\AtBeginDocument{%
+  \let\PosadPrimAdvance\advance
+  \protected\def\advance{\@ifnextchar\bgroup\posad@setfoot\PosadPrimAdvance}%
+}
+
+% Footer: a minimal page number only. (The per-slide "听众已知 → 本页推进" takeaway line
+% was removed; the \advance{}{} interception below still absorbs those calls harmlessly.)
+\setbeamertemplate{footline}{%
+  \ifnum\posad@nav>0\relax
+    \vskip-3pt
+    \hbox to\paperwidth{\hskip1.4em\scriptsize\color{muted}\hfill \insertframenumber\hskip1.4em}%
+    \vskip5pt
+  \fi}
+
+\mode<all>

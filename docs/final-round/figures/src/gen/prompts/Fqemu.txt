@@ -1,0 +1,12 @@
+A clean flat technical vector diagram, dark navy background (#0D1B2A), off-white text (#EEF3F8), teal accent (#2DD4BF for new parts) and muted gray (#8AA0B4 for existing parts). Crisp high-resolution, no photorealism, no gradients, thin precise strokes, generous spacing, sans-serif labels. It depicts a layered software stack (horizontal layers stacked vertically) for a functional device simulator.
+
+Five horizontal layers, top to bottom, each a wide rounded-rectangle band with a label:
+1. TOP (muted gray outline): "访客：未改动的 RKNN 运行时 librknnrt"
+2. (teal outline): "RKNPU 设备模型：MMIO · 中断 · 复位 · 设备树绑定"
+3. (teal outline) a band containing six small evenly-spaced boxes in a row, each labeled exactly: "PC"  "CNA"  "CORE"  "DPU"  "DPU-RDMA"  "PPU"; and a small label at the band's left edge "命令流水线"
+4. (teal outline): "IOMMU 翻译（MemoryRegion） · 多核会合 · 逐推理 profiling"
+5. BOTTOM (muted gray outline): "QEMU 主线：设备模型框架 · qtest"
+
+Thin vertical connector lines linking adjacent layers down the center. A small legend in a corner with two swatches: a teal square labeled "本队新增" and a gray square labeled "既有".
+
+All text crisp and correctly spelled. Balanced, symmetric composition.

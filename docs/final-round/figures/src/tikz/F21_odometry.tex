@@ -1,0 +1,57 @@
+\documentclass[border=12pt]{standalone}
+\usepackage{ctex}\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,fit,backgrounds,shapes.geometric,calc}
+\definecolor{navy}{HTML}{0D1B2A}\definecolor{teal}{HTML}{2DD4BF}\definecolor{amber}{HTML}{F59E0B}\definecolor{ink}{HTML}{EEF3F8}\definecolor{muted}{HTML}{8AA0B4}
+\setCJKmainfont{Songti SC}\setCJKsansfont{Heiti SC}
+\begin{document}
+\begin{tikzpicture}[show background rectangle,background rectangle/.style={fill=navy},
+  font=\sffamily,>=Stealth, every node/.style={text=ink}]
+
+\node[font=\sffamily\bfseries\large] at (3.2,7.6) {里程计回桶示意};
+
+% ---- reference axes at the anchor (muted, dashed) ----
+\draw[muted, line width=0.4pt, dashed] (-2.6,0) -- (6.4,0);
+\draw[muted, line width=0.4pt, dashed] (0,-2.6) -- (0,6.0);
+\node[font=\sffamily\tiny, text=muted] at (6.6,0) {x};
+\node[font=\sffamily\tiny, text=muted] at (0,6.2) {y};
+
+% ---- return_stop_radius ring around the anchor ----
+\draw[muted, line width=0.5pt, dashed] (0,0) circle (1.1);
+\node[font=\sffamily\tiny, text=muted, anchor=north west] at (0.78,-0.78) {return\_stop\_radius = 0.5 m};
+
+% ---- anchor = bucket = origin (reset at deposit) ----
+\filldraw[draw=teal, fill=navy, line width=1pt] (0,0) circle (5pt);
+\node[font=\sffamily\small\bfseries, text=teal, anchor=north east, text width=3.4cm, align=right]
+  at (-0.35,-0.35) {桶 = 原点\\（reset\_anchor，投放时置零）};
+
+% ---- robot pose ----
+\coordinate (robot) at (6.0,4.8);
+\filldraw[draw=ink, fill=navy, line width=1pt] (robot) circle (4.5pt);
+\node[font=\sffamily\small\bfseries, anchor=south, yshift=8pt] at (robot) {机器人 $(x,y,\mathrm{heading})$};
+
+% robot current heading arrow (points away from the anchor: heading error scenario)
+\draw[->, ink, line width=0.8pt] (robot) -- ++(250:2.0) coordinate (hdgtip);
+\node[font=\sffamily\tiny, text=ink, anchor=north west, xshift=2pt, yshift=-2pt] at (hdgtip) {当前 heading};
+
+% distance_to_anchor vector: robot -> anchor
+\draw[->, teal, line width=0.9pt] (robot) -- (0,0);
+\node[font=\sffamily\footnotesize, text=teal, fill=navy, inner sep=1pt, anchor=west, xshift=3pt]
+  at ($(robot)!0.5!(0,0)$) {distance\_to\_anchor = hypot(x,y)};
+
+% bearing_to_anchor: small angle arc between heading and the robot->anchor line
+\draw[amber, line width=0.7pt] ($(robot)+(219:0.7)$) arc[start angle=219, end angle=250, radius=0.7];
+\node[font=\sffamily\tiny, text=amber, anchor=west]
+  at ($(robot)+(0:1.6)$) {bearing\_to\_anchor = atan2($-y$,$-x$)};
+\draw[amber, line width=0.4pt] ($(robot)+(234:0.7)$) -- ($(robot)+(0:1.55)$);
+
+% ---- vision override: local annotation near the anchor, upper-left quadrant ----
+\draw[->, amber, line width=1pt, dashed] (-2.0,2.6) to[bend right=15] (-0.25,0.3);
+\node[font=\sffamily\small\bfseries, text=amber, anchor=south east, text width=4.0cm, align=right]
+  at (-2.1,2.75) {视觉抢占：bucket.found 时\\立即接管，跳转 FIND\_BUCKET};
+
+% ---- footer note ----
+\node[font=\sffamily\footnotesize, text=muted, align=center, text width=11.5cm] at (2.0,-3.1)
+  {return\_stop\_radius 0.5 m \quad$\cdot$\quad return\_timeout\_ms 15000 (15 s) \quad$\cdot$\quad 超阈值/超时同样回退 FIND\_BUCKET};
+
+\end{tikzpicture}
+\end{document}

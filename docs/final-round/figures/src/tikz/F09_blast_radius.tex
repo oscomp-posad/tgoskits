@@ -1,0 +1,45 @@
+\documentclass[border=12pt]{standalone}
+\usepackage{ctex}\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,fit,backgrounds,shapes.geometric,calc}
+\definecolor{navy}{HTML}{0D1B2A}\definecolor{teal}{HTML}{2DD4BF}\definecolor{amber}{HTML}{F59E0B}\definecolor{ink}{HTML}{EEF3F8}\definecolor{muted}{HTML}{8AA0B4}
+\setCJKmainfont{Songti SC}\setCJKsansfont{Heiti SC}
+\begin{document}
+\begin{tikzpicture}[show background rectangle,background rectangle/.style={fill=navy},
+  font=\sffamily,>=Stealth, every node/.style={text=ink},
+  os/.style={draw=teal, line width=0.7pt, rounded corners=4pt, minimum width=3.0cm, minimum height=1.0cm, align=center, font=\sffamily\small},
+  arch/.style={draw=muted, line width=0.6pt, rounded corners=4pt, minimum width=2.6cm, minimum height=0.9cm, align=center, font=\sffamily\small}]
+
+\node[font=\sffamily\footnotesize, text=muted] at (0,4.6) {消费者（三大系统）};
+\node[font=\sffamily\footnotesize, text=muted] at (0,-3.0) {目标架构（四种）};
+
+% consumers (top row)
+\node[os] (arceos)  at (-4.2,3.7) {ArceOS};
+\node[os] (starry)  at ( 0.0,3.7) {StarryOS};
+\node[os] (axvisor) at ( 4.2,3.7) {Axvisor};
+
+% center: the fix
+\node[draw=amber, line width=1pt, rounded corners=6pt, fill=navy, minimum width=7.4cm,
+      minimum height=2.0cm, align=center, text width=6.6cm, font=\sffamily\bfseries\small] (fix) at (0,1.0)
+  {页表/TLB 修复\\[2pt] \small\normalfont（共享多架构 crate: page\_table\_multiarch, page\_table\_entry）};
+
+% arches (bottom row)
+\node[arch] (aarch64) at (-5.4,-1.9) {aarch64};
+\node[arch] (riscv64) at (-1.8,-1.9) {riscv64};
+\node[arch] (x86_64)  at ( 1.8,-1.9) {x86\_64};
+\node[arch] (loong)   at ( 5.4,-1.9) {loongarch64};
+
+% arrows: fix -> consumers
+\foreach \t in {arceos, starry, axvisor}{
+  \draw[->, teal, line width=0.7pt] (fix.north) -- (\t.south);
+}
+
+% arrows: fix -> arches
+\foreach \t in {aarch64, riscv64, x86_64, loong}{
+  \draw[->, muted, line width=0.6pt] (fix.south) -- (\t.north);
+}
+
+\node[font=\sffamily\footnotesize, text=amber, align=center] at (0,-3.7)
+  {一处底层修复 $\Rightarrow$ 3 个系统 $\times$ 4 种架构同时受益};
+
+\end{tikzpicture}
+\end{document}

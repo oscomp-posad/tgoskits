@@ -1,0 +1,54 @@
+{
+  "chart_id": "F04",
+  "name": "F04_ladder",
+  "title_zh": "频率保持下的 sysbench cpu 8 线程对等阶梯",
+  "subtitle_zh": "events/s，Linux 基线对比（频率保持，逐项消融）",
+  "unit_zh": "事件数/秒 (ev/s)",
+  "benchmark": "sysbench cpu --threads=8 --cpu-max-prime=20000（DVFS 保持开启，频率恒定）",
+  "linux_baseline": {
+    "label_zh": "Linux 基线",
+    "value": 5222,
+    "abl": false
+  },
+  "bars": [
+    {
+      "key": "floor",
+      "label_zh": "单核地板",
+      "sublabel_zh": "(放置关)",
+      "value": 361,
+      "series": "muted",
+      "abl": false
+    },
+    {
+      "key": "distribute",
+      "label_zh": "+ 跨核分发",
+      "sublabel_zh": "",
+      "value": 4987,
+      "series": "teal",
+      "abl": false
+    },
+    {
+      "key": "occupancy",
+      "label_zh": "+ 占用放置",
+      "sublabel_zh": "",
+      "value": 4995,
+      "series": "amber",
+      "abl": false
+    },
+    {
+      "key": "ship",
+      "label_zh": "出厂",
+      "sublabel_zh": "(含唤醒铺开)",
+      "value": 4987,
+      "series": "teal",
+      "abl": false
+    }
+  ],
+  "legend_zh": {
+    "muted": "单核地板",
+    "teal": "已合并 PR",
+    "amber": "已验证，PR 在审"
+  },
+  "footnote_zh": "注：单独启用 wake_affine 就近唤醒会因并发线程聚拢而将 8 线程吞吐降至 3523，出厂配置的唤醒铺开将其恢复至 4987。",
+  "note_zh": "全部为板上实测中位值（3 次重复）；频率保持开启，用于隔离放置与调度带来的增益。"
+}
