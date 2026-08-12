@@ -4,9 +4,48 @@ pub(crate) fn probe_all_devices() {
         warn!("rdrive is not initialized; skip platform device probe");
         return;
     }
+    install_parallel_probe_executor();
     rdrive::probe_all(false)
         .unwrap_or_else(|err| panic!("failed to probe platform devices: {err:?}"));
 }
+
+/// Let rdrive probe independent devices concurrently.
+///
+/// A single driver often matches several independent instances — e.g. the four
+/// RK3588 PCIe host controllers, each of which blocks ~0.7s on link training —
+/// which rdrive otherwise probes one after another on the boot task. Installing
+/// this executor runs such a batch as spawned tasks and joins them, so the
+/// waits overlap across the idle secondary CPUs. Ordering between *different*
+/// drivers (which encodes probe dependencies) is unchanged: rdrive only batches
+/// mutually-independent probes and joins each batch before the next.
+///
+/// Generic and opt-in-by-capability: only installed when SMP is built (there is
+/// something to overlap onto), and rdrive falls back to serial probing when no
+/// executor is present, so nothing changes for platforms without it.
+#[cfg(all(feature = "multitask", feature = "smp"))]
+fn install_parallel_probe_executor() {
+    fn exec(jobs: alloc::vec::Vec<alloc::boxed::Box<dyn FnOnce() + Send>>) {
+        // Nothing to parallelize for a single job — run it inline and skip the
+        // spawn/join overhead.
+        if jobs.len() < 2 {
+            for job in jobs {
+                job();
+            }
+            return;
+        }
+        let handles: alloc::vec::Vec<_> = jobs
+            .into_iter()
+            .map(|job| ax_task::spawn(move || job()))
+            .collect();
+        for handle in handles {
+            handle.join();
+        }
+    }
+    rdrive::set_probe_executor(exec);
+}
+
+#[cfg(not(all(feature = "multitask", feature = "smp")))]
+fn install_parallel_probe_executor() {}
 
 #[cfg(feature = "display")]
 pub(crate) fn init_display() {

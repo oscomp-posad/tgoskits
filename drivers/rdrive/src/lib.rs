@@ -229,6 +229,35 @@ pub fn probe_all(stop_if_fail: bool) -> Result<(), ProbeError> {
     Ok(())
 }
 
+/// A parallel executor for concurrent device probing.
+///
+/// Given a batch of mutually-independent probe jobs it must run all of them and
+/// return only once every job has completed. The kernel installs one (backed by
+/// its task scheduler) via [`set_probe_executor`]; with none installed the jobs
+/// run serially in order, so behavior is unchanged for platforms that do not
+/// install an executor.
+pub type ProbeExecutor = fn(jobs: alloc::vec::Vec<alloc::boxed::Box<dyn FnOnce() + Send>>);
+
+static PROBE_EXECUTOR: Once<ProbeExecutor> = Once::new();
+
+/// Install the parallel probe executor (idempotent; the first install wins).
+pub fn set_probe_executor(exec: ProbeExecutor) {
+    PROBE_EXECUTOR.call_once(|| exec);
+}
+
+/// Run a batch of independent probe jobs — concurrently if an executor was
+/// installed, otherwise serially in order. Returns once all jobs have finished.
+pub(crate) fn run_probe_jobs(jobs: alloc::vec::Vec<alloc::boxed::Box<dyn FnOnce() + Send>>) {
+    match PROBE_EXECUTOR.get() {
+        Some(exec) => exec(jobs),
+        None => {
+            for job in jobs {
+                job();
+            }
+        }
+    }
+}
+
 /// Returns all registered devices that implement `T`.
 ///
 /// Not hard-IRQ safe: this takes the global rdrive registry lock and allocates

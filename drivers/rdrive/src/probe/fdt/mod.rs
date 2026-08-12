@@ -1,6 +1,8 @@
 use alloc::{
+    boxed::Box,
     collections::{BTreeMap, btree_map::Entry, btree_set::BTreeSet},
     string::{String, ToString},
+    sync::Arc,
     vec::Vec,
 };
 use core::ptr::NonNull;
@@ -1172,7 +1174,7 @@ impl System {
         }
     }
 
-    fn get_fdt_match_nodes<'a>(&'a self, register: &DriverRegister) -> Vec<ProbeFdtInfo<'a>> {
+    fn get_fdt_match_nodes(&'static self, register: &DriverRegister) -> Vec<ProbeFdtInfo<'static>> {
         let mut out = Vec::new();
         let mut matched_nodes = BTreeSet::new();
         for node in self.fdt.all_nodes() {
@@ -1205,11 +1207,11 @@ impl System {
         out
     }
 
-    fn get_fdt_match_nodes_by_fdt_order<'a>(
-        &'a self,
+    fn get_fdt_match_nodes_by_fdt_order(
+        &'static self,
         registers: &[DriverRegister],
         priority: ProbePriority,
-    ) -> Vec<ProbeFdtInfo<'a>> {
+    ) -> Vec<ProbeFdtInfo<'static>> {
         let mut out = Vec::new();
         for node in self.ordered_probe_nodes(priority) {
             if matches!(node.as_node().status(), Some(Status::Disabled)) {
@@ -1248,7 +1250,7 @@ impl System {
         out
     }
 
-    fn ordered_probe_nodes(&self, priority: ProbePriority) -> Vec<NodeType<'_>> {
+    fn ordered_probe_nodes(&'static self, priority: ProbePriority) -> Vec<NodeType<'static>> {
         let nodes = self.fdt.all_nodes().collect::<Vec<_>>();
         if priority == ProbePriority::INTC {
             parent_first_interrupt_controllers(nodes)
@@ -1258,74 +1260,160 @@ impl System {
     }
 
     fn probe_register(
-        &self,
+        &'static self,
         register: &DriverRegister,
     ) -> Result<Vec<Result<(), OnProbeError>>, ProbeError> {
         let node_ls = self.get_fdt_match_nodes(register);
-        self.probe_fdt_matches(node_ls)
+        // No priority context on this (FDT-dead) path — probe serially.
+        self.probe_fdt_matches(node_ls, false)
     }
 
     fn probe_registers_by_fdt_order(
-        &self,
+        &'static self,
         registers: &[DriverRegister],
         priority: ProbePriority,
     ) -> Result<Vec<Result<(), OnProbeError>>, ProbeError> {
         let node_ls = self.get_fdt_match_nodes_by_fdt_order(registers, priority);
-        self.probe_fdt_matches(node_ls)
+        // INTC nodes carry parent-before-child ordering (cascaded controllers may
+        // share a driver), so they must stay serial; everything else can overlap.
+        self.probe_fdt_matches(node_ls, priority != ProbePriority::INTC)
     }
 
     fn probe_fdt_matches(
-        &self,
-        node_ls: Vec<ProbeFdtInfo<'_>>,
+        &'static self,
+        node_ls: Vec<ProbeFdtInfo<'static>>,
+        parallel: bool,
     ) -> Result<Vec<Result<(), OnProbeError>>, ProbeError> {
-        let mut out = Vec::new();
-        for node_info in node_ls {
-            let node_id = node_info.node.id();
-            if self.populated_nodes.lock().contains(&node_id) {
-                continue;
-            }
-            let node = node_info.node;
-            let node_phandle = node.as_node().phandle();
-            let id = self.new_device_id(node_phandle);
+        // `OnProbeError::Other` wraps a non-`Send` `Box<dyn Error>`, so a spawned
+        // job cannot return an `OnProbeError`. Reduce the resource-prep + probe
+        // outcome to this `Send` form inside the job, then rebuild the
+        // `OnProbeError` in the serial recording phase. `NotMatch` — the only
+        // outcome callers treat specially — is preserved exactly.
+        enum JobOutcome {
+            Ok,
+            NotMatch,
+            Err(String),
+        }
 
-            let irq_parent = node
-                .interrupt_parent()
-                .filter(|p| Some(*p) != node_phandle)
-                .and_then(|p| self.phandle_2_device_id.get(&p).copied());
+        struct Pending {
+            node_id: NodeId,
+            path: String,
+            id: DeviceId,
+            result: Arc<Mutex<Option<JobOutcome>>>,
+        }
 
-            let phandle_map = self.phandle_2_device_id.clone();
+        let mut out = Vec::with_capacity(node_ls.len());
+        let mut i = 0;
+        while i < node_ls.len() {
+            // Cut a maximal run of consecutive nodes matched by the SAME driver
+            // (same `on_probe` fn pointer): those instances are mutually
+            // independent (e.g. the four RK3588 PCIe hosts) and can probe
+            // concurrently. When `!parallel` (INTC — cascaded controllers may
+            // share a driver AND depend on parent-first order), force runs of one,
+            // which is byte-for-byte the previous serial behaviour.
+            let run_end = if parallel {
+                let key = node_ls[i].on_probe as usize;
+                let mut j = i + 1;
+                while j < node_ls.len() && node_ls[j].on_probe as usize == key {
+                    j += 1;
+                }
+                j
+            } else {
+                i + 1
+            };
 
-            debug!("Probe [{}]->[{}]", node.name(), node_info.name);
-            let res = apply_assigned_clocks(node)
-                .and_then(|()| apply_power_domains(node))
-                .and_then(|()| apply_default_pinctrl(node))
-                .and_then(|()| {
-                    let descriptor = Descriptor {
-                        name: node_info.name,
-                        device_id: id,
-                        irq_parent,
+            // Serial pre-phase: assign device ids and build the (Send) jobs. This
+            // touches shared maps (`populated_nodes`, `new_device_id`) and must
+            // stay ordered; the slow `apply_*` + `on_probe` work is deferred to the
+            // job.
+            let mut jobs: Vec<Box<dyn FnOnce() + Send>> = Vec::new();
+            let mut pending: Vec<Pending> = Vec::new();
+            for node_info in &node_ls[i..run_end] {
+                let node = node_info.node;
+                let node_id = node.id();
+                if self.populated_nodes.lock().contains(&node_id) {
+                    continue;
+                }
+                let node_phandle = node.as_node().phandle();
+                let id = self.new_device_id(node_phandle);
+                let irq_parent = node
+                    .interrupt_parent()
+                    .filter(|p| Some(*p) != node_phandle)
+                    .and_then(|p| self.phandle_2_device_id.get(&p).copied());
+                let phandle_map = self.phandle_2_device_id.clone();
+                let name = node_info.name;
+                let on_probe = node_info.on_probe;
+                let path = node.path();
+
+                debug!("Probe [{}]->[{}]", node.name(), name);
+
+                let result: Arc<Mutex<Option<JobOutcome>>> = Arc::new(Mutex::new(None));
+                let result_job = result.clone();
+                let send_node = SendNode(node);
+                jobs.push(Box::new(move || {
+                    let SendNode(node) = send_node;
+                    let res = apply_assigned_clocks(node)
+                        .and_then(|()| apply_power_domains(node))
+                        .and_then(|()| apply_default_pinctrl(node))
+                        .and_then(|()| {
+                            let descriptor = Descriptor {
+                                name,
+                                device_id: id,
+                                irq_parent,
+                            };
+                            (on_probe)(ProbeFdt::new(
+                                FdtInfo {
+                                    node,
+                                    phandle_2_device_id: phandle_map,
+                                },
+                                PlatformDevice::new(descriptor),
+                            ))
+                        });
+                    let outcome = match res {
+                        Ok(()) => JobOutcome::Ok,
+                        Err(OnProbeError::NotMatch) => JobOutcome::NotMatch,
+                        Err(e) => JobOutcome::Err(alloc::format!("{e}")),
                     };
-
-                    (node_info.on_probe)(ProbeFdt::new(
-                        FdtInfo {
-                            node,
-                            phandle_2_device_id: phandle_map,
-                        },
-                        PlatformDevice::new(descriptor),
-                    ))
+                    *result_job.lock() = Some(outcome);
+                }));
+                pending.push(Pending {
+                    node_id,
+                    path,
+                    id,
+                    result,
                 });
-
-            if res.is_ok() {
-                self.populated_paths.lock().insert(node.path(), id);
-                self.populated_nodes.lock().insert(node_id);
             }
 
-            out.push(res);
+            crate::run_probe_jobs(jobs);
+
+            // Serial post-phase: record results in original order.
+            for p in pending {
+                let outcome = p.result.lock().take().expect("probe job did not run");
+                let res = match outcome {
+                    JobOutcome::Ok => {
+                        self.populated_paths.lock().insert(p.path, p.id);
+                        self.populated_nodes.lock().insert(p.node_id);
+                        Ok(())
+                    }
+                    JobOutcome::NotMatch => Err(OnProbeError::NotMatch),
+                    JobOutcome::Err(msg) => Err(OnProbeError::other(msg)),
+                };
+                out.push(res);
+            }
+
+            i = run_end;
         }
 
         Ok(out)
     }
 }
+
+/// A `NodeType` handed to a probe job. Sound because the FDT blob is immutable
+/// after init and lives `'static`, so distinct nodes read concurrently on other
+/// CPUs never race.
+struct SendNode(NodeType<'static>);
+// SAFETY: see the doc comment above.
+unsafe impl Send for SendNode {}
 
 fn parent_first_interrupt_controllers(nodes: Vec<NodeType<'_>>) -> Vec<NodeType<'_>> {
     let mut pending = nodes;
