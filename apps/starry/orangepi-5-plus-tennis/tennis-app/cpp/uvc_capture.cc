@@ -43,7 +43,13 @@ static bool load_symbol(void *lib, const char *name, void **out)
 
 bool load_uvc_api(UvcApi *api)
 {
-    const char *candidates[] = {"libuvc.so", "/usr/local/lib/libuvc.so", "/usr/lib/aarch64-linux-gnu/libuvc.so", NULL};
+    const char *candidates[] = {
+        "libuvc.so",
+        "libuvc.so.0",
+        "/usr/local/lib/libuvc.so",
+        "/usr/lib/aarch64-linux-gnu/libuvc.so",
+        NULL,
+    };
     for (int i = 0; candidates[i] != NULL && api->lib == NULL; ++i) {
         api->lib = dlopen(candidates[i], RTLD_NOW | RTLD_LOCAL);
     }
@@ -432,11 +438,8 @@ static uvc_device *select_device(UvcApi *api, uvc_context *ctx, int index, const
     return selected;
 }
 
-// Camera bring-up split into two halves so a caller can overlap the (cheap,
-// control-transfer-only) open+negotiate with other work and start the ISO
-// streaming flood later. `uvc_begin_streaming` MUST follow a successful
-// `uvc_open_and_negotiate` on the same session.
-bool uvc_open_and_negotiate(UvcCaptureSession *session, const UvcCaptureOptions *options)
+bool uvc_open_and_negotiate(UvcCaptureSession *session,
+                            const UvcCaptureOptions *options)
 {
     const char *log_prefix = options->log_prefix != NULL ? options->log_prefix : "uvc";
     if (!load_uvc_api(&session->api)) {
@@ -519,13 +522,13 @@ bool uvc_open_and_negotiate(UvcCaptureSession *session, const UvcCaptureOptions 
     return true;
 }
 
-// Start the isochronous stream negotiated by `uvc_open_and_negotiate`. This is
-// what unleashes the xHCI URB-completion flood, so callers that must not perturb
-// concurrent work (e.g. rknn_init) call this only once that work is done.
-bool uvc_begin_streaming(UvcCaptureSession *session, const UvcCaptureOptions *options)
+bool uvc_begin_streaming(UvcCaptureSession *session,
+                         const UvcCaptureOptions *options)
 {
-    const char *log_prefix = options->log_prefix != NULL ? options->log_prefix : "uvc";
-    int ret = session->api.start_streaming(session->devh, &session->ctrl, frame_callback, &session->state, 0);
+    const char *log_prefix =
+        options->log_prefix != NULL ? options->log_prefix : "uvc";
+    int ret = session->api.start_streaming(
+        session->devh, &session->ctrl, frame_callback, &session->state, 0);
     if (ret < 0) {
         printf("uvc_start_streaming failed: %s\n", uvc_error(&session->api, ret));
         stop_uvc_capture(session);
@@ -536,9 +539,11 @@ bool uvc_begin_streaming(UvcCaptureSession *session, const UvcCaptureOptions *op
     return true;
 }
 
-bool start_uvc_capture(UvcCaptureSession *session, const UvcCaptureOptions *options)
+bool start_uvc_capture(UvcCaptureSession *session,
+                       const UvcCaptureOptions *options)
 {
-    return uvc_open_and_negotiate(session, options) && uvc_begin_streaming(session, options);
+    return uvc_open_and_negotiate(session, options) &&
+           uvc_begin_streaming(session, options);
 }
 
 void stop_uvc_capture(UvcCaptureSession *session)

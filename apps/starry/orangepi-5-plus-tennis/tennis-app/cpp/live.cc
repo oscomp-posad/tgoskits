@@ -5,10 +5,9 @@
 // Threading: libuvc runs its own capture thread and latches only the newest
 // frame; this file's main loop polls that latest-frame slot, runs
 // perception (YOLO or HSV, per the FSM's current mode), and the control step.
-// Because the actuator backend is non-blocking (TraceBackend), fusing
-// perception+control on one thread keeps frame->command latency at pure compute;
-// the separate control thread + multi-context NPU workers are deferred (they
-// matter once a *blocking* real UART backend lands). See README "Next steps".
+// Virtual backends are non-blocking. Real UART backends intentionally preserve
+// the reference controller's synchronous command/ACK and servo-settle behavior,
+// so live frame-to-command timing includes actuator latency when they are used.
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE // sched_setaffinity / sched_getcpu / CPU_SET
 #endif
@@ -19,16 +18,17 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <signal.h>
 #include <thread>
 
 #include "bench/metrics.h"
+#include "actuator/actuator_factory.h"
 #include "image_utils.h" // read_image (fixed-image validation)
 #include "profiling.h"    // apply_and_check_affinity / profiler_getcpu
 #include "controller.h"
 #include "perception/bucket_detector.h"
 #include "perception/camera.h"
 #include "perception/tennis_detector.h"
-#include "actuator/actuator_factory.h"
 #include "actuator/arm_backend.h"
 #include "actuator/motor_backend.h"
 #include "time_utils.h"
@@ -40,6 +40,37 @@ namespace tennis {
 
 static constexpr int64_t kIdleSleepNs = 1000000; // 1 ms when no new frame
 
+volatile sig_atomic_t g_termination_requested = 0;
+
+void request_termination(int) {
+    g_termination_requested = 1;
+}
+
+class TerminationSignals {
+public:
+    TerminationSignals() {
+        g_termination_requested = 0;
+        struct sigaction action {};
+        action.sa_handler = request_termination;
+        sigemptyset(&action.sa_mask);
+        int_installed_ = sigaction(SIGINT, &action, &old_int_) == 0;
+        term_installed_ = sigaction(SIGTERM, &action, &old_term_) == 0;
+    }
+
+    ~TerminationSignals() {
+        if (int_installed_) sigaction(SIGINT, &old_int_, nullptr);
+        if (term_installed_) sigaction(SIGTERM, &old_term_, nullptr);
+    }
+
+    bool requested() const { return g_termination_requested != 0; }
+
+private:
+    struct sigaction old_int_ {};
+    struct sigaction old_term_ {};
+    bool int_installed_ = false;
+    bool term_installed_ = false;
+};
+
 static Config make_cfg(const Options &opts) {
     Config cfg = opts.cfg;
     cfg.frame_w = opts.width;
@@ -50,67 +81,72 @@ static Config make_cfg(const Options &opts) {
 int run_live(const Options &opts) {
     // Cold-start clock: process start ~= run_live entry (arg parse is trivial).
     const int64_t t_proc_start = monotonic_ns();
-    // Serial-timeline anchor for time-to-first-inference measurement: emitted
-    // before any camera/model init so a host-timestamped console capture can
-    // split boot-to-exec from in-app cold start.
     std::printf("TENNIS_PROC_START\n");
     std::fflush(stdout);
     Config cfg = make_cfg(opts);
+    TerminationSignals termination;
 
+    Actuators actuators;
+    if (!make_actuators(opts, actuators)) return 1;
+    if (opts.arm_backend != "virtual") {
+        if (!actuators.arm->ready()) {
+            std::fprintf(stderr, "TENNIS_ERROR initial arm homing failed\n");
+            return 1;
+        }
+    }
+
+    // Camera open/negotiation uses USB control transfers and can overlap RKNN
+    // initialization. Actual streaming starts only after rknn_init: starting it
+    // earlier floods xHCI completions and substantially delays the model's
+    // producer/consumer handshakes on StarryOS.
     Camera cam;
-
-    // Load the model BEFORE starting the camera. rknn_init does hundreds of
-    // sequential producer/consumer thread handshakes; on StarryOS, running it
-    // while the UVC capture thread is already streaming (flooding xHCI URB
-    // completions) starves those handshakes and stretches a ~1.5s init to
-    // ~17s. The camera produces nothing useful during the model load anyway
-    // (frames would be dropped), so defer cam.start() until the model is up.
     TennisDetector det;
-
-    // Overlap camera open+format-negotiation (USB control transfers only, no ISO
-    // streaming yet) with the model load. They use independent subsystems (USB vs
-    // NPU) and the setup does NOT flood xHCI URB completions, so it runs on a
-    // helper thread while rknn_init proceeds. Streaming still starts AFTER the
-    // model is up (begin_streaming below) so the URB flood can't starve the
-    // hundreds of sequential rknn_init handshakes — the reason the camera was
-    // deferred in the first place.
-    bool cam_open_ok = false;
-    std::thread cam_setup([&] {
-        cam_open_ok =
-            cam.open_and_negotiate(opts.device, opts.width, opts.height, opts.fps);
+    bool camera_open_ok = false;
+    int64_t t_cap_open0 = 0;
+    int64_t t_cap_open1 = 0;
+    std::thread camera_setup([&] {
+        t_cap_open0 = monotonic_ns();
+        camera_open_ok = cam.open_and_negotiate(
+            opts.device, opts.width, opts.height, opts.fps);
+        t_cap_open1 = monotonic_ns();
     });
 
     const int64_t t_mdl0 = monotonic_ns();
     const bool model_ok =
         det.init(opts.model.c_str(), opts.label.c_str(), cfg, opts.core_mask);
     const int64_t t_mdl1 = monotonic_ns();
+    camera_setup.join();
 
-    // The camera open+negotiate overlapped the model load, so this join is
-    // typically instant. t_cap0 = t_mdl1 makes capture_init_ms measure only the
-    // post-model residual (join + streaming start), reflecting the hidden setup.
-    cam_setup.join();
-    const int64_t t_cap0 = t_mdl1;
     if (!model_ok) {
         std::fprintf(stderr, "rknn_init fail! model=%s\n", opts.model.c_str());
         return 1;
     }
-    if (!cam_open_ok || !cam.begin_streaming()) {
-        std::fprintf(stderr, "uvc open/stream failed: device %d\n", opts.device);
-        det.deinit();
+    if (!camera_open_ok) {
+        std::fprintf(stderr, "uvc open/negotiate failed: device %d\n",
+                     opts.device);
+        return 1;
+    }
+    const int64_t t_cap_stream0 = monotonic_ns();
+    if (!cam.begin_streaming()) {
+        std::fprintf(stderr, "uvc_start_streaming failed: device %d\n",
+                     opts.device);
         return 1;
     }
     const int64_t t_cap1 = monotonic_ns();
+    const double capture_init_ms =
+        ns_to_ms(t_cap_open1 - t_cap_open0) +
+        ns_to_ms(t_cap1 - t_cap_stream0);
 
-    BucketDetector bucket(cfg);
-    // Real hardware is the default (uart/pwm per opts); trace only with
-    // --virtual-actuators. Init fails hard so the robot never runs on stubs
-    // when hardware was expected.
-    Actuators actuators;
-    if (!make_actuators(opts, actuators)) {
-        std::fprintf(stderr, "TENNIS_ERROR actuator init failed\n");
-        det.deinit();
+    if (!cam.warm_up(opts.camera_warmup_frames,
+                     opts.camera_warmup_timeout_ms)) {
+        std::fprintf(stderr,
+                     "TENNIS_ERROR camera warmup timed out after %d ms\n",
+                     opts.camera_warmup_timeout_ms);
         return 1;
     }
+    if (termination.requested()) return 0;
+
+    BucketDetector bucket(cfg);
     Metrics metrics;
     metrics.reserve(static_cast<size_t>(opts.duration_sec * opts.fps) + 16);
     Controller controller(cfg, *actuators.motor, *actuators.arm, metrics,
@@ -123,9 +159,11 @@ int run_live(const Options &opts) {
     }
 
     std::printf("TENNIS_BENCH_BEGIN mode=live model=%s fps=%d duration_sec=%.3f "
-                "core_mask=%s virtual_actuators=%d profile=%d affinity=%s\n",
+                "core_mask=%s virtual_actuators=%d motor_backend=%s "
+                "arm_backend=%s profile=%d affinity=%s\n",
                 opts.model.c_str(), opts.fps, opts.duration_sec,
                 opts.core_mask.c_str(), uses_virtual_actuators(opts) ? 1 : 0,
+                opts.motor_backend.c_str(), opts.arm_backend.c_str(),
                 opts.profile ? 1 : 0,
                 opts.infer_affinity.empty() ? "none"
                                             : opts.infer_affinity.c_str());
@@ -142,16 +180,32 @@ int run_live(const Options &opts) {
     LatestFrame lf;
     int64_t capture_ts = 0;
     int64_t last_report = start;
+    int64_t last_frame = start;
     int64_t t_first_frame = 0, t_first_detect = 0, t_first_cmd = 0;
+    bool actuator_failed = false;
     // One persistent RGB buffer reused by frame_to_image every frame (avoids a
     // malloc/free + page-zero per frame); freed once after the loop.
     image_buffer_t img{};
 
-    while (monotonic_ns() < end) {
+    while (!termination.requested() && monotonic_ns() < end) {
         if (!cam.poll(lf, capture_ts)) {
+            const int64_t now = monotonic_ns();
+            if (!controller.tick(now)) {
+                actuator_failed = true;
+                break;
+            }
+            if (now - last_frame >
+                static_cast<int64_t>(opts.camera_watchdog_ms) * 1000000) {
+                std::fprintf(stderr,
+                             "TENNIS_ERROR camera produced no frame for %d ms\n",
+                             opts.camera_watchdog_ms);
+                actuator_failed = true;
+                break;
+            }
             sleep_ns(kIdleSleepNs);
             continue;
         }
+        last_frame = monotonic_ns();
 
         const int64_t pickup = monotonic_ns();
         const double queue_age_ms = ns_to_ms(pickup - capture_ts);
@@ -207,16 +261,16 @@ int run_live(const Options &opts) {
         d.detect_ts_ns = monotonic_ns();
         if (t_first_detect == 0) {
             t_first_detect = d.detect_ts_ns;
-            // First completed inference: the time-to-first-inference marker for
-            // host-timestamped console captures. ms_since_proc_start lets the
-            // in-app cold-start delta cross-check the serial-timeline delta.
             std::printf("TENNIS_FIRST_INFERENCE ms_since_proc_start=%.1f\n",
                         ns_to_ms(t_first_detect - t_proc_start));
             std::fflush(stdout);
         }
 
         const int64_t t_ctrl0 = monotonic_ns();
-        controller.process(d);
+        if (!controller.process(d)) {
+            actuator_failed = true;
+            break;
+        }
         const int64_t t_ctrl1 = monotonic_ns();
         if (t_first_cmd == 0) t_first_cmd = t_ctrl1;
 
@@ -240,6 +294,11 @@ int run_live(const Options &opts) {
         }
     }
 
+    if (!actuators.motor->standby()) actuator_failed = true;
+    if (termination.requested()) {
+        std::fprintf(stderr, "TENNIS_INFO termination requested; actuators stopped\n");
+    }
+
     if (img.virt_addr) std::free(img.virt_addr);
 
     const double dur = ns_to_ms(monotonic_ns() - start) / 1000.0;
@@ -248,9 +307,10 @@ int run_live(const Options &opts) {
 
     if (opts.profile) {
         ColdStart cold;
-        cold.capture_init_ms = ns_to_ms(t_cap1 - t_cap0);
+        cold.capture_init_ms = capture_init_ms;
         cold.model_init_ms = ns_to_ms(t_mdl1 - t_mdl0);
-        if (t_first_frame) cold.first_frame_wait_ms = ns_to_ms(t_first_frame - t_mdl1);
+        if (t_first_frame)
+            cold.first_frame_wait_ms = ns_to_ms(t_first_frame - t_cap1);
         if (t_first_detect && t_first_frame)
             cold.first_detection_ms = ns_to_ms(t_first_detect - t_first_frame);
         if (t_first_cmd && t_first_detect)
@@ -274,7 +334,7 @@ int run_live(const Options &opts) {
 
     cam.stop();
     det.deinit();
-    return 0;
+    return actuator_failed ? 1 : 0;
 }
 
 int run_test_uvc(const Options &opts) {

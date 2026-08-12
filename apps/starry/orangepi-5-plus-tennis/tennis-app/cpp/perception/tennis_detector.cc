@@ -52,6 +52,27 @@ static rknn_core_mask parse_core_mask(const std::string &s) {
     return RKNN_NPU_CORE_0_1_2; // "0_1_2" / "all" / default: all three cores
 }
 
+static bool supported_box_channels(int channels) {
+    return channels == 32 || channels == 64;
+}
+
+static bool has_single_class_raw_head(const rknn_app_context_t &ctx) {
+    int paired_scores = 0;
+    for (uint32_t si = 0; si < ctx.io_num.n_output; ++si) {
+        const rknn_tensor_attr &score = ctx.output_attrs[si];
+        if (score.n_dims != 4 || score.dims[1] != 1) continue;
+        for (uint32_t bi = 0; bi < ctx.io_num.n_output; ++bi) {
+            const rknn_tensor_attr &box = ctx.output_attrs[bi];
+            if (box.n_dims == 4 && supported_box_channels(box.dims[1]) &&
+                box.dims[2] == score.dims[2] && box.dims[3] == score.dims[3]) {
+                ++paired_scores;
+                break;
+            }
+        }
+    }
+    return paired_scores >= 3;
+}
+
 TennisDetector::~TennisDetector() { deinit(); }
 
 bool TennisDetector::init(const char *model_path, const char *label_path,
@@ -59,15 +80,9 @@ bool TennisDetector::init(const char *model_path, const char *label_path,
     cfg_ = cfg;
     if (init_yolov8_model(model_path, &ctx_) != 0) return false;
 
-    // Detect class count from the cls-branch channel width: the box branches are
-    // 64-channel (DFL), the score-sum branches are 1-channel, the cls branch is
-    // nc-channel. nc==1 => dedicated single-class tennis model.
-    int max_cls = 0;
-    for (uint32_t i = 0; i < ctx_.io_num.n_output; ++i) {
-        const int c = ctx_.output_attrs[i].dims[1];
-        if (c != 64 && c > max_cls) max_cls = c;
-    }
-    single_class_ = (max_cls <= 1);
+    // A dedicated tennis model exposes three spatially paired score (C==1) and
+    // DFL box tensors. Box C==64 means reg_max=16; C==32 means reg_max=8.
+    single_class_ = has_single_class_raw_head(ctx_);
 
     // Only the multi-class (COCO) path needs the label table for post_process.
     if (!single_class_) {
@@ -601,9 +616,8 @@ int TennisDetector::run_decode_single(const letterbox_t &lb, float ow, float oh,
         outputs[i].index = i;
         outputs[i].want_float = 0; // keep INT8; dequantize on demand in the decode
     }
-    // want_float=0 returns NCHW INT8 (no dequant); the decode below dequantizes
-    // only the score cells it thresholds plus the 64 DFL logits of cells above
-    // threshold -- skipping the ~400k wasted box-channel conversions of want_float=1.
+    // want_float=0 returns NCHW INT8. Dequantize only score cells that pass the
+    // threshold and their 32 or 64 DFL logits.
     s = now_ms();
     rc = rknn_outputs_get(ctx_.rknn_ctx, n_out, outputs.data(), nullptr);
     if (prof) prof->outputs_get_ms = now_ms() - s;
@@ -620,11 +634,13 @@ int TennisDetector::run_decode_single(const letterbox_t &lb, float ow, float oh,
                 static_cast<double>(perf_run.run_duration) / 1000.0;
     }
 
-    // Decode each scale: box branch (C==64) paired with a score branch (C==1).
+    // Decode each scale: box branch (C==4*reg_max) paired with score C==1.
     std::vector<Det> dets;
     const double dec_start = now_ms();
     for (uint32_t bi = 0; bi < n_out; ++bi) {
-        if (ctx_.output_attrs[bi].dims[1] != 64) continue;
+        const int box_channels = ctx_.output_attrs[bi].dims[1];
+        if (!supported_box_channels(box_channels)) continue;
+        const int reg_max = box_channels / 4;
         const int H = ctx_.output_attrs[bi].dims[2];
         const int W = ctx_.output_attrs[bi].dims[3];
         const int stride = H > 0 ? ctx_.model_height / H : 0;
@@ -653,17 +669,17 @@ int TennisDetector::run_decode_single(const letterbox_t &lb, float ow, float oh,
                                                      score_scale);
                 if (sc < cfg_.conf_thresh) continue;
                 float dfl[64];
-                for (int c = 0; c < 64; ++c)
+                for (int c = 0; c < box_channels; ++c)
                     dfl[c] = deqnt_affine_to_f32(box_q[c * hw + y * W + x], box_zp,
                                                  box_scale);
                 float d[4];
                 for (int side = 0; side < 4; ++side) {
-                    const float *p = dfl + side * 16;
+                    const float *p = dfl + side * reg_max;
                     float mx = -1e30f;
-                    for (int b = 0; b < 16; ++b)
+                    for (int b = 0; b < reg_max; ++b)
                         if (p[b] > mx) mx = p[b];
                     float sum = 0.f, acc = 0.f;
-                    for (int b = 0; b < 16; ++b) {
+                    for (int b = 0; b < reg_max; ++b) {
                         const float e = std::exp(p[b] - mx);
                         sum += e;
                         acc += e * static_cast<float>(b);

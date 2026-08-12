@@ -18,9 +18,9 @@ public:
     bool ready() override;
 
 private:
-    bool set_angle(int servo, float angle, int time_ms = 1000);
+    bool set_angle(int servo, float angle, int time_ms = 500);
     bool set_pose(float servo0, float servo1, float servo2,
-                  int time_ms = 1000);
+                  int time_ms = 500);
     bool send(const std::string &command);
     bool read_position(int servo, int &pulse);
 

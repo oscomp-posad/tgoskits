@@ -11,12 +11,13 @@
 
 namespace tennis {
 
-// The five game states required by the demo. GRAB and DEPOSIT are modelled as
+// GRAB and DEPOSIT are modelled as
 // explicit (brief, non-blocking) states rather than folded into a transition,
 // so the state trace is unambiguous.
 enum class GameState {
     CHASE_BALL,
     GRAB,
+    RETURN_TO_BUCKET,
     FIND_BUCKET,
     APPROACH_BUCKET,
     DEPOSIT,
@@ -80,65 +81,32 @@ struct Config {
 
     // Detector.
     int ball_class_id = 0;     // 0 for a single-class tennis model; 32 (sports ball) for COCO yolov8.rknn
-    float conf_thresh = 0.5f;
+    float conf_thresh = 0.75f;
     float nms_thresh = 0.45f;
 
-    // CHASE_BALL distance zones (by ball area_ratio).
-    float area_far = 0.02f;
-    float area_near = 0.35f;
-    float area_brake = 0.20f;
-    float area_stop = 0.28f;
-    float area_reverse = 0.50f;
-    float area_stop_exit = 0.20f;
+    // CHASE_BALL distance limits (by ball area_ratio).
+    float area_far = 0.20f;
+    float area_stop = 0.56f;
+    float area_reverse = 0.62f;
 
-    // CHASE_BALL speeds / steering.
-    int chase_speed_far = 40;
-    int brake_speed = 3;
-    int reverse_speed = 15;
-    float k_turn = 25.0f;
-    int max_turn_bias_far = 5;
-    int max_turn_bias_near = 10;
+    // Ball pursuit chassis commands. Steering bias is proportional to the
+    // horizontal error and is composed here above the physical speed floor.
+    int chase_far_spd = 45;
+    int chase_forward_spd = 30;
+    float chase_turn_k = 24.0f;
+    int chase_max_bias = 24;
+    int chase_close_pivot_spd = 30;
+    int reverse_speed = 30;
     int center_dead_zone = 15;
 
     // Stop / grab gate. The ball is centred under a gripper mounted right of the
     // optical centre, hence the off-centre stop target.
-    int stop_center_offset = 90;
-    int stop_center_zone = 5;
-    int stop_confirm_cnt = 4;
-
-    // ALIGN (proportional pivot to centre the ball) + stall kick.
-    int align_pivot_spd = 15;
-    int align_pivot_min = 3;
-    int align_stall_frames = 20;
-    int align_stall_move_px = 10;
-    int align_kick_spd = 35;
+    int stop_center_offset = 108;
+    int stop_center_zone = 20;
+    int stop_confirm_cnt = 3;
 
     // Ball lost search.
-    int search_frames = 25;
-    int search_pivot_spd = 10;
-    int scan_flip_frames = 60;
-
-    // Bucket approach.
-    float bucket_area_deposit = 0.90f;
-    float bucket_area_brake = 0.70f;
-    int bucket_approach_spd = 25;
-    int bucket_brake_spd = 5;
-    float bucket_k_turn = 20.0f;
-    int bucket_max_bias = 8;
-    int bucket_search_spd = 12;
-    int bucket_lost_frames = 10;
-    int bucket_confirm_cnt = 3;
-
-    // HSV red mask (H in [0,360), S/V in [0,255]).
-    int hsv_s_min = 80;
-    int hsv_v_min = 50;
-    int hsv_h_lo = 20;   // accept H <= hsv_h_lo
-    int hsv_h_hi = 340;  // or H >= hsv_h_hi
-    int bucket_min_area = 1000;
-
-    // Motor dead-zone: a non-zero command is lifted to at least min_speed so it
-    // overcomes stall. Lives in the abstract Motor layer, not the backend.
-    int motor_min_speed = 15;
+    int search_pivot_spd = 35;
 
     // Optional wheel-RPM odometry. The generic default remains off; the
     // calibrated Orange Pi live configuration enables it explicitly.
@@ -150,10 +118,41 @@ struct Config {
     int odometry_max_gap_ms = 500;
     int odometry_max_rpm = 300;
 
-    // Brief settle windows (frames) for the otherwise-instant virtual arm moves,
-    // so GRAB/DEPOSIT are observable states rather than zero-width transitions.
-    int grab_settle_frames = 3;
-    int deposit_settle_frames = 3;
+    // Coarse return-to-bucket guidance; vision takes priority in this state.
+    double return_heading_tolerance_deg = 15.0;
+    double return_stop_radius_m = 0.50;
+    double return_max_distance_m = 10.0;
+    int return_timeout_ms = 15000;
+    int return_pivot_spd = 30;
+    int return_forward_spd = 30;
+
+    // Bucket approach.
+    float bucket_area_deposit = 0.90f;
+    float bucket_area_brake = 0.70f;
+    int bucket_approach_spd = 45;
+    int bucket_brake_spd = 35;
+    float bucket_k_turn = 20.0f;
+    int bucket_max_bias = 8;
+    int bucket_search_spd = 35;
+    int bucket_lost_frames = 10;
+    int bucket_confirm_cnt = 3;
+
+    // HSV red mask (H in [0,360), S/V in [0,255]).
+    int hsv_s_min = 80;
+    int hsv_v_min = 50;
+    int hsv_h_lo = 20;   // accept H <= hsv_h_lo
+    int hsv_h_hi = 340;  // or H >= hsv_h_hi
+    int bucket_min_area = 3000;
+
+    // Motor dead-zone: every non-zero wheel command is independently lifted to
+    // this physical floor. Base-speed/bias composition stays in the FSM.
+    int motor_min_speed = 28;
+
+    // Physical action timing. Timed motor phases remain non-blocking, while the
+    // state machine keeps issuing the latched command until its deadline.
+    int brake_hold_ms = 200;
+    int grab_settle_ms = 100;
+    int release_settle_ms = 500;
 
     // Drop a detection whose source frame is older than this (0 = never). Keeps
     // control acting on fresh perception under load.

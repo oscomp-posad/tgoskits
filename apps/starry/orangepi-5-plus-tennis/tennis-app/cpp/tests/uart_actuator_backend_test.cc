@@ -293,18 +293,16 @@ bool arm_protocol_matches_calibrated_sequence() {
     if (!expect(pty.master >= 0, "open arm PTY")) return false;
 
     const std::string expected =
-        "#000P1685T1000!#001P0722T1000!#002P1166T1000!"
-        "#002P1611T1000!"
-        "#000P2255T1000!#001P1166T1000!#002P1611T1000!"
-        "#002P1166T1000!"
+        "#000P1685T0500!#001P1314T0500!#002P1981T0500!"
+        "#002P1981T0500!"
+        "#000P2255T0500!#001P1166T0500!#002P1981T0500!"
+        "#002P1403T0500!"
         "#002PRAD!"
-        "#000P1462T1000!#001P0722T1000!#002P1166T1000!"
+        "#000P1685T0500!#001P1314T0500!#002P1403T0500!"
         "#002PRAD!"
-        "#000P1685T1000!#001P1314T1000!#002P1166T1000!"
-        "#002P1611T1000!"
-        "#000P1462T1000!#001P0722T1000!#002P1166T1000!";
+        "#002P1981T0500!";
     const std::string query = "#002PRAD!";
-    const std::string position = "#002P1367!";
+    const std::string position = "#002P1647!";
     std::string received;
     std::string emulator_error;
     std::thread emulator([&] {
@@ -339,7 +337,7 @@ bool arm_protocol_matches_calibrated_sequence() {
     if (!expect(calls_succeeded, "arm origin and put commands succeed"))
         return false;
     if (!expect(grab_result == tennis::GrabResult::Captured,
-                "two position samples above P1260 confirm capture"))
+                "two position samples above P1530 confirm capture"))
         return false;
     if (!expect(emulator_error.empty(), emulator_error.c_str())) return false;
     return expect(received == expected,
@@ -351,15 +349,16 @@ bool arm_ball_lost_after_lift_is_reported() {
     if (!expect(pty.master >= 0, "open lost-ball arm PTY")) return false;
 
     const std::string expected =
-        "#002P1611T1000!"
-        "#000P2255T1000!#001P1166T1000!#002P1611T1000!"
-        "#002P1166T1000!"
+        "#002P1981T0500!"
+        "#000P2255T0500!#001P1166T0500!#002P1981T0500!"
+        "#002P1403T0500!"
         "#002PRAD!"
-        "#000P1462T1000!#001P0722T1000!#002P1166T1000!"
-        "#002PRAD!";
+        "#000P1685T0500!#001P1314T0500!#002P1403T0500!"
+        "#002PRAD!"
+        "#002P1981T0500!";
     const std::string query = "#002PRAD!";
-    const std::string held_position = "#002P1367!";
-    const std::string empty_position = "#002P1194!";
+    const std::string held_position = "#002P1647!";
+    const std::string empty_position = "#002P1416!";
     std::string received;
     std::string emulator_error;
     std::thread emulator([&] {

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include <cstdio>
 
+#include "actuator/motor_dead_zone.h"
 #include "state_machine.h"
 
 namespace {
@@ -20,13 +21,13 @@ tennis::Detection ball_detection(float area, float cx) {
     return detection;
 }
 
-tennis::Detection bucket_detection(float area) {
+tennis::Detection bucket_detection(float area, float cx = 320.0f) {
     tennis::Detection detection;
     detection.valid = true;
     detection.mode = tennis::PerceptionMode::BUCKET;
     detection.bucket.found = true;
     detection.bucket.area_ratio = area;
-    detection.bucket.cx = 320.0f;
+    detection.bucket.cx = cx;
     return detection;
 }
 
@@ -37,16 +38,17 @@ constexpr int64_t ms(int value) {
 bool reverse_takes_priority_over_grab() {
     tennis::Config config;
     config.stop_confirm_cnt = 1;
+    config.motor_min_speed = 28;
+    config.reverse_speed = 30;
     tennis::StateMachine machine(config);
     const auto output = machine.step(
         ball_detection(
-            config.area_reverse + 0.1f,
+            config.area_reverse,
             static_cast<float>(config.frame_w / 2 + config.stop_center_offset)),
         0);
-    return expect(output.motor_op == tennis::MotorOp::Drive,
-                  "an excessively close ball must command reverse") &&
-           expect(output.left < 0 && output.right < 0,
-                  "both wheels must reverse when the ball is too close") &&
+    return expect(output.motor_op == tennis::MotorOp::Drive &&
+                      output.left == -30 && output.right == -30,
+                  "the reverse boundary must use the configured speed") &&
            expect(machine.state() == tennis::GameState::CHASE_BALL,
                   "reverse must not transition to grab");
 }
@@ -127,35 +129,145 @@ bool ball_search_keeps_one_way_scan() {
     return true;
 }
 
-bool chase_uses_only_discrete_executable_actions() {
+bool chase_uses_proportional_executable_steering() {
     tennis::Config config;
+    config.motor_min_speed = 30;
+    config.chase_far_spd = 45;
+    config.chase_forward_spd = 30;
+    config.chase_turn_k = 24.0f;
+    config.chase_max_bias = 24;
+    config.chase_close_pivot_spd = 30;
     tennis::StateMachine machine(config);
     const float target = static_cast<float>(
         config.frame_w / 2 + config.stop_center_offset);
 
-    auto output = machine.step(ball_detection(0.1f, target - 50.0f), ms(0));
+    auto output = machine.step(ball_detection(0.1f, target - 10.0f), ms(0));
     if (!expect(output.motor_op == tennis::MotorOp::Drive &&
-                    output.left == -config.chase_pivot_spd &&
-                    output.right == config.chase_pivot_spd,
-                "an offset ball must use a fixed executable pivot"))
+                    output.left == config.chase_far_spd &&
+                    output.right == config.chase_far_spd,
+                "a ball inside the horizontal dead zone must drive straight"))
         return false;
-    output = machine.step(ball_detection(0.1f, target), ms(33));
+
+    output = machine.step(ball_detection(0.1f, target + 100.0f), ms(33));
     if (!expect(output.motor_op == tennis::MotorOp::Drive &&
-                    output.left == config.chase_forward_spd &&
-                    output.right == config.chase_forward_spd,
-                "an aligned distant ball must use fixed forward speed"))
+                    output.left == 53 && output.right == 37,
+                "far pursuit must add proportional symmetric steering bias"))
         return false;
+
     output = machine.step(
-        ball_detection(config.area_stop + 0.01f, target), ms(66));
+        ball_detection(config.area_far, target + 50.0f), ms(50));
+    if (!expect(output.motor_op == tennis::MotorOp::Drive &&
+                    output.left == 38 && output.right == 30,
+                "near pursuit must keep the inside wheel at the physical floor"))
+        return false;
+
+    output = machine.step(
+        ball_detection(config.area_far, target - 50.0f), ms(66));
+    if (!expect(output.motor_op == tennis::MotorOp::Drive &&
+                    output.left == 30 && output.right == 38,
+                "left steering must mirror right steering"))
+        return false;
+
+    output = machine.step(
+        ball_detection(config.area_far, target - 320.0f), ms(83));
+    if (!expect(output.motor_op == tennis::MotorOp::Drive &&
+                    output.left == 30 && output.right == 78,
+                "steering bias must saturate at the configured maximum"))
+        return false;
+
+    output = machine.step(
+        ball_detection(config.area_stop + 0.01f, target), ms(99));
     if (!expect(output.motor_op == tennis::MotorOp::Brake,
                 "an aligned close ball must brake"))
         return false;
     output = machine.step(
-        ball_detection(config.area_stop + 0.01f, target + 50.0f), ms(99));
+        ball_detection(config.area_stop + 0.01f, target + 50.0f), ms(116));
     return expect(output.motor_op == tennis::MotorOp::Drive &&
-                      output.left == config.chase_pivot_spd &&
-                      output.right == -config.chase_pivot_spd,
-                  "a close offset ball must pivot without a timed sub-state");
+                      output.left == 30 && output.right == -30,
+                  "a close but offset ball must pivot without moving forward");
+}
+
+bool motor_dead_zone_maps_each_wheel_independently() {
+    auto command = tennis::apply_motor_dead_zone(25, 25, 30);
+    if (!expect(command.left == 30 && command.right == 30,
+                "each low straight wheel must reach the speed floor"))
+        return false;
+
+    command = tennis::apply_motor_dead_zone(33, 17, 30);
+    if (!expect(command.left == 33 && command.right == 30,
+                "only the wheel below the floor may be lifted"))
+        return false;
+
+    command = tennis::apply_motor_dead_zone(13, -3, 30);
+    if (!expect(command.left == 30 && command.right == -30,
+                "opposite low wheel speeds must preserve their signs"))
+        return false;
+
+    command = tennis::apply_motor_dead_zone(38, -30, 30);
+    if (!expect(command.left == 38 && command.right == -30,
+                "executable asymmetric counter-rotation must stay unchanged"))
+        return false;
+
+    command = tennis::apply_motor_dead_zone(12, -12, 30);
+    return expect(command.left == 30 && command.right == -30,
+                  "a true in-place turn must lift both wheel magnitudes");
+}
+
+bool bucket_approach_uses_configured_speed_bands() {
+    tennis::Config config;
+    config.stop_confirm_cnt = 1;
+    config.bucket_confirm_cnt = 1;
+    config.brake_hold_ms = 0;
+    config.grab_settle_ms = 0;
+    config.motor_min_speed = 30;
+    config.bucket_approach_spd = 45;
+    config.bucket_brake_spd = 35;
+    tennis::StateMachine machine(config);
+    const float target = static_cast<float>(
+        config.frame_w / 2 + config.stop_center_offset);
+
+    machine.step(ball_detection(config.area_stop + 0.01f, target), ms(0));
+    machine.tick(ms(0));
+    machine.tick(ms(0));
+    machine.step(bucket_detection(0.1f), ms(0));
+
+    auto output = machine.step(
+        bucket_detection(config.bucket_area_brake, 448.0f), ms(33));
+    if (!expect(output.motor_op == tennis::MotorOp::Drive &&
+                    output.left == 43 && output.right == 27,
+                "near bucket pursuit must steer around base speed 35"))
+        return false;
+
+    output = machine.step(
+        bucket_detection(config.bucket_area_brake, 192.0f), ms(66));
+    if (!expect(output.motor_op == tennis::MotorOp::Drive &&
+                    output.left == 27 && output.right == 43,
+                "near bucket steering must be mirrored"))
+        return false;
+
+    output = machine.step(bucket_detection(0.1f, 448.0f), ms(99));
+    return expect(output.motor_op == tennis::MotorOp::Drive &&
+                      output.left == 53 && output.right == 37,
+                  "far bucket pursuit must steer around base speed 45");
+}
+
+bool bucket_search_uses_configured_in_place_speed() {
+    tennis::Config config;
+    config.stop_confirm_cnt = 1;
+    config.brake_hold_ms = 0;
+    config.grab_settle_ms = 0;
+    config.bucket_search_spd = 35;
+    tennis::StateMachine machine(config);
+    const float target = static_cast<float>(
+        config.frame_w / 2 + config.stop_center_offset);
+
+    machine.step(ball_detection(config.area_stop + 0.01f, target), ms(0));
+    machine.tick(ms(0));
+    machine.tick(ms(0));
+    const auto output = machine.step(tennis::Detection{}, ms(33));
+    return expect(output.motor_op == tennis::MotorOp::Drive &&
+                      output.left == 35 && output.right == -35,
+                  "bucket search must use the configured in-place speed");
 }
 
 bool captured_ball_uses_odom_return_and_visual_takeover() {
@@ -265,7 +377,10 @@ int main() {
     if (!grab_brake_uses_elapsed_time()) return 1;
     if (!empty_grab_resumes_ball_search()) return 1;
     if (!ball_search_keeps_one_way_scan()) return 1;
-    if (!chase_uses_only_discrete_executable_actions()) return 1;
+    if (!chase_uses_proportional_executable_steering()) return 1;
+    if (!motor_dead_zone_maps_each_wheel_independently()) return 1;
+    if (!bucket_approach_uses_configured_speed_bands()) return 1;
+    if (!bucket_search_uses_configured_in_place_speed()) return 1;
     if (!captured_ball_uses_odom_return_and_visual_takeover()) return 1;
     if (!deposit_waits_for_brake_and_release()) return 1;
     std::puts("tennis_state_machine_test: OK");

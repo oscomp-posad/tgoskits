@@ -11,11 +11,11 @@ namespace tennis {
 namespace {
 
 constexpr float kAngleMax = 270.0f;
-constexpr float kOpen = 150.0f;
-constexpr float kClosed = 90.0f;
-constexpr int kStepDelayMs = 1000;
+constexpr float kOpen = 200.0f;
+constexpr float kClosed = 122.0f;
+constexpr int kStepDelayMs = 500;
 constexpr int kPositionTimeoutMs = 250;
-constexpr int kGrabPulseThreshold = 1260;
+constexpr int kGrabPulseThreshold = 1530;
 
 void wait_for_step() {
     std::this_thread::sleep_for(std::chrono::milliseconds(kStepDelayMs));
@@ -82,7 +82,7 @@ bool UartArmBackend::set_angle(int servo, float angle, int time_ms) {
     const int pulse = std::clamp(
         static_cast<int>(500.0f + angle / kAngleMax * 2000.0f), 500, 2500);
     char command[32];
-    std::snprintf(command, sizeof(command), "#%03dP%04dT%d!", servo, pulse,
+    std::snprintf(command, sizeof(command), "#%03dP%04dT%04d!", servo, pulse,
                   time_ms);
     return send(command);
 }
@@ -105,9 +105,9 @@ GrabResult UartArmBackend::grab() {
     int down_pulse = 0;
     const bool down_valid = read_position(2, down_pulse);
 
-    // Always retract before deciding the result. The second sample verifies
-    // that a ball detected at ground level remains held after lifting.
-    if (!set_pose(130.0f, 30.0f, kClosed)) return GrabResult::Error;
+    // Lift directly to the bucket pose. The second sample verifies that a ball
+    // detected at ground level remains held after lifting.
+    if (!set_pose(160.0f, 110.0f, kClosed)) return GrabResult::Error;
     wait_for_step();
     int lifted_pulse = 0;
     const bool lifted_valid = read_position(2, lifted_pulse);
@@ -122,21 +122,20 @@ GrabResult UartArmBackend::grab() {
                     captured ? 1 : 0);
     }
     if (!position_valid) return GrabResult::Error;
-    return captured ? GrabResult::Captured : GrabResult::Empty;
+    if (captured) return GrabResult::Captured;
+    if (!set_angle(2, kOpen)) return GrabResult::Error;
+    wait_for_step();
+    return GrabResult::Empty;
 }
 
 bool UartArmBackend::release() {
-    if (!set_pose(160.0f, 110.0f, kClosed)) return false;
-    wait_for_step();
     if (!set_angle(2, kOpen)) return false;
-    wait_for_step();
-    if (!set_pose(130.0f, 30.0f, kClosed)) return false;
     wait_for_step();
     return true;
 }
 
 bool UartArmBackend::ready() {
-    if (!set_pose(160.0f, 30.0f, kClosed)) return false;
+    if (!set_pose(160.0f, 110.0f, kOpen)) return false;
     wait_for_step();
     return true;
 }

@@ -6,11 +6,10 @@
 #include <cstdio>
 
 #include "app_options.h"
-#ifndef TENNIS_HOST_DRYRUN
+#include "motor_dead_zone.h"
 #include "pwm_motor_backend.h"
 #include "uart_arm_backend.h"
 #include "uart_motor_backend.h"
-#endif
 
 namespace tennis {
 namespace {
@@ -21,7 +20,9 @@ public:
         : backend_(std::move(backend)), minimum_(std::clamp(minimum, 1, 100)) {}
 
     bool drive(int left, int right) override {
-        return backend_->drive(map(left), map(right));
+        const WheelCommand command =
+            apply_motor_dead_zone(left, right, minimum_);
+        return backend_->drive(command.left, command.right);
     }
     bool brake() override { return backend_->brake(); }
     bool standby() override { return backend_->standby(); }
@@ -30,14 +31,6 @@ public:
     }
 
 private:
-    int map(int speed) const {
-        speed = std::clamp(speed, -100, 100);
-        if (speed == 0) return 0;
-        const int sign = speed > 0 ? 1 : -1;
-        const int magnitude = std::abs(speed);
-        return sign * std::max(magnitude, minimum_);
-    }
-
     std::unique_ptr<MotorBackend> backend_;
     int minimum_;
 };
