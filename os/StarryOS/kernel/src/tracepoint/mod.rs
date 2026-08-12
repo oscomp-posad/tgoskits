@@ -1,10 +1,16 @@
 //! See Linux Documentation for details: <https://docs.kernel.org/trace/ftrace.html>
 mod control;
+pub mod kprobe_events;
 mod sched;
 mod trace;
 mod trace_pipe;
 
-use alloc::{collections::BTreeMap, string::ToString, sync::Arc, vec::Vec};
+use alloc::{
+    collections::BTreeMap,
+    string::{String, ToString},
+    sync::Arc,
+    vec::Vec,
+};
 use core::{
     num::NonZero,
     ops::Deref,
@@ -16,14 +22,16 @@ use ax_kspin::SpinNoPreempt;
 use ax_lazyinit::LazyInit;
 use ax_memory_addr::VirtAddr;
 use ax_runtime::hal::{percpu::this_cpu_id, time::monotonic_time_nanos};
-use ax_sync::Mutex;
 use ax_task::{IrqNotify, current};
 use axfs_ng_vfs::NodePermission;
 use axpoll::{IoEvents, PollSet};
 use ktracepoint::*;
 
 use crate::{
-    pseudofs::{DirMaker, DirMapping, SeqObject, SimpleDir, SimpleFs, SpecialFsFile},
+    pseudofs::{
+        DirMaker, DirMapping, NodeOpsMux, SeqObject, SimpleDir, SimpleDirOps, SimpleFs,
+        SpecialFsFile,
+    },
     task::AsThread,
 };
 
@@ -65,10 +73,21 @@ pub fn find_ext_tracepoint_by_name(name: &str) -> Option<KernelExtTracePoint> {
 
 struct TraceState {
     point_map: LazyInit<TracePointMap<KernelTraceAux>>,
-    raw_pipe: Mutex<TracePipeRaw>,
+    // The trace ring buffer and the pid→cmdline cache are BOTH written from the
+    // tracepoint fire path (`trace_pipe_push_raw_record` / `trace_cmdline_push`),
+    // which runs with preemption disabled (the registry entry above is
+    // `SpinNoPreempt`; for `sched:sched_switch` the fire path is inside
+    // `axtask::switch_to`, IRQs off). A sleeping `ax_sync::Mutex` here would try to
+    // sleep in atomic context on the first enabled-tracepoint hit and wedge the
+    // CPU, so — like the registry entry and the perf output path — these are
+    // non-sleeping spinlocks. Every current tracepoint fires from a preempt-gated
+    // context (syscall path or `switch_to`), never a hard-IRQ handler, so
+    // `SpinNoPreempt` suffices; a tracepoint added to hard-IRQ context would need
+    // `SpinNoIrq` here (and for the registry entry).
+    raw_pipe: SpinNoPreempt<TracePipeRaw>,
     pipe_event: PollSet,
     pipe_notify: IrqNotify,
-    cmdline_cache: LazyInit<Mutex<TraceCmdLineCache>>,
+    cmdline_cache: LazyInit<SpinNoPreempt<TraceCmdLineCache>>,
     ext_tracepoints: LazyInit<BTreeMap<u32, KernelExtTracePoint>>,
 }
 
@@ -76,7 +95,7 @@ impl TraceState {
     const fn new() -> Self {
         Self {
             point_map: LazyInit::new(),
-            raw_pipe: Mutex::new(TracePipeRaw::new(TRACE_RAW_PIPE_CAPACITY)),
+            raw_pipe: SpinNoPreempt::new(TracePipeRaw::new(TRACE_RAW_PIPE_CAPACITY)),
             pipe_event: PollSet::new(),
             pipe_notify: IrqNotify::new(),
             cmdline_cache: LazyInit::new(),
@@ -98,12 +117,19 @@ impl KernelTraceOps for KernelTraceAux {
     }
 
     fn trace_pipe_push_raw_record(buf: &[u8]) {
-        // log::debug!("trace_pipe_push_raw_record: {}", record.len());
-        TRACE_STATE.raw_pipe.lock().push_record(
-            monotonic_time_nanos(),
-            this_cpu_id() as _,
-            buf.to_vec(),
-        );
+        // Allocation-free: copy `buf` straight into the preallocated ring slot.
+        // `try_lock`, not `lock`: under the function tracer this can fire from
+        // inside code that already holds `raw_pipe` on this core — the `trace`
+        // reader snapshots under the lock, and its clone allocates, which is a
+        // traced call. Blocking there would self-deadlock; dropping the record on
+        // contention is the standard ftrace behavior (a lost event).
+        let Some(mut ring) = TRACE_STATE.raw_pipe.try_lock() else {
+            return;
+        };
+        let timestamp = monotonic_time_nanos();
+        let cpu_id = this_cpu_id() as _;
+        ring.push_record_bytes(timestamp, cpu_id, buf);
+        drop(ring);
         TRACE_STATE.pipe_notify.notify_irq();
     }
 
@@ -143,6 +169,20 @@ impl KernelTraceOps for KernelTraceAux {
             .expect("Tracepoint not found");
         let mut ext_tp = ext_tp.lock();
         f(&mut ext_tp)
+    }
+
+    fn dynamic_event(id: u32, payload: &[u8]) -> Option<(String, String)> {
+        // Function-tracer records render `funcname(<-parent)`.
+        #[cfg(function_tracer)]
+        if id == crate::ftrace::FUNCTION_EVENT_ID {
+            return crate::ftrace::render_record(payload);
+        }
+        // A dynamic-kprobe-events record: resolve the event name from the runtime
+        // registry and render the `__probe_ip` (the payload u64) as the body. The
+        // parser wraps the body in `()`, so the trace line reads `hsc(0x<ip>)`.
+        let name = kprobe_events::event_name_by_id(id)?;
+        let probe_ip = u64::from_ne_bytes(payload.get(0..8)?.try_into().ok()?);
+        Some((name, alloc::format!("0x{probe_ip:x}")))
     }
 }
 
@@ -281,14 +321,60 @@ pub fn tracepoint_init() -> AxResult<()> {
     TRACE_STATE.ext_tracepoints.init_once(ext_tps);
     TRACE_STATE
         .cmdline_cache
-        .init_once(Mutex::new(TraceCmdLineCache::new(
+        .init_once(SpinNoPreempt::new(TraceCmdLineCache::new(
             NonZero::new(TRACE_CMDLINE_CACHE_SIZE).unwrap(),
         )));
+    // Preallocate the trace ring's slots so the push path is allocation-free
+    // (required by the function tracer; benefits every producer). 128-byte slots
+    // cover a function-tracer record (24 B) and typical tracepoint records.
+    TRACE_STATE.raw_pipe.lock().prealloc(128);
     start_trace_pipe_notify_worker();
     Ok(())
 }
 
 /// Initialize events directory in debugfs
+/// `events/header_page` — the trace ring-buffer page header layout. `perf record`
+/// on a tracepoint/probe event embeds this (with `header_event` and each event's
+/// `format`) into perf.data's `HEADER_TRACING_DATA`; libtraceevent then uses it to
+/// decode every sample's `PERF_SAMPLE_RAW` payload. Without it `perf report` aborts
+/// with "broken or missing trace data". Standard Linux content; 4 KiB page →
+/// 4096 − 16 = 4080 data bytes.
+const TRACE_HEADER_PAGE: &str = "\tfield: u64 timestamp;\toffset:0;\tsize:8;\tsigned:0;\n\tfield: \
+                                 local_t commit;\toffset:8;\tsize:8;\tsigned:1;\n\tfield: int \
+                                 overwrite;\toffset:8;\tsize:1;\tsigned:1;\n\tfield: char \
+                                 data;\toffset:16;\tsize:4080;\tsigned:1;\n";
+
+/// `events/header_event` — the compressed ring-buffer record header
+/// libtraceevent expects alongside `header_page`. Standard Linux content.
+const TRACE_HEADER_EVENT: &str = "# compressed entry header\n\ttype_len    :    5 \
+                                  bits\n\ttime_delta  :   27 bits\n\tarray       :   32 \
+                                  bits\n\n\tpadding     : type == 29\n\ttime_extend : type == \
+                                  30\n\ttime_stamp  : type == 31\n\tdata max type_len  == 28\n";
+
+/// `events/ftrace/print/format` — the standard `ftrace:print` event. `perf
+/// record`'s tracing-data packer *unconditionally* reads the `ftrace` subsystem
+/// (`copy_event_system("events/ftrace")`); a missing directory makes perf drop
+/// the whole `TRACING_DATA` feature, so `perf report` then fails with "broken or
+/// missing trace data". Providing this one standard event satisfies the packer.
+const FTRACE_PRINT_FORMAT: &str =
+    "name: print\nID: 5\nformat:\n\tfield:unsigned short \
+     common_type;\toffset:0;\tsize:2;\tsigned:0;\n\tfield:unsigned char \
+     common_flags;\toffset:2;\tsize:1;\tsigned:0;\n\tfield:unsigned char \
+     common_preempt_count;\toffset:3;\tsize:1;\tsigned:0;\n\tfield:int \
+     common_pid;\toffset:4;\tsize:4;\tsigned:1;\n\n\tfield:unsigned long \
+     ip;\toffset:8;\tsize:8;\tsigned:0;\n\tfield:char \
+     buf[];\toffset:16;\tsize:0;\tsigned:0;\n\nprint fmt: \"%ps: %s\", (void *)REC->ip, REC->buf\n";
+
+/// Build a read-only tracefs file serving fixed `content` (for `DirMapping::add`).
+fn static_text_file(fs: &Arc<SimpleFs>, content: &'static str) -> NodeOpsMux {
+    SpecialFsFile::new_regular_with_perm(
+        fs.clone(),
+        SeqObject::new(move || Ok(content.to_string())),
+        NodePermission::from_bits_truncate(0o440),
+    )
+    .into()
+}
+
 fn init_events(fs: Arc<SimpleFs>) -> DirMaker {
     let mut events_root = DirMapping::new();
     let mut subsystem = BTreeMap::new();
@@ -357,13 +443,52 @@ fn init_events(fs: Arc<SimpleFs>) -> DirMaker {
             SimpleDir::new_maker(fs.clone(), Arc::new(subsystem_root)),
         );
     }
-    SimpleDir::new_maker(fs, Arc::new(events_root))
+    // `perf record` reads these two files (plus each event's `format`) to build
+    // perf.data's tracing-data section; without them `perf report` fails with
+    // "broken or missing trace data".
+    events_root.add("header_page", static_text_file(&fs, TRACE_HEADER_PAGE));
+    events_root.add("header_event", static_text_file(&fs, TRACE_HEADER_EVENT));
+    // perf's tracing-data packer always reads the `ftrace` subsystem; a missing
+    // dir drops the whole TRACING_DATA feature. Provide the standard `print` event.
+    {
+        let mut ftrace_sys = DirMapping::new();
+        let mut print_evt = DirMapping::new();
+        print_evt.add("format", static_text_file(&fs, FTRACE_PRINT_FORMAT));
+        print_evt.add("id", static_text_file(&fs, "5\n"));
+        print_evt.add("enable", static_text_file(&fs, "0\n"));
+        ftrace_sys.add(
+            "print",
+            SimpleDir::new_maker(fs.clone(), Arc::new(print_evt)),
+        );
+        events_root.add(
+            "ftrace",
+            SimpleDir::new_maker(fs.clone(), Arc::new(ftrace_sys)),
+        );
+    }
+    // Chain a live, runtime-mutable slice after the static subsystems so
+    // `perf probe`'s dynamic `events/<group>/` groups appear alongside the
+    // compile-time tracepoints (the chained ops report non-cacheable, so the VFS
+    // re-queries and picks up events added after boot).
+    let dynamic = kprobe_events::DynamicEventsDir::new(fs.clone());
+    SimpleDir::new_maker(fs, Arc::new(events_root.chain(dynamic)))
 }
 
 /// Initialize tracing directory in debugfs
 pub fn init_tracing_dir(fs: Arc<SimpleFs>) -> DirMaker {
     let mut tracing_root = DirMapping::new();
     tracing_root.set_cacheable(false);
+
+    // `perf probe -a func` writes `p:GROUP/EVENT SYMBOL` here to create a dynamic
+    // kprobe event; the resulting `events/GROUP/EVENT/` is served by the chained
+    // dynamic dir in `init_events`.
+    tracing_root.add(
+        "kprobe_events",
+        SpecialFsFile::new_regular_with_perm(
+            fs.clone(),
+            kprobe_events::KprobeEventsFile,
+            NodePermission::from_bits_truncate(0o644),
+        ),
+    );
 
     tracing_root.add(
         "saved_cmdlines_size",
@@ -403,6 +528,35 @@ pub fn init_tracing_dir(fs: Arc<SimpleFs>) -> DirMaker {
             .into()
         }
     });
+    // ftrace function tracer (opt-in `function_tracer` build): available_tracers /
+    // current_tracer / set_ftrace_filter drive the patchable-entry self-patching.
+    #[cfg(function_tracer)]
+    {
+        tracing_root.add(
+            "available_tracers",
+            SpecialFsFile::new_regular_with_perm(
+                fs.clone(),
+                crate::ftrace::AvailableTracersFile,
+                NodePermission::from_bits_truncate(0o440),
+            ),
+        );
+        tracing_root.add(
+            "current_tracer",
+            SpecialFsFile::new_regular_with_perm(
+                fs.clone(),
+                crate::ftrace::CurrentTracerFile,
+                NodePermission::from_bits_truncate(0o644),
+            ),
+        );
+        tracing_root.add(
+            "set_ftrace_filter",
+            SpecialFsFile::new_regular_with_perm(
+                fs.clone(),
+                crate::ftrace::SetFtraceFilterFile,
+                NodePermission::from_bits_truncate(0o644),
+            ),
+        );
+    }
     tracing_root.add("events", init_events(fs.clone()));
     SimpleDir::new_maker(fs, Arc::new(tracing_root))
 }

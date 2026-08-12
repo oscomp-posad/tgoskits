@@ -127,6 +127,25 @@ pub(crate) fn load_cargo_config(request: &ResolvedStarryRequest) -> anyhow::Resu
         .features
         .retain(|feature| !is_removed_dynamic_platform_feature(feature));
     patch_starry_cargo_config(&mut cargo, request, metadata)?;
+    // Opt-in ftrace function tracer: `STARRY_FUNCTION_TRACER=1` instruments every
+    // kernel function with a 2-NOP patchable entry (recorded in the
+    // `__patchable_function_entries` section) that the runtime self-patches into a
+    // call to the trace trampoline, and compiles the `function_tracer` subsystem.
+    // Applied at this single build-config load point so it reaches EVERY build path
+    // — QEMU tests and board/uboot builds alike. Off by default (like Linux's
+    // CONFIG_FUNCTION_TRACER); it grows every function by two instructions.
+    if std::env::var("STARRY_FUNCTION_TRACER").is_ok_and(|v| v == "1") {
+        crate::build::append_encoded_rustflags(
+            &mut cargo,
+            &[
+                "-Zpatchable-function-entry=2",
+                "--cfg",
+                "function_tracer",
+                "--check-cfg",
+                "cfg(function_tracer)",
+            ],
+        );
+    }
     Ok(cargo)
 }
 

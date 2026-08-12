@@ -25,6 +25,8 @@ mod cgroup;
 mod config;
 mod ebpf;
 mod file;
+#[cfg(function_tracer)]
+mod ftrace;
 mod kmod;
 pub mod kprobe;
 mod mm;

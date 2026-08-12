@@ -23,7 +23,7 @@ use ax_kspin::{RawSpinNoIrq, SpinNoIrq};
 use ax_memory_addr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr, VirtAddrRange};
 use ax_runtime::hal::paging::{MappingFlags, PageSize};
 use kprobe::{
-    KprobeAuxiliaryOps, KretprobeBuilder, ProbeBuilder, ProbePointList,
+    KprobeAuxiliaryOps, KretprobeBuilder, ProbeBuilder, ProbeInstallError, ProbePointList,
     register_kprobe as kprobe_crate_register_kprobe,
     register_kretprobe as kprobe_crate_register_kretprobe, retprobe::RetprobeInstance,
     unregister_kprobe as kprobe_crate_unregister_kprobe,
@@ -250,11 +250,17 @@ where
 }
 
 /// Register a kprobe into the global manager, returning the live handle.
+///
+/// Propagates the install error instead of panicking: the target instruction
+/// can be un-probeable (a branch, PC-relative, or system instruction — including
+/// the NOP of a `-Zpatchable-function-entry` sled, which decodes into the system
+/// space). A caller reaching this from `perf_event_open` must surface that as an
+/// error, not bring the kernel down.
 #[inline(never)]
-pub fn register_kprobe(builder: ProbeBuilder<KernelKprobeOps>) -> Arc<KernelKprobe> {
-    with_manager_and_list(|mgr, list| {
-        kprobe_crate_register_kprobe(mgr, list, builder).expect("Failed to register kprobe")
-    })
+pub fn register_kprobe(
+    builder: ProbeBuilder<KernelKprobeOps>,
+) -> Result<Arc<KernelKprobe>, ProbeInstallError> {
+    with_manager_and_list(|mgr, list| kprobe_crate_register_kprobe(mgr, list, builder))
 }
 
 /// Unregister a previously registered kprobe.
@@ -264,11 +270,13 @@ pub fn unregister_kprobe(kprobe: Arc<KernelKprobe>) {
 }
 
 /// Register a kretprobe and return its live handle.
+///
+/// Like [`register_kprobe`], propagates the install error rather than panicking.
 #[inline(never)]
-pub fn register_kretprobe(builder: KretprobeBuilder<KernelRawMutex>) -> Arc<KernelKretprobe> {
-    with_manager_and_list(|mgr, list| {
-        kprobe_crate_register_kretprobe(mgr, list, builder).expect("Failed to register kretprobe")
-    })
+pub fn register_kretprobe(
+    builder: KretprobeBuilder<KernelRawMutex>,
+) -> Result<Arc<KernelKretprobe>, ProbeInstallError> {
+    with_manager_and_list(|mgr, list| kprobe_crate_register_kretprobe(mgr, list, builder))
 }
 
 /// Unregister a previously registered kretprobe.

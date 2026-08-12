@@ -367,6 +367,10 @@ fn handle_page_fault(vaddr: VirtAddr, access_flags: MappingFlags) -> bool {
         return false;
     };
 
+    // Count this fault for any `PERF_COUNT_SW_PAGE_FAULTS` event on the thread
+    // (cheap no-op when none exists).
+    crate::perf::sw::on_page_fault(thr);
+
     if unlikely(!thr.is_accessing_user_memory()) {
         // Still try to handle kernel-mode faults on user-space addresses.
         // Several syscall sites (e.g. event.rs, net/io.rs, fs/lock.rs) obtain
@@ -653,6 +657,57 @@ where
                 return Ok(());
             }
 
+            #[cfg(not(target_arch = "loongarch64"))]
+            {
+                Err(AxError::BadAddress)
+            }
+        },
+        move || sync_modified_kernel_text(aligned_addr, aligned_length),
+    )
+}
+
+/// Patch many sites within one kernel-text range under a **single**
+/// `stop_machine`. `action` runs with `[start, start+len)` made writable and must
+/// perform all its writes within that range; the range is restored to its
+/// original permissions and instruction-synchronized afterwards.
+///
+/// This exists for the ftrace function tracer, which arms/disarms thousands of
+/// patchable entries at once — doing each through [`patch_kernel_text`] would run
+/// one `stop_machine` (parking every core + a TLB/i-cache round trip) per site,
+/// which is unusably slow. The whole range must carry uniform original flags
+/// (kernel `.text`); callers pass a range bounded by the patch sites.
+#[cfg(function_tracer)]
+pub fn patch_kernel_text_batch<F>(start: VirtAddr, len: usize, action: F) -> AxResult<()>
+where
+    F: FnOnce(),
+{
+    if len == 0 {
+        return Ok(());
+    }
+    let aligned_addr = start.align_down_4k();
+    let aligned_length = (start + len).align_up_4k() - aligned_addr;
+    // Same LIFO stop_machine / kernel_aspace nesting as `patch_kernel_text`.
+    crate::stop_machine::stop_machine(
+        move || -> AxResult<()> {
+            let mut guard = ax_mm::kernel_aspace().lock();
+            if guard.contains_range(aligned_addr, aligned_length) {
+                let (_, original_flags, _) = guard.page_table().query(aligned_addr)?;
+                guard.protect(
+                    aligned_addr,
+                    aligned_length,
+                    original_flags | MappingFlags::WRITE,
+                )?;
+                flush_tlb_range(aligned_addr, aligned_length);
+                action();
+                ax_runtime::hal::cache::clean_dcache_to_pou(start, len);
+                guard.protect(aligned_addr, aligned_length, original_flags)?;
+                return Ok(());
+            }
+            #[cfg(target_arch = "loongarch64")]
+            {
+                action();
+                return Ok(());
+            }
             #[cfg(not(target_arch = "loongarch64"))]
             {
                 Err(AxError::BadAddress)

@@ -360,6 +360,9 @@ impl Starry {
         if env_truthy(&cargo.env, "AXTEST") {
             append_encoded_rustflags(&mut cargo, AXTEST_RUSTFLAGS);
         }
+        // The opt-in ftrace function tracer (`STARRY_FUNCTION_TRACER=1`) is now
+        // injected in `build::load_cargo_config` (the single build-config load
+        // point) so it reaches board/uboot builds too — not just this QEMU path.
         if crate::support::axtest_coverage::enabled(&cargo) {
             crate::support::axtest_coverage::prepare_cargo(&mut cargo);
         }

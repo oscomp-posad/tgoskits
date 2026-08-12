@@ -130,7 +130,53 @@ pub(crate) async fn ensure_rootfs_in_tmp_dir(
     let rootfs = crate::image::storage::ensure_rootfs_for_arch(workspace_root, arch).await?;
     let _lock = crate::support::download::acquire_path_lock(&rootfs).await?;
     ensure_apk_region_in_rootfs(&rootfs)?;
+    ensure_perf_in_rootfs(workspace_root, arch, &rootfs)?;
     Ok(rootfs)
+}
+
+/// Install the prebuilt on-target `perf` binary into the base rootfs at
+/// `/usr/bin/perf`, so it ships by default in every StarryOS aarch64 QEMU image —
+/// not only the `perf-tool-smoke` test case, which installs it per-case.
+///
+/// aarch64-only (the hardware-PMU `perf` targets ARM PMUv3). A no-op when the
+/// binary is absent: it is built on demand from source by
+/// `test-suit/starryos/qemu/system/perf-tool-smoke/build-perf.sh` (locally) or the
+/// CI perf build job, so a checkout without a built `perf` is unaffected.
+/// Best-effort — a failure (e.g. a full image) is logged, not fatal, since the
+/// per-case install still covers the smoke test. The caller holds the rootfs path
+/// lock, so the fixed scratch overlay dir is race-free.
+fn ensure_perf_in_rootfs(
+    workspace_root: &Path,
+    arch: &str,
+    rootfs_img: &Path,
+) -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    if arch != "aarch64" || !looks_like_ext_image(rootfs_img)? {
+        return Ok(());
+    }
+    let perf_bin = workspace_root.join("test-suit/starryos/qemu/system/perf-tool-smoke/perf");
+    if !perf_bin.is_file() {
+        return Ok(());
+    }
+
+    // Build a one-file overlay tree (`usr/bin/perf`, 0755 — `inject_overlay`
+    // preserves the host mode) and inject it into the image.
+    let overlay = std::env::temp_dir().join("starry-perf-overlay");
+    let _ = fs::remove_dir_all(&overlay);
+    let bindir = overlay.join("usr/bin");
+    fs::create_dir_all(&bindir)
+        .with_context(|| format!("failed to create {}", bindir.display()))?;
+    let dst = bindir.join("perf");
+    fs::copy(&perf_bin, &dst)
+        .with_context(|| format!("failed to copy {} to overlay", perf_bin.display()))?;
+    fs::set_permissions(&dst, fs::Permissions::from_mode(0o755))
+        .with_context(|| format!("failed to chmod {}", dst.display()))?;
+    if let Err(err) = inject::inject_overlay(rootfs_img, &overlay) {
+        eprintln!("warning: failed to install /usr/bin/perf into base rootfs: {err:#}");
+    }
+    let _ = fs::remove_dir_all(&overlay);
+    Ok(())
 }
 
 /// Ensures a selected rootfs image exists without modifying its contents.
