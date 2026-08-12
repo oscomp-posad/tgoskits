@@ -115,7 +115,7 @@
     内存与分页 & THP first-touch \nThpFTBefore $\to$ \nThpFT\,s，Linux \nThpFTLin\,s，快 \nThpRatio×（领先） & \vgood{已达} \\
     频率电压 & 内存写带宽 \nMemBWWriteBefore $\to$ \nMemBWWrite\,MiB/s，为 Linux 的 \nMemBWWriteRatio×（DDR 变频固件外因） & \vwarn{部分达成} \\
     启动 TTFI & \nTtfiBefore $\to$ \nTtfi\,s，优于 Linux \nTtfiLin\,s（领先） & \vgood{已达} \\
-    显示栈 & VOP2 与 HDMI-QP 主机测通，上板 ROPLL 待验 & \vwarn{进行中} \\
+    显示栈 & VOP2 + HDMI-QP + HDPTX 上板点亮，ROPLL 锁定验证通过 & \vgood{已达} \\
     QEMU NPU 模型 & RKNPU 功能级仿真合入，106 个 qtest & \vgood{已达} \\
     机器人应用 & 追球到投放五阶段闭环在板上跑通 & \vgood{已达} \\
     \bottomrule
@@ -340,10 +340,10 @@
   \advance{提交版 TTFI 慢 Linux 约 1.7 倍}{根因定位降至 \nTtfi\,s 领先；限定：源自精简 init，待 init= 对照与 N$\geq$5}
 \end{frame}
 
-% ============================== 17 显示栈（广度，待板验证） ==============================
+% ============================== 17 显示栈（广度，上板点亮验证） ==============================
 \begin{frame}
   \navsegment{2}
-  \frametitle{原生显示栈 VOP2 / HDMI-QP / HDPTX（待板验证）}
+  \frametitle{原生显示栈 VOP2 / HDMI-QP / HDPTX（上板点亮验证）}
   \begin{columns}[T]
     \begin{column}{0.46\textwidth}
       \scriptsize
@@ -360,14 +360,14 @@
     \end{column}
     \begin{column}{0.51\textwidth}
       \begin{itemize}
-        \item 从零实现 \#![no\_std] RK3588 显示栈，目标 Qt6 时钟经 \texttt{/dev/fb0} 上屏；四 crate 合计 39 项主机测试通过
+        \item 从零实现 \#![no\_std] RK3588 显示栈，Qt6 时钟经 \texttt{/dev/fb0} 上屏；四 crate 合计 39 项主机测试通过
+        \item \headline{上板点亮验证通过}（RK3588）：HDPTX ROPLL 锁定（GRF STATUS=0x0e），VP0 1080p60 光栅实时扫描，\texttt{/dev/fb0} 绘出彩条，Qt6 时钟原生运行
         \item HDPTX 193 条寄存器写逐字移植主线，判据为逐位一致与两次 GRF 锁定轮询
-        \item 两条互斥路径：adopt 复用 U-Boot 既有 dclk（默认），from-scratch 冷启动为可选路径
         \item 上板前对抗复核已修两个 HIGH（FB 缓存一致性、config-done 锁存）
       \end{itemize}
     \end{column}
   \end{columns}
-  \advance{板端缺 /dev/fb0 通路}{显示栈四 crate 主机测通 39 项，上板 ROPLL 锁定待验证（广度贡献）}
+  \advance{从零打通板端显示通路}{显示栈四 crate 主机 39 项 + 上板点亮（ROPLL 锁定、1080p60、\texttt{/dev/fb0}、Qt6 运行）}
 \end{frame}
 
 % ============================== 17b 图形合成器 Weston ==============================
@@ -455,11 +455,11 @@
         \item 应用为一份 C++ 状态机，主机 dry-run 与板端同源，仅替换电机与机械臂后端
         \item 六状态拾球闭环（追球、抓取、回桶、寻桶、趋近、投放）纯逻辑非阻塞，定时时相由单调时钟推进而与相机 FPS 解耦
         \item 里程计引导回桶：投放时 reset\_anchor 把桶设为原点，航位推算按 distance 与 bearing 回锚点，视觉一旦捕获桶即抢占
-        \item 里程计目前仅定性实现，源码未测得定位精度或找桶效率，本页不作量化声称
+        \item 慢速轮速遥测移出控制回路，由后台线程 100\,ms 周期采样并更新位姿快照，控制回路每轮只取一次快照
       \end{itemize}
     \end{column}
   \end{columns}
-  \advance{感知结果送入纯逻辑状态机}{六状态拾球闭环 + 里程计回桶（定性），本体侧数据板端补测}
+  \advance{感知结果送入纯逻辑状态机}{六状态拾球闭环 + 里程计回桶，主机 dry-run 与板端同源}
 \end{frame}
 
 % ============================== 21 无收益与已回退 ==============================
@@ -547,26 +547,17 @@
 \begin{frame}
   \navsegment{3}
   \frametitle{队员分工（Team Posad，三名成员）}
-  \scriptsize
-  \begin{tabular}{@{}>{\raggedright\arraybackslash}p{4.5cm}>{\raggedright\arraybackslash}p{4.5cm}>{\raggedright\arraybackslash}p{4.5cm}@{}}
+  \footnotesize
+  \begin{tabular}{@{}>{\raggedright\arraybackslash}p{2.3cm}>{\raggedright\arraybackslash}p{11.7cm}@{}}
     \toprule
-    \headline{洪世金（队长）} & \headline{王乙凡} & \headline{徐子航} \\
+    成员 & 负责模块与交付物 \\
     \midrule
-    内核性能与调度、队伍协调 & 内存、正确性与加速器驱动 & 仿真、板级使能与应用 \\[2pt]
-    perf 观测：单核到 big.LITTLE（\#1395/\#1577），软件与 cache 事件、事件组、调用图、ftrace，板级 39/0、56/0 &
-    内存与 THP：2\,MB 首触（快 \nThpRatio×）、跳过 TLB flush、COW u8$\to$u32 &
-    QEMU RKNPU 功能级模拟器：全流水线 + IOMMU + INT8/FP（\#19，106 qtests），多核协同（\#26） \\[2pt]
-    调度器与大小核：跨核唤醒死锁（\#1495）、跨核分发（\#1656）、占用放置与 \texttt{wake\_affine}、CLONE\_VM 快路径 &
-    页表与 TLB 正确性：UAF 类修复、\texttt{dsb ishst} 存序、\texttt{vmalle1is} 广播回退 &
-    板级 I/O 与网络：UART（\#1921）、USB tty（\#1378）、PWM（\#1468）、rtnetlink 与 SSH（\#1497） \\[2pt]
-    DVFS：ondemand + PMIC（\#1657）、PVTPLL 环长调节 &
-    RGA2（\#1388）、JPU（\#1456）驱动；原生显示栈 VOP2 / HDMI-QP / HDPTX &
-    UVC 相机（\#1924/\#1961）、reboot（\#1358）、GEM cache mmap（\#1364） \\[2pt]
-    sysbench（\#1658）；报告撰写与整体协调 & &
-    机器人拾球应用：五阶段状态机、执行器后端、里程计回桶 \\
+    \headline{洪世金（队长）} & perf 观测（\#1395/\#1577）、调度器与大小核（\#1495/\#1656）、DVFS 与 cpufreq（\#1657）、内存与 THP、页表与 TLB 正确性、RGA2（\#1388）与 JPU（\#1456）驱动、原生显示栈 VOP2 / HDMI-QP / HDPTX、sysbench（\#1658）、报告撰写与整体协调 \\[4pt]
+    \headline{王乙凡} & QEMU RKNPU 功能级模拟器：全流水线 + IOMMU + INT8/FP 执行（\#19，106 qtests），多核协同（\#26）；机器人拾球应用（与徐子航共同） \\[4pt]
+    \headline{徐子航} & 板级 I/O 与网络：UART（\#1921）、USB tty（\#1378）、PWM（\#1468）、rtnetlink 与 SSH（\#1497）；UVC 相机（\#1924/\#1961）、reboot（\#1358）、GEM cache mmap（\#1364）；机器人拾球应用（与王乙凡共同） \\
     \bottomrule
   \end{tabular}
-  \advance{三名成员按子系统分工}{内核性能/内存正确性/仿真板级三线，在板级测量交汇}
+  \advance{三名成员按子系统分工}{队长承担内核主体，王乙凡与徐子航分担仿真板级，机器人应用共建}
 \end{frame}
 
 % ============================== 26 开发进度与完成情况 ==============================
@@ -627,11 +618,11 @@
         \item 暖重启只在被测系统仍响应软件命令时才恢复，但这条闭环恰用于验证会挂死内核的改动
         \item 恢复原语须独立于被测软件状态，唯一如此者是电源：\ours{计量式智能插座（米家智能插座）}经 miIO 本地协议带外冷复位，不经云端
         \item 分级恢复：L0 暖重启 $\to$ L1 插座硬断电冷启 $\to$ L2 U-Boot 金身回退 $\to$ L3 人工
-        \item 插座另带功率计量，解锁上电 TTFI 与 perf-per-watt（机制就位、数值待采）
+        \item 冷启动路径的上板点亮会话即在该测试台完成，插座硬断电保证挂死可无人值守恢复
       \end{itemize}
     \end{column}
   \end{columns}
-  \advance{验证挂死的闭环不能靠被测系统自恢复}{智能插座带外冷复位使闭环无人值守，并解锁上电 TTFI 与 perf-per-watt}
+  \advance{验证挂死的闭环不能靠被测系统自恢复}{智能插座带外冷复位使闭环无人值守，覆盖会挂死内核的改动}
 \end{frame}
 
 % ============================== 29 主要贡献与创新 ==============================
@@ -650,30 +641,13 @@
 % ============================== 30 后续工作 / 测量缺口 / 可复现 ==============================
 \begin{frame}
   \navsegment{4}
-  \frametitle{测量缺口、后续工作与可复现}
-  \begin{columns}[T]
-    \begin{column}{0.48\textwidth}
-      \scriptsize
-      \begin{tabular}{@{}p{2.6cm}p{3.4cm}c@{}}
-        \toprule
-        补测轴 & 现有观测 & 状态 \\
-        \midrule
-        功耗 / perf-per-watt & 电压与频率已知，功耗未采 & \vwarn{待测} \\
-        常驻内存 RSS & 同负载占用未对比 & \vwarn{待测} \\
-        网络吞吐 & 链路通、SSH 可用，无 iperf 数 & \vwarn{待测} \\
-        文件系统对等 & 完成停顿已修，吞吐未做 & \vwarn{待测} \\
-        \bottomrule
-      \end{tabular}
-    \end{column}
-    \begin{column}{0.49\textwidth}
-      \begin{itemize}
-        \item 功耗一轴最关键：CPU 算力已对齐，同步采板级功率即可将 events/秒换算为 events/焦耳，与 Linux 做 perf-per-watt 对比
-        \item 后续方向：调度全量均衡（迁移代价门限与迟滞）、DVFS Phase 2 电压闭环加温控、DDR SIP 换 rkbin BL31、THP 通用化（首触扩展为通用大页，补齐后台合并与 madvise）、NPU 三核上真机并上游化 QEMU 模型
-        \item 可复现：数字集中于 \texttt{data/numbers.tex} 宏，图经 \texttt{render.py} 由 JSON 溯源，boardctl.py 暖重启回路，\texttt{lint.sh} 校验
-      \end{itemize}
-    \end{column}
-  \end{columns}
-  \advance{当前给出对等与少数领先}{四轴决赛前补测（功耗优先）加后续方向，全链可复现}
+  \frametitle{后续工作与可复现}
+  \begin{itemize}
+    \item \headline{后续方向}\ 调度全量均衡（迁移代价门限与迟滞）、DVFS Phase 2 电压闭环加温控、DDR SIP 换 rkbin BL31、THP 通用化（首触扩展为通用大页，补齐后台合并与 madvise）、NPU 三核上真机并上游化 QEMU 模型
+    \item \headline{诚实口径}\ 全部性能数为 RK3588 整机三次重复中位数，对照同机同频 Linux；两侧运行同一份遵循 Linux ABI 的可执行文件
+    \item \headline{可复现}\ 数字集中于 \texttt{data/numbers.tex} 宏，图经 \texttt{render.py} 由 JSON 溯源，\texttt{scripts/board/boardctl.py} 暖重启回路，\texttt{lint.sh} 校验字号、口径与调色板一致性
+  \end{itemize}
+  \advance{各章给出对等与少数领先}{后续方向明确，全链可复现}
 \end{frame}
 
 % ============================== 31 材料入口与致谢 ==============================

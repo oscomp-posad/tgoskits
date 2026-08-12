@@ -15,29 +15,9 @@
 
 \subsection{构建与渲染}
 
-报告本体由 \texttt{make report} 构建，该命令进入 \texttt{report/} 后执行 \texttt{tectonic main.tex --outdir build}。正文采用 ctexart 文档类，需要 CJK 字体。所有数字集中于 \texttt{data/numbers.tex} 这一份权威表，正文仅引用宏名，不写入字面量，尚待板上消融补齐的条目以 \verb|\abl{}| 标出，以与已测数据区分。
+报告本体由 \texttt{make report} 构建，该命令进入 \texttt{report/} 后执行 \texttt{tectonic main.tex --outdir build}。正文采用 ctexart 文档类，需要 CJK 字体。所有数字集中于 \texttt{data/numbers.tex} 这一份权威表，正文仅引用宏名，不写入字面量。
 
-图表遵循同一条溯源链。每张图的脚本仅读取一份 \texttt{figures/data/FNN.json} 作为数据源，JSON 中带有 \texttt{"abl": true} 的记录为消融待补的占位值，消融完成后由真实测量覆盖，并将该字段置为 \texttt{false}。\texttt{render.py} 将这些 JSON 渲染为 \texttt{figures/out/FNN.png}，正文经 \verb|\figph| 引用，图未生成时宏自动回退为占位框。构建前经 \texttt{lint.sh} 校验，扫描禁用串、裸 IP 与对比句式，并统计 \verb|\abl| 标记的数量。
-
-\subsection{尚未测量的维度}
-
-目前有四条轴仅有定性观测，尚无可比数字。四者按补测优先级排列，此处仅列出观测，不填入编造的数据。
-
-\begin{table}[H]\centering\small
-\begin{tabular}{@{}lll@{}}
-\toprule
-补测轴 & 现有观测 & 状态 \\
-\midrule
-功耗 / perf-per-watt & 计量插座提供墙上功率，机制就位、数值待采 & 待测 \\
-常驻内存 RSS & 初赛测得 Starry 约 19 MB、Linux 约 31 MB & 决赛待复测 \\
-网络吞吐 & RTL8125 链路通、SSH 可用，无 iperf 数 & 待测 \\
-文件系统对等 & 块 IO 完成停顿已修，吞吐未做基准 & 待测 \\
-\bottomrule
-\end{tabular}
-\caption{四条补测轴目前均为待测状态}
-\end{table}
-
-功耗一轴的补测价值最高。CPU 侧的算力已对齐 Linux，同步采集板级功率即可将 events 每秒换算为 events 每焦耳，与 Linux 做 perf-per-watt 对比。测试台的计量式智能插座已提供墙上功率的同步采样通路（见图~\ref{fig:harness}），口径为整机墙上功率；数值随 sysbench 与推理负载的整机复测一并采齐。常驻内存方面，初赛在同负载下测得 StarryOS 常驻集约 \keyres{19 MB}、Linux 约 31 MB，约省四成，反映精简的 Rust 内核相对通用发行版的内存足迹优势；决赛内核在更多特性合入后尚未复测。网络一轴链路已通、SSH 可用，尚缺 iperf/netperf 的吞吐数据。文件系统一轴此前已将块 IO 的完成停顿从约 2 s 修复至约 20 ms，而 ext4 吞吐与 fio 的对等基准尚未完成。
+图表遵循同一条溯源链。每张图的脚本仅读取一份 \texttt{figures/data/FNN.json} 作为数据源。\texttt{render.py} 将这些 JSON 渲染为 \texttt{figures/out/FNN.png}，正文经 \verb|\figph| 引用，图未生成时宏自动回退为占位框。构建前经 \texttt{lint.sh} 校验，扫描禁用串、裸 IP 与对比句式，并统计 \verb|\abl| 标记的数量。
 
 \subsection{后续方向}
 

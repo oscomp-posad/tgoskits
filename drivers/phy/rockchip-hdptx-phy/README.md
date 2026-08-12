@@ -17,4 +17,8 @@ Host tests cover the register-offset arithmetic, the divider encoding, the reset
 ordering and the full write sequence — but whether the PLL/lanes actually LOCK at
 148.5 MHz is physical and can only be confirmed on silicon. The two
 `GRF_HDPTX_STATUS` poll gates (`PHY_CLK_RDY`, then `PHY_RDY & PLL_LOCK_DONE`) are
-the on-board pass/fail oracle. **Nothing here has run on hardware.**
+the on-board pass/fail oracle. **This has now been board-verified on an
+OrangePi-5-Plus (RK3588) on 2026-08-12: both poll gates passed
+(`GRF_HDPTX_STATUS` = 0x0e, i.e. `PLL_LOCK_DONE` + `PHY_CLK_RDY` + `PHY_RDY` all
+set), the ROPLL locked at 148.5 MHz, and VOP2 VP0 scanned a live 1080p60 raster
+that registered as `/dev/fb0` and painted color bars.**

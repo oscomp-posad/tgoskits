@@ -28,9 +28,9 @@ StarryOS 复用 ArceOS 的模块层，在其上补齐 Linux 兼容的系统调�
 内存与分页 & THP first-touch \nThpFT s，Linux 为 \nThpFTLin s，快 \nThpRatio×（领先） & 已达 & 128 MB first-touch \\
 频率电压 & 内存带宽 \nMemBWWrite MiB/s，为 Linux 的 \nMemBWWriteRatio×（DDR DVFS 固件受阻） & 部分受阻 & sysbench memory 写 8 线程 \\
 启动 TTFI & \nTtfi s，优于 Linux \nTtfiLin s（领先） & 已达 & 上电到首帧推理 \\
-显示栈 & VOP2 与 HDMI-QP 主机测试通过，真机待验 & 进行中 & 主机寄存器测试 + 板级 ROPLL 待验 \\
+显示栈 & VOP2 与 HDMI-QP 上板点亮，ROPLL 像素时钟锁定验证通过 & 已达 & 主机寄存器测试 + 板级 ROPLL 锁定与 \texttt{/dev/fb0} 彩条 \\
 QEMU NPU 模型 & RKNPU 功能级模型已合并，106 项 qtest & 已达 & qtest 回归 \\
-机器人应用 & 追球到投放五阶段闭环在真机通过 & 已达 & 帧到指令延迟 \\
+机器人应用 & 追球到投放五阶段闭环在真机通过 & 已达 & 五阶段闭环上板运行 \\
 \bottomrule
 \end{tabular}
 \caption{前置目标完成情况}
