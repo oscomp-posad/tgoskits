@@ -80,7 +80,7 @@ YOLOv8 的密集网格中超过 99\% 为背景，640 尺寸下 8400 个单元里
 一度尝试以 \texttt{rknn\_create\_mem} 把 NPU 的输入与输出都绑为 DMA 缓冲，以省去主机与 NPU 之间的拷贝和缓存同步。测量结果为两侧 OS 均净亏：Linux 由 23.83 升到 24.65\,ms，StarryOS 由 217.63 升到 266.08\,ms。原因是零拷贝把 NC1HWC2 到 NCHW 的输出重排强行压到慢的单核上，而内核缓存维护本就只有 0.082\,ms/次，可省的拷贝成本很小。据此保留拷贝路径，零拷贝二进制仅作为 A/B 对照留存；由于它绑定的是每上下文私有的 DMA 缓冲，必须拒绝多 worker，否则共享输入缓冲会被覆写。
 
 \paragraph{全链路多 worker 并行：在设计中}
-推理路径是单线程串行地做解码到后处理，即便内核均衡器完美也只能把它放到一个核上。设想把它表达为 N 个相互独立的整链 worker，每个 worker 持有自己的 \texttt{rknn\_dup\_context}（在 cpu0 上创建后再迁移），分别绑定到不同的 A76 核。已识别的上限是：NPU 的 \texttt{run} 阶段无论是否 \texttt{dup\_context}，都在 rdrive 的单一设备锁上串行（\texttt{Error::Busy}），CPU 阶段（解码、缩放补边、后处理）仍可在 A76 各核上并行，因此在 RGA 之前 letterbox 与 run 相当时，多 worker 仍能提升吞吐；真正的 NPU 并发须依赖内核作业队列。此项已成设计，尚未完整验证。
+推理路径是单线程串行地做解码到后处理，即便内核均衡器完美也只能把它放到一个核上。设想把它表达为 N 个相互独立的整链 worker，每个 worker 持有自己的 \texttt{rknn\_dup\_context}（在 cpu0 上创建后再迁移），分别绑定到不同的 A76 核。已识别的上限是：NPU 的 \texttt{run} 阶段无论是否 \texttt{dup\_context}，都在 rdrive 的单一设备锁上串行（\texttt{Error::Busy}），CPU 阶段（解码、缩放补边、后处理）仍可在 A76 各核上并行，因此在 RGA 之前 letterbox 与 run 相当时，多 worker 仍能提升吞吐；真正的 NPU 并发须依赖内核作业队列。此项已成设计，为推理侧横向扩展的下一步。
 
 \subsection{结果}
 

@@ -21,4 +21,4 @@ DVFS 的 Phase 2 是电压闭环。A55 轨以带上下限的开环电压写入�
 
 内存侧的下一步是把首次触碰 THP 强化为通用 THP。首次触碰的 THP 已将 128 MB 私有匿名内存压缩至 \nThpFT{} s，快于 Linux 的 \nThpFTLin{} s，领先 \nThpRatio{} 倍，这是一项真实的领先。后续需补足后台合并、madvise 提示，以及真实负载下 split/merge 的稳健性。
 
-加速器侧需将 NPU 三核并发推进到真机。三核协同的正确性已由仿真与板级侧在 QEMU RKNPU 模拟器上完成多核验证，真机上的三核并发推理尚未运行，打通后可将推理吞吐按核数横向扩展。与之配套的是将这套 QEMU 设备模型上游化。RKNPU 模拟器已合入 \texttt{processmission/qemu}（\#19 与 \#26 多核，106 个 qtest，含真实 INT8/FP 执行与 IOMMU），下一步是将其构建为主线 QEMU 中一个规整的平台总线设备，使后续开发者无需真机即可开发 NPU 驱动。
+加速器侧的下一步是将 NPU 三核并发推进到真机。三核协同的正确性已由仿真与板级侧在 QEMU RKNPU 模拟器上完成多核验证，将其接入真机推理即可把吞吐按核数横向扩展。与之配套的是将这套 QEMU 设备模型上游化。RKNPU 模拟器已合入 \texttt{processmission/qemu}（\#19 与 \#26 多核，106 个 qtest，含真实 INT8/FP 执行与 IOMMU），下一步是将其构建为主线 QEMU 中一个规整的平台总线设备，使后续开发者无需真机即可开发 NPU 驱动。
