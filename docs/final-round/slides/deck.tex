@@ -20,7 +20,7 @@
 
 % verdict coloring helpers
 \newcommand{\vgood}[1]{{\color{teal}#1}}      % 领先
-\newcommand{\vwarn}[1]{{\color{amber}#1}}      % 受阻 / 进行中 / 仍有差距
+\newcommand{\vwarn}[1]{{\color{amber}#1}}      % 外因 / 进行中 / 仍有差距
 \newcommand{\vmut}[1]{{\color{muted}#1}}       % 弱化
 \newcommand{\headline}[1]{{\sffamily\bfseries\color{teal}#1}}
 \newcommand{\ours}[1]{\textbf{#1}}
@@ -300,10 +300,10 @@
   \advance{THP 与跳失效改动风险面大}{对抗审查揪出 UAF 与内存序缺陷，一处修复波及三系统四架构}
 \end{frame}
 
-% ============================== 15 频率电压 DVFS/PVTPLL + DDR 受阻 ==============================
+% ============================== 15 频率电压 DVFS/PVTPLL + DDR 外因 ==============================
 \begin{frame}
   \navsegment{2}
-  \frametitle{频率电压：DVFS / PVTPLL 与 DDR 受阻}
+  \frametitle{频率电压：DVFS / PVTPLL 与 DDR 变频固件外因}
   \begin{columns}[T]
     \begin{column}{0.52\textwidth}
       \includegraphics[width=\linewidth]{F10.png}
@@ -313,11 +313,11 @@
         \item RK3588 CPU 时钟为电压耦合的 PVTPLL，频率随轨压变化，CPU CRU 由 BL31 保护
         \item \#1657：按簇 ondemand governor + PMIC 电压标定（A76 走 I2C、A55 走 SPI），事务式先电压后时钟
         \item 环长调节：更高 SCMI 速率将环由 17 重编为 11，同压更高频；A76 顶 \nDvfsAseven\,MHz、A55 顶 \nDvfsAfive\,MHz，八线程达 \nCpuTEightRatio× Linux
-        \item \vwarn{DDR 变频}走 Rockchip SIP DRAM 接口，主线 TF-A 缺该 EL3 处理器，驱动停在探测态，属外因受阻
+        \item \vwarn{DDR 变频}走 Rockchip SIP DRAM 接口，主线 TF-A 缺该 EL3 处理器，驱动侧已就位，停在探测态，受主线固件外因所限
       \end{itemize}
     \end{column}
   \end{columns}
-  \advance{CPU 固定于上电低频、落后约三十倍}{ondemand + PMIC + 环长调节逐核 \nPerCoreRatio× Linux；DDR 变频固件受阻}
+  \advance{CPU 固定于上电低频、落后约三十倍}{ondemand + PMIC + 环长调节逐核 \nPerCoreRatio× Linux；DDR 变频受主线固件外因所限}
 \end{frame}
 
 % ============================== 16 启动 TTFI 领先 ==============================
@@ -465,7 +465,7 @@
 % ============================== 21 无收益与已回退 ==============================
 \begin{frame}
   \navsegment{2}
-  \frametitle{无收益与已回退的尝试}
+  \frametitle{经验证暂不适用当前平台的尝试}
   \scriptsize
   \vfill
   \begin{tabular}{@{}>{\raggedright\arraybackslash}p{2.8cm}>{\raggedright\arraybackslash}p{3.1cm}>{\raggedright\arraybackslash}p{5.9cm}@{}}
@@ -538,7 +538,7 @@
     \item 多数 Rust OS 工作在 QEMU 或综合基准上自证，少有在真实边缘 SoC 上与同机 Linux 运行同一份 ABI 可执行文件的逐轴对照
     \item 本工作在 RK3588 真机上以同一份 ELF、同机同频、N$\geq$5 的 p50 对照 Linux，覆盖调度、系统调用、内存、频率、启动五个轴
     \item 加速器侧将闭源 RKNPU 实现为功能级 QEMU 模型（106 qtests），使 NPU 驱动与模型优化脱离板子，属可复用产物
-    \item 定调诚实：给出的是对等与少数领先，并如实标注受阻（DDR 固件）与后续优化方向（系统调用入口、锁竞争）
+    \item 定调诚实：给出的是对等与少数领先，并如实标注外因（DDR 固件）与后续优化方向（系统调用入口、锁竞争）
   \end{itemize}
   \advance{Rust OS 常在 QEMU 自证}{本工作在 RK3588 真机以同一份 ELF 逐轴对照 Linux，另有可复用的 QEMU NPU 模型}
 \end{frame}
@@ -572,11 +572,11 @@
       \begin{itemize}
         \item 决赛约一个月（07-01 至 08 月中），三名队员协作，各项以真板验证为准；左图为七周里程碑，自 perf 多核起至页表正确性与原子 PR
         \item 落地并验证：PMU perf、QEMU RKNPU、SMP 分布、DVFS 环长、占用调度、THP 首触、CLONE\_VM 快路径、系统调用下降、TTFI 领先
-        \item 三项如实回退或受阻：工作窃取均衡器抖动回退、early-MMU 无收益回退、DDR 变频固件受阻
+        \item 三项如实回退或受外因所限：工作窃取均衡器抖动回退、early-MMU 无收益回退、DDR 变频受主线固件外因所限
       \end{itemize}
     \end{column}
   \end{columns}
-  \advance{整机对等分阶段推进}{七周里程碑，落地项均真板验证；三项如实回退或受阻}
+  \advance{整机对等分阶段推进}{七周里程碑，落地项均真板验证；三项如实回退或受外因所限}
 \end{frame}
 
 % ============================== 27 AI 使用说明 ==============================

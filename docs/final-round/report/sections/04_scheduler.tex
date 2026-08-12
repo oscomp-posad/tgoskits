@@ -23,7 +23,7 @@ RK3588 采用大小核结构，8 个核分属两簇：cpu0 至 cpu3 为 A55 小�
 
 \paragraph{无负载均衡} 运行期没有任何均衡逻辑。一条队列排满、其余七条全空时，没有机制把线程迁到空闲核。
 
-三点叠加的结果是整机只在单个小核上排队，smp8 与 smp4 的读数逐字节相同，sysbench cpu 无论线程数多少都停在 \nLadderBase{} ev/s 附近，八线程落后同机 Linux 约三十倍。这一亏损纯由放置造成：一组强制每核各钉一份任务的对照读到接近八核理论上限的吞吐，确认单核算力本身并无问题，缺的是把线程铺开的放置逻辑。现已在这条放置路径上新增四层机制，自派生到唤醒依次生效，其结构与落点见图~\ref{fig:sched-arch}。
+三点叠加的结果是整机只在单个小核上排队，smp8 与 smp4 的读数逐字节相同，sysbench cpu 无论线程数多少都停在 \nLadderBase{} ev/s 附近，八线程落后同机 Linux 约三十倍。这一差距纯由放置造成：一组强制每核各钉一份任务的对照读到接近八核理论上限的吞吐，确认单核算力本身并无问题，缺的是把线程铺开的放置逻辑。现已在这条放置路径上新增四层机制，自派生到唤醒依次生效，其结构与落点见图~\ref{fig:sched-arch}。
 
 \subsection{跨核派生与唤醒分发（\#1656）}
 
@@ -31,7 +31,7 @@ RK3588 采用大小核结构，8 个核分属两簇：cpu0 至 cpu3 为 A55 小�
 
 轮转把真并发暴露出来后，几处此前被启动核串行化所掩盖的缺陷随之显现，均按 Linux 语义修正并随 \#1656 一并验证。一处是 SMP 下的 ptrace 缺陷：\texttt{wait\_ptrace\_resume} 会因一次善意的跨核 \texttt{interrupt()} 放弃 trace-stop，使刚执行 \texttt{TRACEME} 的子进程越过 \texttt{raise(SIGSTOP)} 继续运行。一处是 riscv64 的远程 kick 合并竞态：\texttt{REMOTE\_RESCHEDULE\_PENDING} 会压制掉排在在途 reschedule 之后落核任务的 IPI，把它搁在无 tick 的 idle 上，以 \texttt{force\_kick\_remote\_cpu} 补发 IPI 修复。一处是 \texttt{pivot\_root} 后关机时的卸载 panic：init 的 \texttt{unmount\_all} 在共享挂载命名空间未静默时 panic，改为尽力卸载，并增设一把对应 Linux \texttt{namespace\_sem} 的全局 \texttt{MOUNT\_OP\_LOCK}。此外补上一处 POSIX 亲和性缺口：\texttt{do\_clone} 从不复制父线程的 cpumask，使一个 \texttt{taskset -c 0} 限定的 sysbench 仍可能运行到 A76 上，修正为在克隆时令子线程继承父线程的亲和性掩码。
 
-跨核分发把上板 sysbench cpu \keyres{从平线 \nLadderBase{} 抬到八线程 \nLadderA{} ev/s}，确认此前的亏损纯粹来自放置。
+跨核分发把上板 sysbench cpu \keyres{从平线 \nLadderBase{} 抬到八线程 \nLadderA{} ev/s}，确认此前的差距纯粹来自放置。
 
 \subsection{占用感知的放置}
 

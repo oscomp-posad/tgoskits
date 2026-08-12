@@ -1,7 +1,7 @@
 % 14_baseline_contrib
 \section{基础版本与增量贡献}
 
-本节汇总增量工作及其相对基线的位置与状态；原生显示驱动栈（VOP2 与 HDMI）已完成主机侧验证与板级点亮（ROPLL 锁定），尚在整理为可独立拆分的 PR，故暂未列入下表。基线取 \texttt{rcore-os/tgoskits} 的 \texttt{dev} 分支，commit \texttt{73409e079}，上游仓库为 \texttt{github.com/\allowbreak rcore-os/\allowbreak tgoskits}。其上运行的机器人应用移植自 \texttt{pengzechen/\allowbreak aka-rk3588}，模型转换与量化工具取自 \texttt{airockchip/\allowbreak rknn-toolkit2}。集成分支的首个提交即把基线固定于该提交点，此后每一处改动都以它派生，作为一个原子 PR 回到上游、对应的跨内核共享 crate 或 QEMU fork。改动拆到一次即可独立回归的粒度，每条都能对照固定基线单独核对得失，评审也只需关注单一处逻辑。
+本节汇总增量工作及其相对基线的位置与状态；原生显示驱动栈（VOP2 与 HDMI）已完成主机侧验证与板级点亮（ROPLL 锁定），正整理为可独立拆分的 PR，稍后列入。基线取 \texttt{rcore-os/tgoskits} 的 \texttt{dev} 分支，commit \texttt{73409e079}，上游仓库为 \texttt{github.com/\allowbreak rcore-os/\allowbreak tgoskits}。其上运行的机器人应用移植自 \texttt{pengzechen/\allowbreak aka-rk3588}，模型转换与量化工具取自 \texttt{airockchip/\allowbreak rknn-toolkit2}。集成分支的首个提交即把基线固定于该提交点，此后每一处改动都以它派生，作为一个原子 PR 回到上游、对应的跨内核共享 crate 或 QEMU fork。改动拆到一次即可独立回归的粒度，每条都能对照固定基线单独核对得失，评审也只需关注单一处逻辑。
 
 全部改动分为两条并行推进的线。系统内核侧覆盖性能观测、调度、内存与页表正确性、CPU DVFS 与基准套件；仿真与板级侧覆盖 QEMU RKNPU 仿真器、加速器与图形驱动、串口与外设、网络及机器人应用。表~\ref{tab:contrib} 按子系统列出全部条目，状态分三档：已合并表示已并入对应目标仓库（上游或 QEMU fork），在审表示已提交并处于评审中，已准备表示已在集成分支实现、待拆分为独立 PR。
 
