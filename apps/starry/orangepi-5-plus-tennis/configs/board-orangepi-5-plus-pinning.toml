@@ -1,0 +1,19 @@
+# Staged affinity sweep on StarryOS for the want_float=0 (dequant-on-demand)
+# build (see configs/run_pinning_sweep.sh): 7 live passes that isolate the
+# dequant win and then stack A76 big-core placement in stages, 20s each, full
+# profiling. Drives the on-rootfs script so shell_init_cmd is one short line.
+board_type = "OrangePi-5-Plus"
+shell_prefix = "root@starry:/root #"
+shell_init_cmd = "cd /tennis_app && sh run_pinning_sweep.sh"
+# Each pass prints its own TENNIS_BENCH_DONE; gate on the unique final marker so
+# all 7 configs run instead of tearing down after the first.
+success_regex = [
+  "(?m)^TENNIS_SWEEP_DONE$",
+]
+fail_regex = [
+  "(?i)\\bpanic(?:ked)?\\b",
+  "(?m)^rknn_init fail!.*$",
+  "(?i)error while loading shared libraries",
+  "(?m)^(tennis_app|sh): .*not found",
+]
+timeout = 600

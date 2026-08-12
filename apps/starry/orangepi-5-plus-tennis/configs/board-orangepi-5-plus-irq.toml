@@ -1,0 +1,17 @@
+# xHCI-IRQ-to-cpu4 throughput test (see configs/run_irq_throughput.sh): 2 live
+# passes that vary the libuvc capture-thread placement while the kernel routes
+# the USB completion IRQ to cpu4. Measures whether consolidating the capture path
+# on an idle A76 lifts processed fps above the ~14fps cpu0-supply ceiling.
+board_type = "OrangePi-5-Plus"
+shell_prefix = "root@starry:/root #"
+shell_init_cmd = "cd /tennis_app && sh run_irq_throughput.sh"
+success_regex = [
+  "(?m)^TENNIS_SWEEP_DONE$",
+]
+fail_regex = [
+  "(?i)\\bpanic(?:ked)?\\b",
+  "(?m)^rknn_init fail!.*$",
+  "(?i)error while loading shared libraries",
+  "(?m)^(tennis_app|sh): .*not found",
+]
+timeout = 600

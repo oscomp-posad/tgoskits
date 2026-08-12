@@ -1,0 +1,16 @@
+# tennis app — fixed-image validation image list (PLACEHOLDER)
+#
+# OPTIONAL and not yet active: the tennis app does not implement an on-device
+# fixed-image validation harness yet, and no tennis.rknn model is pinned.
+#
+# Format (once the harness + a pinned model exist):
+#   - one image path per line
+#   - paths are relative to /tennis_app (the install root on the board), e.g.
+#     an image at /tennis_app/validation/foo.jpg is listed as
+#       validation/foo.jpg
+#   - blank lines and lines beginning with '#' are ignored
+#
+# See validation/README.md and the sibling app
+# apps/starry/orangepi-5-plus-uvc-rknn for the model to follow.
+#
+# NO real image entries yet — add them when the validation set is created.

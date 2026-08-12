@@ -1,0 +1,13 @@
+# TEMP (untracked) uboot config: auto-run the MJPEG->JPU->RGA->NPU pipeline after
+# boot. Boots the tennis kernel (jpeg+rga+rknpu) over serial ymodem, waits for the
+# shell, runs the MJPEG bench, ends on the unique TENNIS_MJPEG_DONE.
+serial = "/dev/cu.usbserial-AQ03MLX2"
+baud_rate = "1500000"
+dtb_file = "os/StarryOS/configs/board/orangepi-5-plus.dtb"
+
+shell_prefix = "root@starry"
+shell_init_cmd = "sh /tennis_app/run_mjpeg.sh"
+
+success_regex = ["TENNIS_MJPEG_DONE"]
+fail_regex = ["panicked at"]
+timeout = 240

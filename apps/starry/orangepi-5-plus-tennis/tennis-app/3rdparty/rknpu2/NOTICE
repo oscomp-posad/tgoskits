@@ -1,0 +1,9 @@
+RKNPU2 runtime (librknnrt) — Rockchip Electronics Co., Ltd.
+
+This directory vendors Rockchip's RKNPU2 NPU runtime (librknnrt.so) and its
+public C headers, obtained from https://github.com/airockchip/rknn-toolkit2
+(the rknpu2 component). The runtime is a closed-source Rockchip binary,
+redistributed under Rockchip's runtime redistribution terms. It is included
+unmodified, solely as a prebuilt shared object that the app links against.
+
+Copyright (c) Rockchip Electronics Co., Ltd. All rights reserved.

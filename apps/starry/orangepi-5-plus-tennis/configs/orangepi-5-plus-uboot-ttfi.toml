@@ -1,0 +1,13 @@
+# TTFI measurement uboot config: boot the tennis kernel over serial ymodem,
+# wait for the shell, run the TTFI bench (run_ttfi.sh must already be deployed
+# to /tennis_app on the board rootfs), end on the unique TENNIS_TTFI_DONE.
+serial = "/dev/cu.usbserial-AQ03MLX2"
+baud_rate = "1500000"
+dtb_file = "os/StarryOS/configs/board/orangepi-5-plus.dtb"
+
+shell_prefix = "root@starry"
+shell_init_cmd = "sh /tennis_app/run_ttfi.sh"
+
+success_regex = ["TENNIS_TTFI_DONE"]
+fail_regex = ["panicked at"]
+timeout = 420

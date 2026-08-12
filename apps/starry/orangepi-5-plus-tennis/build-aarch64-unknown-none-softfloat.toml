@@ -1,0 +1,24 @@
+# Build-time config for the Orange Pi 5 Plus tennis-ball pickup Starry demo.
+# Driver/feature set mirrors the orangepi-5-plus-uvc-rknn app (UVC over USB,
+# RKNN NPU, RTL8125 for the optional HTTP path, Rockchip SoC/storage).
+target = "aarch64-unknown-none-softfloat"
+features = [
+  "ax-driver/irq",
+  "ax-driver/list-pci-devices",
+  "ax-driver/rk3588-pcie",
+  "ax-driver/realtek-rtl8125",
+  "ax-driver/rockchip-soc",
+  "ax-driver/rockchip-dwc-xhci",
+  "ax-driver/rockchip-sdhci",
+  "ax-driver/rockchip-dwmmc",
+  "rknpu",
+  "rga",
+  "jpeg",
+]
+log = "Warn"
+# The live pipeline runs the libuvc capture thread and the perception/control
+# loop on separate cores, so SMP helps end-to-end latency. All 8 cores (4x A55 +
+# 4x A76) are enabled so the scheduler has the full RK3588 topology to place the
+# capture, perception, and control threads on; this is the baseline for the
+# scheduler/pipeline optimization work.
+max_cpu_num = 8

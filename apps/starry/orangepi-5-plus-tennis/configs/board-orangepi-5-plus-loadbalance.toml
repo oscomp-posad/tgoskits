@@ -1,0 +1,17 @@
+# Scheduler reinvestigation: kernel built with `sched-loadbalance` ON, xHCI IRQ
+# left on cpu0. Runs configs/run_loadbalance.sh (3x no-affinity live passes) to
+# measure whether the work-stealing + big.LITTLE balancer lifts processed fps and
+# whether its cross-core wake routing trips the run_queue.rs:633 on_cpu deadlock.
+board_type = "OrangePi-5-Plus"
+shell_prefix = "root@starry:/root #"
+shell_init_cmd = "cd /tennis_app && sh run_loadbalance.sh"
+success_regex = [
+  "(?m)^TENNIS_SWEEP_DONE$",
+]
+fail_regex = [
+  "(?i)\\bpanic(?:ked)?\\b",
+  "(?m)^rknn_init fail!.*$",
+  "(?i)error while loading shared libraries",
+  "(?m)^(tennis_app|sh): .*not found",
+]
+timeout = 600

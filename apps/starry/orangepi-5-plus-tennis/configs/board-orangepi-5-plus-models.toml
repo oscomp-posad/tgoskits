@@ -1,0 +1,20 @@
+board_type = "OrangePi-5-Plus"
+shell_prefix = "root@starry:/root #"
+# Baseline 4-model comparison on StarryOS (see configs/run_models.sh): live
+# camera -> RKNN detect -> state machine -> virtual actuators, 20s per model,
+# with full profiling. Drives the on-rootfs script so shell_init_cmd is one
+# short line. Reaching the shell at all proves the SD rootfs mounted; the live
+# passes prove the UVC camera streams full frames.
+shell_init_cmd = "cd /tennis_app && sh run_models.sh"
+# Each model's tennis_app prints TENNIS_BENCH_DONE, so gate on the script's
+# unique final marker instead, or all 4 would be torn down after the first.
+success_regex = [
+  "(?m)^TENNIS_MULTI_DONE$",
+]
+fail_regex = [
+  "(?i)\\bpanic(?:ked)?\\b",
+  "(?m)^rknn_init fail!.*$",
+  "(?i)error while loading shared libraries",
+  "(?m)^(tennis_app|sh): .*not found",
+]
+timeout = 360

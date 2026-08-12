@@ -1,0 +1,13 @@
+# TEMP (untracked) uboot config: auto-run the Path A zero-copy bench after boot.
+# Boots the post-merge StarryOS kernel over serial ymodem, waits for the shell,
+# auto-types the single-model profiled bench, ends on the unique TENNIS_PATHA_DONE.
+serial = "/dev/cu.usbserial-AQ03MLX2"
+baud_rate = "1500000"
+dtb_file = "os/StarryOS/configs/board/orangepi-5-plus.dtb"
+
+shell_prefix = "root@starry"
+shell_init_cmd = "sh /tennis_app/run_pathA.sh"
+
+success_regex = ["TENNIS_PATHA_DONE"]
+fail_regex = ["panicked at"]
+timeout = 180
