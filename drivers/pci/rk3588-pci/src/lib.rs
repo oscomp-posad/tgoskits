@@ -61,7 +61,14 @@ const PCIE_ATU_TYPE_CFG0: u32 = 0x4;
 const PCIE_ATU_TYPE_CFG1: u32 = 0x5;
 
 const PCIE_LINK_WAIT_US: u64 = 10_000;
-const PCIE_LINK_WAIT_RETRIES: usize = 80;
+// 100ms, not 800ms: a present endpoint completes LTSSM training in well under
+// 10ms (firmware-trained links are already preserved by the early-out above),
+// so the only thing the long wait buys is 800ms of dead time on every *empty*
+// connector — 4 controllers x 800ms was ~3.2s of the boot path on a board with
+// no PCIe cards. 100ms matches the Linux dwc fast-path link timeout and still
+// covers a cold-trained device. Probing is synchronous here (Linux trains
+// links asynchronously), so this wait is on the critical boot path.
+const PCIE_LINK_WAIT_RETRIES: usize = 10;
 const PCIE_LINK_STABLE_WAIT_MS: u64 = 50;
 const RK3588_PCIE_PERST_INACTIVE_MS: u64 = 200;
 const CFG_ATU_REGION: u8 = 0;
