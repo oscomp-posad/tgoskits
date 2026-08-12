@@ -1,0 +1,11 @@
+### ABL profile=cpu tag=run reps=3 Linux 10.0.0
+A55_1T r1     events per second:   361.28
+A55_1T r2     events per second:   361.04
+A55_1T r3     events per second:   361.02
+A76_1T r1     events per second:   904.00
+A76_1T r2     events per second:   895.15
+A76_1T r3     events per second:   898.67
+ALL_8T r1     events per second:  4980.84
+ALL_8T r2     events per second:  4999.93
+ALL_8T r3     events per second:  4987.50
+### ABL_DONE profile=cpu tag=run >>>ABLDONE<<<

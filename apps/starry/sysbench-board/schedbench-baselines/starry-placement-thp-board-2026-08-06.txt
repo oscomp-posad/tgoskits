@@ -1,0 +1,178 @@
+SCHEDBENCH_BEGIN
+
+SBB_UNAME Linux 10.0.0 aarch64
+
+=== HACKBENCH (Time in s, LOWER=better) ===
+
+### hackbench -p -g 2 -P
+
+Running in process mode with 2 groups using 40 file descriptors each (== 80 tasks)
+
+Each sender will pass 100 messages of 100 bytes
+
+Time: 0.436
+
+### hackbench -p -g 5 -P
+
+Running in process mode with 5 groups using 40 file descriptors each (== 200 tasks)
+
+Each sender will pass 100 messages of 100 bytes
+
+Time: 1.905
+
+### hackbench -p -g 10 -P
+
+Running in process mode with 10 groups using 40 file descriptors each (== 400 tasks)
+
+Each sender will pass 100 messages of 100 bytes
+
+fork() (error: Bad address)
+
+12 children started.  Expected 40
+
+sending SIGTERM to all child processes
+
+signaling 252 worker threads to terminate
+
+Signal 15 caught, longjmp'ing out!
+
+longjmp'ed out, reaping children
+
+sending SIGTERM to all child processes
+
+Signal 15 caught, longjmp'ing out!
+
+longjmp'ed out, reaping children
+
+sending SIGTERM to all child processes
+
+signaling 240 worker threads to terminate
+
+Time: 240.565
+
+Signal 15 caught, longjmp'ing out!
+
+longjmp'ed out, reaping children
+
+sending SIGTERM to all child processes
+
+signaling 240 worker threads to terminate
+
+Time: 240.581
+
+signaling 200 worker threads to terminate
+
+Time: 240.712
+
+Creating workers (error: Bad address)
+
+TIMEOUT/err
+
+### hackbench -p -g 2 -T
+
+Running in threaded mode with 2 groups using 40 file descriptors each (== 80 tasks)
+
+Each sender will pass 100 messages of 100 bytes
+
+Time: 2.394
+
+### hackbench -p -g 5 -T
+
+Running in threaded mode with 5 groups using 40 file descriptors each (== 200 tasks)
+
+Each sender will pass 100 messages of 100 bytes
+
+Time: 6.749
+
+### hackbench -p -g 10 -T
+
+Running in threaded mode with 10 groups using 40 file descriptors each (== 400 tasks)
+
+Each sender will pass 100 messages of 100 bytes
+
+Time: 27.254
+
+=== SCHBENCH (latency us lower / RPS higher; 30s cap) ===
+
+### schbench -m 1 -t 4 -r 5
+
+Wakeup Latencies percentiles (usec) runtime 5 (s) (640 total samples)
+
+	  50.0th: 1042       (192 samples)
+
+	  90.0th: 2468       (261 samples)
+
+	* 99.0th: 25504      (53 samples)
+
+	  99.9th: 26528      (6 samples)
+
+	  min=6, max=26503
+
+Request Latencies percentiles (usec) runtime 5 (s) (640 total samples)
+
+	  50.0th: 24672      (172 samples)
+
+	  90.0th: 26336      (196 samples)
+
+	* 99.0th: 95360      (57 samples)
+
+	  99.9th: 123264     (6 samples)
+
+	  min=24336, max=123205
+
+RPS percentiles (requests) runtime 5 (s) (6 total samples)
+
+	  20.0th: 107        (2 samples)
+
+	* 50.0th: 123        (1 samples)
+
+	  90.0th: 136        (3 samples)
+
+	  min=107, max=136
+
+average rps: 128.00
+
+sched delay: message 0 (usec) worker 0 (usec)
+
+### schbench -m 2 -t 8 -r 5
+
+Wakeup Latencies percentiles (usec) runtime 5 (s) (461 total samples)
+
+	  50.0th: 24416      (140 samples)
+
+	  90.0th: 89472      (183 samples)
+
+	* 99.0th: 143104     (41 samples)
+
+	  99.9th: 201472     (4 samples)
+
+	  min=9, max=201468
+
+Request Latencies percentiles (usec) runtime 5 (s) (461 total samples)
+
+	  50.0th: 85888      (139 samples)
+
+	  90.0th: 239872     (183 samples)
+
+	* 99.0th: 417280     (42 samples)
+
+	  99.9th: 484864     (4 samples)
+
+	  min=24380, max=484505
+
+RPS percentiles (requests) runtime 5 (s) (6 total samples)
+
+	  20.0th: 81         (2 samples)
+
+	* 50.0th: 85         (1 samples)
+
+	  90.0th: 90         (3 samples)
+
+	  min=81, max=90
+
+average rps: 92.20
+
+sched delay: message 0 (usec) worker 0 (usec)
+
+SCHEDBENCH_DONE
+

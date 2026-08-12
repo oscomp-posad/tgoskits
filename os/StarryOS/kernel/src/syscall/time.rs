@@ -22,7 +22,7 @@ pub fn sys_clock_gettime(clock_id: __kernel_clockid_t, ts: *mut timespec) -> AxR
             monotonic_time()
         }
         CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID => {
-            let (utime, stime) = current().as_thread().time.borrow().output();
+            let (utime, stime) = current().as_thread().time.lock().output();
             utime + stime
         }
         _ => {
@@ -77,7 +77,7 @@ pub struct Tms {
 }
 
 pub fn sys_times(tms: *mut Tms) -> AxResult<isize> {
-    let (utime, stime) = current().as_thread().time.borrow().output();
+    let (utime, stime) = current().as_thread().time.lock().output();
     let (cutime, cstime) = current().as_thread().proc_data.children_cpu_time();
     tms.vm_write(Tms {
         tms_utime: utime.as_micros() as usize,
@@ -90,7 +90,7 @@ pub fn sys_times(tms: *mut Tms) -> AxResult<isize> {
 
 pub fn sys_getitimer(which: i32, value: *mut itimerval) -> AxResult<isize> {
     let ty = ITimerType::from_repr(which).ok_or(AxError::InvalidInput)?;
-    let (it_interval, it_value) = current().as_thread().time.borrow().get_itimer(ty);
+    let (it_interval, it_value) = current().as_thread().time.lock().get_itimer(ty);
 
     value.vm_write(itimerval {
         it_interval: timeval::from_time_value(it_interval),
@@ -109,7 +109,10 @@ pub fn sys_setitimer(
 
     let (interval, remained) = match new_value.nullable() {
         Some(new_value) => {
-            // FIXME: AnyBitPattern
+            // NOTE: `itimerval` is a plain-integer POD — two `timeval`s, each a
+            // pair of integers with no padding or otherwise-invalid bit patterns
+            // — so every bit pattern is a valid value and the unchecked
+            // `assume_init()` read is sound.
             let new_value = unsafe { new_value.vm_read_uninit()?.assume_init() };
             (
                 new_value.it_interval.try_into_time_value()?.as_nanos() as usize,
@@ -121,11 +124,17 @@ pub fn sys_setitimer(
 
     debug!("sys_setitimer <= type: {ty:?}, interval: {interval:?}, remained: {remained:?}");
 
-    let old = curr
-        .as_thread()
-        .time
-        .borrow_mut()
-        .set_itimer(ty, interval, remained);
+    let thr = curr.as_thread();
+    let old = {
+        let mut time = thr.time.lock();
+        let old = time.set_itimer(ty, interval, remained);
+        // Keep the lock-free `itimer_armed` hint (read by `set_timer_state` to
+        // stay off the lock in the common case) exact under the lock.
+        #[cfg(feature = "tickacct")]
+        thr.itimer_armed
+            .store(time.has_armed_itimer(), core::sync::atomic::Ordering::Relaxed);
+        old
+    };
 
     if let Some(old_value) = old_value.nullable() {
         old_value.vm_write(itimerval {

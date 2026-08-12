@@ -121,6 +121,12 @@ bool load_uvc_api(UvcApi *api);
 void close_uvc_api(UvcApi *api);
 
 bool start_uvc_capture(UvcCaptureSession *session, const UvcCaptureOptions *options);
+// Two halves of `start_uvc_capture` (open+negotiate, then start streaming) so a
+// caller can overlap the cheap control-transfer setup with other work and defer
+// the ISO streaming flood. Call `uvc_begin_streaming` only after a successful
+// `uvc_open_and_negotiate` on the same session.
+bool uvc_open_and_negotiate(UvcCaptureSession *session, const UvcCaptureOptions *options);
+bool uvc_begin_streaming(UvcCaptureSession *session, const UvcCaptureOptions *options);
 void stop_uvc_capture(UvcCaptureSession *session);
 bool snapshot_latest_capture(SharedState *state, LatestFrame *frame);
 UvcCaptureCounters capture_counters(SharedState *state);

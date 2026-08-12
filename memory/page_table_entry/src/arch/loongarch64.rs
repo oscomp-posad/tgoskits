@@ -184,6 +184,14 @@ impl GenericPTE for LA64PTE {
         PTEFlags::from_bits_truncate(self.0).contains(PTEFlags::GH)
     }
 
+    // LoongArch directory (table) entries carry only a physical address — no
+    // present bit (see `new_table`) — so the default `is_present() && !is_huge()`
+    // would wrongly reject them. A not-present huge block still reads
+    // `is_huge() == true` (the GH bit is present-independent), so it is excluded.
+    fn is_table(&self) -> bool {
+        !self.is_huge() && self.paddr().as_usize() != 0
+    }
+
     fn clear(&mut self) {
         self.0 = 0
     }

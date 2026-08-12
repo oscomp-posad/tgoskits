@@ -1,7 +1,7 @@
 //! OS glue for the RK3588 hardware JPEG decoder (`jpegd@fdb90000`, VDPU720).
 //!
 //! Probes the device-tree node, maps its registers, brings the engine out of
-//! reset (power domain + clocks + soft reset), puts the per-block IOMMU into
+//! reset (clocks + soft reset), puts the per-block IOMMU into
 //! pass-through (bypass) so contiguous buffers reach the engine by physical
 //! address, and registers a [`RockchipJpeg`] device. An optional boot-time
 //! self-test (feature `jpu-selftest`) decodes an embedded JPEG to validate the
@@ -10,26 +10,21 @@
 use core::ptr::NonNull;
 
 use log::info;
-use rdrive::{probe::OnProbeError, register::ProbeFdt};
+use rdrive::{
+    probe::{
+        OnProbeError,
+        fdt::{ClockLine, ResetLine},
+    },
+    register::ProbeFdt,
+};
 use rockchip_jpeg::RockchipJpeg;
 
-use crate::{
-    mmio::iomap,
-    soc::{
-        rk3588_enable_clock, rk3588_enable_power_domain, rk3588_reset_assert, rk3588_reset_deassert,
-    },
-};
-
-// RK3588 jpegd (VDPU720) constants, from the OrangePi-5-Plus device tree.
-const PD_VDPU: usize = 21;
-const CLK_ACLK_JPEG_DECODER: u32 = 436;
-const CLK_HCLK_JPEG_DECODER: u32 = 437;
-const RST_VIDEO_A: u64 = 722;
-const RST_VIDEO_H: u64 = 723;
+use crate::mmio::iomap;
 
 // The per-block Rockchip IOMMU v2 sits 0x480 into the same register page.
 const IOMMU_OFFSET: usize = 0x480;
 const RK_MMU_DTE_ADDR: usize = 0x00;
+const RK_MMU_STATUS: usize = 0x04;
 const RK_MMU_COMMAND: usize = 0x08;
 const RK_MMU_INT_MASK: usize = 0x1c;
 const RK_MMU_CMD_DISABLE_PAGING: u32 = 1;
@@ -62,8 +57,10 @@ fn probe(probe: ProbeFdt<'_>) -> Result<(), OnProbeError> {
     let size_raw = reg.size.unwrap_or(0x400) as usize;
     let (start, size, offset) = page_aligned_region(start_raw, size_raw);
     let base = unsafe { iomap(start, size)?.add(offset) };
+    let clocks = info.clock_lines()?;
+    let resets = info.reset_lines()?;
 
-    bring_up_power_and_clocks();
+    bring_up_clocks_and_resets(&clocks, &resets);
     bypass_iommu(base);
 
     let dma = axklib::dma::device_with_mask(u32::MAX as u64);
@@ -91,21 +88,24 @@ fn probe(probe: ProbeFdt<'_>) -> Result<(), OnProbeError> {
 /// Bring the engine out of reset. All steps are best-effort and idempotent; the
 /// shared VDPU root clocks are left enabled by the bootloader (as for RGA2), so
 /// failures here are logged but not fatal.
-fn bring_up_power_and_clocks() {
-    if let Err(e) = rk3588_enable_power_domain(PD_VDPU) {
-        info!("JPEG: enable PD_VDPU failed (continuing): {e}");
-    }
-    for clk in [CLK_ACLK_JPEG_DECODER, CLK_HCLK_JPEG_DECODER] {
-        if let Err(e) = rk3588_enable_clock(clk) {
-            info!("JPEG: enable clock {clk} failed (continuing): {e:?}");
+fn bring_up_clocks_and_resets(clocks: &[ClockLine], resets: &[ResetLine]) {
+    for clock in clocks {
+        if let Err(e) = clock.enable() {
+            info!(
+                "JPEG: enable clock {:?} ({:#x}) failed (continuing): {e}",
+                clock.name(),
+                clock.id().raw()
+            );
         }
     }
-    // Pulse the video resets (assert then deassert) for a known starting state.
-    for rst in [RST_VIDEO_A, RST_VIDEO_H] {
-        let _ = rk3588_reset_assert(rst);
-    }
-    for rst in [RST_VIDEO_A, RST_VIDEO_H] {
-        let _ = rk3588_reset_deassert(rst);
+    for reset in resets {
+        if let Err(e) = reset.reset() {
+            info!(
+                "JPEG: pulse reset {:?} ({:#x}) failed (continuing): {e}",
+                reset.name(),
+                reset.id().raw()
+            );
+        }
     }
 }
 
@@ -118,6 +118,16 @@ fn bypass_iommu(base: NonNull<u8>) {
         mmu.add(RK_MMU_COMMAND)
             .cast::<u32>()
             .write_volatile(RK_MMU_CMD_FORCE_RESET);
+        // The force-reset is asynchronous — the block ignores register writes while
+        // it is in flight (like Linux `rk_iommu_force_reset`). Wait for it to settle
+        // (STATUS reads back 0) before reprogramming, bounded so a wedged block can
+        // never hang probe; the volatile read also orders the following writes.
+        for _ in 0..1000 {
+            if mmu.add(RK_MMU_STATUS).cast::<u32>().read_volatile() == 0 {
+                break;
+            }
+            core::hint::spin_loop();
+        }
         mmu.add(RK_MMU_DTE_ADDR).cast::<u32>().write_volatile(0);
         mmu.add(RK_MMU_COMMAND)
             .cast::<u32>()
@@ -129,11 +139,12 @@ fn bypass_iommu(base: NonNull<u8>) {
 #[cfg(feature = "jpu-selftest")]
 fn run_selftest(jpeg: &mut RockchipJpeg) {
     let mut clock = axklib::time::monotonic_nanos;
-    match jpeg.decode_jpeg(
-        rockchip_jpeg::SELFTEST_JPEG,
-        &mut clock,
-        SELFTEST_TIMEOUT_NS,
-    ) {
+    let mut buf = [0u8; rockchip_jpeg::SELFTEST_JPEG_CAPACITY];
+    let Some(len) = rockchip_jpeg::write_selftest_jpeg(&mut buf) else {
+        info!("JPU_SELFTEST_FAIL: could not encode the self-test JPEG");
+        return;
+    };
+    match jpeg.decode_jpeg(&buf[..len], &mut clock, SELFTEST_TIMEOUT_NS) {
         Ok(status) if status.is_success() => {
             info!("JPU_SELFTEST_PASS reg1={:#010x}", status.raw())
         }

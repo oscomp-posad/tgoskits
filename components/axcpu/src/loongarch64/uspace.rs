@@ -8,7 +8,7 @@ use loongArch64::register::{
     estat::{self, Exception, Trap},
 };
 
-pub use crate::uspace_common::{ExceptionKind, ReturnReason};
+pub use crate::uspace_common::{ExceptionKind, ExceptionSyndrome, ReturnReason};
 use crate::{TrapFrame, trap::PageFaultFlags};
 
 const ECODE_LSX_DISABLED: usize = 0x10;
@@ -39,6 +39,19 @@ impl UserContext {
         const PPLV_MASK: usize = 0b11;
         const PIE: usize = 1 << 2;
         self.0.prmd = (self.0.prmd & !PPLV_MASK) | PPLV_MASK | PIE;
+    }
+
+    /// Clears any architecture single-step state after a debug exception.
+    ///
+    /// LoongArch single-step is currently emulated by temporarily patching a
+    /// `break`, so there is no saved CPU flag to clear here.
+    pub const fn clear_single_step_after_debug(&mut self) -> bool {
+        false
+    }
+
+    /// Returns the syscall instruction length in bytes.
+    pub const fn syscall_insn_len(&self) -> usize {
+        4
     }
 
     /// Enter user space.
@@ -82,6 +95,18 @@ impl UserContext {
             Trap::Exception(Exception::FetchPageFault)
             | Trap::Exception(Exception::PageNonExecutableFault) => {
                 ReturnReason::PageFault(va!(badv), PageFaultFlags::EXECUTE | PageFaultFlags::USER)
+            }
+            Trap::Exception(Exception::PagePrivilegeIllegal) => {
+                // The CPU reports only a privilege mismatch here, not whether
+                // the original access was a load, store, or fetch. An unmapped
+                // user access can also arrive here after the low-level TLB
+                // refill path installs a non-user placeholder entry. Treat it
+                // as a user page fault so the VM layer can populate a lazy user
+                // mapping or reject a real permission violation. Flush the
+                // address first in case the exception came from such an entry
+                // or a stale kernel-only TLB entry for the same VA.
+                crate::asm::flush_tlb(Some(va!(badv)));
+                ReturnReason::PageFault(va!(badv), PageFaultFlags::USER)
             }
             Trap::Exception(e) => ReturnReason::Exception(ExceptionInfo {
                 e,
@@ -142,6 +167,20 @@ pub struct ExceptionInfo {
 }
 
 impl ExceptionInfo {
+    /// Returns the faulting virtual address when the CPU records one.
+    pub const fn fault_addr(&self) -> Option<usize> {
+        Some(self.badv)
+    }
+
+    /// Returns architecture-neutral syndrome information for this exception.
+    pub const fn syndrome(&self) -> ExceptionSyndrome {
+        ExceptionSyndrome {
+            raw: self.ecode as u64,
+            class: self.ecode as u64,
+            iss: self.esubcode as u64,
+        }
+    }
+
     /// Returns a generalized kind of this exception.
     pub fn kind(&self) -> ExceptionKind {
         if matches!(

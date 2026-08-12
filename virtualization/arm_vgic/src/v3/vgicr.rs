@@ -16,7 +16,7 @@ use core::ptr;
 
 use ax_kspin::SpinNoIrq;
 use ax_memory_addr::PhysAddr;
-use axdevice_base::{AccessWidth, BaseDeviceOps};
+use axdevice_base::{AccessWidth, BaseDeviceOps, DeviceResult};
 use axvm_types::{GuestPhysAddr, GuestPhysAddrRange, HostPhysAddr};
 use log::{debug, trace};
 use spin::Once;
@@ -91,7 +91,7 @@ impl BaseDeviceOps<GuestPhysAddrRange> for VGicR {
         &self,
         addr: <GuestPhysAddrRange as axdevice_base::DeviceAddrRange>::Addr,
         width: AccessWidth,
-    ) -> ax_errno::AxResult<usize> {
+    ) -> DeviceResult<usize> {
         let gicr_base = self.host_gicr_base_this_cpu;
         let reg = addr - self.addr;
 
@@ -100,7 +100,7 @@ impl BaseDeviceOps<GuestPhysAddrRange> for VGicR {
             self.cpu_id, self.addr, reg, width
         );
 
-        match reg {
+        let result = match reg {
             GICR_CTLR => {
                 // TODO: is cross vcpu access allowed?
                 perform_mmio_read(gicr_base + reg, width)
@@ -152,7 +152,8 @@ impl BaseDeviceOps<GuestPhysAddrRange> for VGicR {
             _ => {
                 todo!("vgicr read unimplemented for reg {:#x}", reg);
             }
-        }
+        };
+        Ok(result?)
     }
 
     fn handle_write(
@@ -160,7 +161,7 @@ impl BaseDeviceOps<GuestPhysAddrRange> for VGicR {
         addr: <GuestPhysAddrRange as axdevice_base::DeviceAddrRange>::Addr,
         width: AccessWidth,
         value: usize,
-    ) -> ax_errno::AxResult<()> {
+    ) -> DeviceResult<()> {
         let gicr_base = self.host_gicr_base_this_cpu;
         let reg = addr - self.addr;
 
@@ -169,7 +170,7 @@ impl BaseDeviceOps<GuestPhysAddrRange> for VGicR {
             self.cpu_id, self.addr, reg, width, value
         );
 
-        match reg {
+        let result = match reg {
             GICR_CTLR => {
                 // TODO: is cross zone access allowed?
                 perform_mmio_write(gicr_base + reg, width, value)
@@ -216,7 +217,8 @@ impl BaseDeviceOps<GuestPhysAddrRange> for VGicR {
             _ => {
                 todo!("vgicr write unimplemented for reg {:#x}", reg);
             }
-        }
+        };
+        Ok(result?)
     }
 }
 
@@ -283,17 +285,17 @@ impl LpiPropTable {
 }
 
 /// Global LPI property table instance.
-pub static LPT: Once<spin::Mutex<LpiPropTable>> = Once::new();
+pub static LPT: Once<SpinNoIrq<LpiPropTable>> = Once::new();
 
 /// Gets or initializes the global LPI property table.
 pub fn get_lpt(
     host_gicd_typer: u32,
     host_gicr_base: HostPhysAddr,
     size_per_gicr: Option<usize>,
-) -> &'static spin::Mutex<LpiPropTable> {
+) -> &'static SpinNoIrq<LpiPropTable> {
     if !LPT.is_completed() {
         LPT.call_once(|| {
-            spin::Mutex::new(LpiPropTable::new(
+            SpinNoIrq::new(LpiPropTable::new(
                 host_gicd_typer,
                 host_gicr_base,
                 size_per_gicr,

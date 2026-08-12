@@ -43,11 +43,13 @@ use alloc::{
     vec::Vec,
 };
 use core::{
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     task::Waker,
+    time::Duration,
 };
 
 use ax_hal::time::{NANOS_PER_MICROS, monotonic_time_nanos};
+use ax_kspin::SpinRwLock as RwLock;
 use ax_sync::Mutex;
 use ax_task::WaitQueue;
 use axpoll::IoEvents;
@@ -61,7 +63,6 @@ use smoltcp::{
         TcpPacket,
     },
 };
-use spin::RwLock;
 
 use crate::{
     LISTEN_TABLE,
@@ -73,6 +74,22 @@ use crate::{
 };
 
 const DEVICE_RX_WORKER_BATCH: usize = 16;
+const DEVICE_RX_IDLE_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+/// Per-interface cumulative RX/TX byte and packet counters.
+///
+/// Populated from the router data paths and read by `/proc/net/dev`. Byte
+/// counts use the IP packet length carried on the `Medium::Ip` links exposed by
+/// this stack.
+#[derive(Debug, Clone)]
+pub struct NetDevStats {
+    pub interface_id: InterfaceId,
+    pub name: String,
+    pub rx_bytes: u64,
+    pub rx_packets: u64,
+    pub tx_bytes: u64,
+    pub tx_packets: u64,
+}
 
 #[derive(Debug)]
 pub struct Rule {
@@ -253,6 +270,16 @@ struct DeviceHandle {
     tx_wake: Arc<WaitQueue>,
     /// Waker registered into the concrete device.
     rx_waker: Waker,
+    /// Sticky readiness bit for RX wakeups. `WaitQueue` notifications are not
+    /// sticky, so a device wake that races with the worker entering `wait()`
+    /// must be preserved here until the worker observes it.
+    rx_ready: AtomicBool,
+    /// Cumulative bytes/packets received on and transmitted by this interface,
+    /// exposed through `/proc/net/dev`.
+    rx_bytes: AtomicU64,
+    rx_packets: AtomicU64,
+    tx_bytes: AtomicU64,
+    tx_packets: AtomicU64,
 }
 
 impl DeviceHandle {
@@ -273,7 +300,44 @@ impl DeviceHandle {
             rx_waker: Waker::from(Arc::new(DeviceRxWake {
                 device: weak.clone(),
             })),
+            rx_ready: AtomicBool::new(false),
+            rx_bytes: AtomicU64::new(0),
+            rx_packets: AtomicU64::new(0),
+            tx_bytes: AtomicU64::new(0),
+            tx_packets: AtomicU64::new(0),
         })
+    }
+
+    /// Records `len` bytes received on this interface.
+    fn count_rx(&self, len: usize) {
+        self.rx_bytes.fetch_add(len as u64, Ordering::Relaxed);
+        self.rx_packets.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Records `len` bytes transmitted by this interface.
+    fn count_tx(&self, len: usize) {
+        self.tx_bytes.fetch_add(len as u64, Ordering::Relaxed);
+        self.tx_packets.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn stats(&self) -> NetDevStats {
+        NetDevStats {
+            interface_id: self.interface_id,
+            name: self.name.clone(),
+            rx_bytes: self.rx_bytes.load(Ordering::Relaxed),
+            rx_packets: self.rx_packets.load(Ordering::Relaxed),
+            tx_bytes: self.tx_bytes.load(Ordering::Relaxed),
+            tx_packets: self.tx_packets.load(Ordering::Relaxed),
+        }
+    }
+
+    fn wake_rx(&self) {
+        self.rx_ready.store(true, Ordering::Release);
+        self.rx_wake.notify_one(true);
+    }
+
+    fn take_rx_ready(&self) -> bool {
+        self.rx_ready.swap(false, Ordering::AcqRel)
     }
 
     fn enqueue_tx(&self, next_hop: IpAddress, packet: &[u8]) -> bool {
@@ -294,6 +358,7 @@ impl DeviceHandle {
             );
             return false;
         }
+        self.count_tx(packet.len());
         self.tx_wake.notify_one(true);
         true
     }
@@ -328,7 +393,7 @@ impl Wake for DeviceRxWake {
 
     fn wake_by_ref(self: &Arc<Self>) {
         if let Some(device) = self.device.upgrade() {
-            device.rx_wake.notify_one(true);
+            device.wake_rx();
         }
     }
 }
@@ -509,6 +574,13 @@ impl Router {
         self.devices.get(dev).map(|device| device.interface_id)
     }
 
+    /// Finds the router device index for a public interface id.
+    pub fn device_index_for_interface_id(&self, interface_id: InterfaceId) -> Option<usize> {
+        self.devices
+            .iter()
+            .position(|device| device.interface_id == interface_id)
+    }
+
     /// Returns names of all registered devices.
     pub fn device_names(&self) -> Vec<String> {
         self.devices
@@ -658,6 +730,12 @@ impl Router {
     ) -> bool {
         let device = &self.devices[dev];
         if device.interface_id == InterfaceId::LOOPBACK {
+            // Loopback traffic is transmitted and received on the same
+            // interface. RX is counted here (not in `poll`) because the injected
+            // packet is drained from the shared RX queue without an owning
+            // device.
+            device.count_tx(packet.len());
+            device.count_rx(packet.len());
             return inject_loopback_rx(&self.queues.rx, next_hop, packet);
         }
         device.enqueue_tx(next_hop, packet)
@@ -672,6 +750,11 @@ impl Router {
         entries
     }
 
+    /// Returns a per-interface snapshot of RX/TX byte and packet counters.
+    pub fn net_dev_stats(&self) -> Vec<NetDevStats> {
+        self.devices.iter().map(|device| device.stats()).collect()
+    }
+
     /// Registers a global device-readiness waker for all devices.
     pub fn register_device_waker(&self, waker: &core::task::Waker) {
         for device in &self.devices {
@@ -684,7 +767,7 @@ impl Router {
     pub fn wake_all_devices(&self) {
         for device in &self.devices {
             wake_device_poll(device);
-            device.rx_wake.notify_one(true);
+            device.wake_rx();
         }
     }
 
@@ -792,7 +875,10 @@ fn dispatch_unicast_packet(
     let dev = &devices[route.dev];
     if dev.interface_id == InterfaceId::LOOPBACK {
         // Loopback packets are copied directly from the TX buffer into the RX
-        // buffer, bypassing per-device workers and the shared RX queue.
+        // buffer, bypassing per-device workers and the shared RX queue. This
+        // fast path never reaches `poll`, so both directions are counted here.
+        dev.count_tx(packet.len());
+        dev.count_rx(packet.len());
         inject_loopback_rx_direct(rx_buffer, dst_addr, packet, sockets)
     } else {
         dev.enqueue_tx(route.next_hop, packet)
@@ -882,6 +968,7 @@ fn device_rx_worker(device: Arc<DeviceHandle>) {
         }
 
         while let Ok((interface_id, packet)) = rx_buffer.dequeue() {
+            let packet_len = packet.len();
             let rx = RxPacket {
                 interface_id,
                 bytes: match QueuedPacket::new(packet) {
@@ -902,13 +989,16 @@ fn device_rx_worker(device: Arc<DeviceHandle>) {
                 ax_task::yield_now();
                 break;
             }
+            device.count_rx(packet_len);
             crate::request_poll();
             received = true;
         }
 
         if !received {
             register_device_poll(&device, &device.rx_waker);
-            device.rx_wake.wait();
+            device
+                .rx_wake
+                .wait_timeout_until(DEVICE_RX_IDLE_POLL_INTERVAL, || device.take_rx_ready());
         }
     }
 }
@@ -1027,6 +1117,8 @@ impl smoltcp::phy::Device for Router {
 
 #[cfg(test)]
 mod tests {
+    use smoltcp::storage::PacketBuffer;
+
     use super::*;
 
     const IF0: InterfaceId = InterfaceId::new(2);
@@ -1034,8 +1126,53 @@ mod tests {
     const SRC0: IpAddress = IpAddress::Ipv4(Ipv4Address::new(10, 0, 0, 2));
     const SRC1: IpAddress = IpAddress::Ipv4(Ipv4Address::new(10, 0, 1, 2));
 
+    struct EmptyDevice;
+
+    impl Device for EmptyDevice {
+        fn name(&self) -> &str {
+            "empty"
+        }
+
+        fn recv(
+            &mut self,
+            _interface_id: InterfaceId,
+            _buffer: &mut PacketBuffer<InterfaceId>,
+            _timestamp: Instant,
+            _snoop: &mut dyn FnMut(&[u8]),
+        ) -> bool {
+            false
+        }
+
+        fn send(&mut self, _next_hop: IpAddress, _packet: &[u8], _timestamp: Instant) -> bool {
+            false
+        }
+    }
+
+    fn test_device_handle(device: Box<dyn Device>) -> Arc<DeviceHandle> {
+        let queues = Arc::new(RouterQueues {
+            rx: Arc::new(BoundedPacketQueue::new(1)),
+        });
+        DeviceHandle::new(IF0, device, &queues)
+    }
+
     fn ipv4_cidr(addr: Ipv4Address, prefix_len: u8) -> IpCidr {
         Ipv4Cidr::new(addr, prefix_len).into()
+    }
+
+    #[test]
+    fn rx_worker_wake_is_sticky_until_observed() {
+        let device = test_device_handle(Box::new(EmptyDevice));
+
+        assert!(!device.take_rx_ready());
+        device.rx_waker.wake_by_ref();
+        assert!(device.take_rx_ready());
+        assert!(!device.take_rx_ready());
+    }
+
+    #[test]
+    fn rx_worker_idle_poll_interval_keeps_polling_devices_active() {
+        assert!(DEVICE_RX_IDLE_POLL_INTERVAL > core::time::Duration::ZERO);
+        assert!(DEVICE_RX_IDLE_POLL_INTERVAL <= core::time::Duration::from_millis(10));
     }
 
     #[test]

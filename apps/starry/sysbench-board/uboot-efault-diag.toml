@@ -1,0 +1,13 @@
+# LOW-NOISE EFAULT diagnostic: run schbench -m1 -t4 ALONE (5 threads → immediate futex
+# EFAULT) so the kernel's bounded `EFAULT-diag` error! lines are NOT drowned by a
+# 400-task serial storm. shell_init_cmd kept short (~38 chars) to avoid serial-input
+# corruption. success_regex trips on the diag/EFAULT itself so ostool captures it then
+# tears down. If schbench hangs after the fault, the diag lines are already captured.
+serial = "/dev/cu.usbserial-AQ03MLX2"
+baud_rate = "1500000"
+dtb_file = "os/StarryOS/configs/board/orangepi-5-plus.dtb"
+shell_prefix = "root@starry:/root #"
+shell_init_cmd = "/home/orangepi/schbench -m 1 -t 4 -r 5"
+success_regex = ["EFAULT-diag", "(?i)Bad address"]
+fail_regex = ["panicked at"]
+timeout = 240

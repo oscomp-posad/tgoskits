@@ -6,7 +6,8 @@ use core::{
 };
 
 use ax_errno::{AxError, AxResult, LinuxError};
-use ax_kspin::SpinNoIrq as Mutex;
+use ax_kspin::{SpinNoIrq as Mutex, SpinRwLock as RwLock};
+use ax_runtime::hal::irq::IrqId;
 use ax_sync::Mutex as BlockingMutex;
 use ax_task::IrqNotify;
 use crab_usb::{
@@ -14,13 +15,12 @@ use crab_usb::{
     usb_if::{
         endpoint::{RequestId, TransferCompletion, TransferRequest},
         err::{TransferError, USBError},
-        host::ControlSetup,
+        host::{ControlSetup, hub::Speed},
         transfer::{Direction, Recipient, Request, RequestType},
     },
 };
 use event_listener::Event as NotifyEvent;
 use rdrive::DeviceId as RDriveDeviceId;
-use spin::RwLock;
 use starry_vm::{VmMutPtr, vm_load, vm_write_slice};
 
 use super::{
@@ -44,7 +44,8 @@ const USB_DT_CONFIG: u16 = 0x02;
 pub(super) struct UsbHostState {
     pub(super) device_id: RDriveDeviceId,
     pub(super) bus_num: u8,
-    pub(super) irq_num: Option<usize>,
+    pub(super) irq: Option<IrqId>,
+    pub(super) root_hub_speed: Speed,
     pub(super) needs_probe: bool,
     pub(super) next_device_num: u8,
     pub(super) stable_id_to_device_num: BTreeMap<usize, u8>,
@@ -373,7 +374,7 @@ impl UsbFsManager {
                 },
                 UsbDeviceRecord {
                     host_device_id: host.device_id,
-                    snapshot: root_hub_snapshot(host.bus_num),
+                    snapshot: root_hub_snapshot(host.bus_num, host.root_hub_speed),
                     present: true,
                     unopened_info: None,
                     live_device: None,
@@ -429,7 +430,7 @@ impl UsbFsManager {
                 .collect::<Vec<_>>();
             let mut pending = Vec::new();
             for host in &mut state.hosts {
-                let irq_dirty = host.irq_num.map(irq::take_dirty).unwrap_or(false);
+                let irq_dirty = host.irq.map(irq::take_dirty).unwrap_or(false);
                 if open_hosts.contains(&host.device_id) {
                     host.needs_probe |= irq_dirty;
                     continue;
@@ -1172,14 +1173,14 @@ pub(super) fn initialize_hosts(manager: &UsbFsManager) -> usize {
         state
             .hosts
             .iter()
-            .map(|host| (host.device_id, host.bus_num, host.irq_num))
+            .map(|host| (host.device_id, host.bus_num, host.irq))
             .collect::<Vec<_>>()
     };
 
     let mut initialized = 0usize;
     let mut failed_device_ids = Vec::new();
 
-    for (device_id, bus_num, irq_num) in hosts {
+    for (device_id, bus_num, host_irq) in hosts {
         let host = match rdrive::get::<ax_driver::usb::PlatformUsbHost>(device_id) {
             Ok(host) => host,
             Err(err) => {
@@ -1187,7 +1188,7 @@ pub(super) fn initialize_hosts(manager: &UsbFsManager) -> usize {
                     "usbfs: failed to reacquire USB host {:?} for init: {err:?}",
                     device_id
                 );
-                failed_device_ids.push((device_id, irq_num));
+                failed_device_ids.push((device_id, host_irq));
                 continue;
             }
         };
@@ -1199,7 +1200,7 @@ pub(super) fn initialize_hosts(manager: &UsbFsManager) -> usize {
                     "usbfs: failed to lock USB host {:?} for init: {err:?}",
                     device_id
                 );
-                failed_device_ids.push((device_id, irq_num));
+                failed_device_ids.push((device_id, host_irq));
                 continue;
             }
         };
@@ -1207,24 +1208,49 @@ pub(super) fn initialize_hosts(manager: &UsbFsManager) -> usize {
         info!("usbfs: initializing host on bus {}", bus_num);
         if let Err(err) = ax_task::future::block_on(guard.host_mut().init()) {
             warn!("usbfs: failed to initialize USB host on bus {bus_num}: {err:?}");
-            failed_device_ids.push((device_id, irq_num));
+            failed_device_ids.push((device_id, host_irq));
             continue;
+        }
+
+        if let Some(host_irq) = host_irq {
+            // DWC2 internal-DMA transfers complete through host-channel IRQs.
+            // Enable both the controller interrupt mask and the framework
+            // callback before the initial probe, because enumeration itself
+            // issues control transfers that wait for IRQ completions.
+            if let Err(err) = guard.enable_irq() {
+                warn!("usbfs: failed to enable host IRQ on bus {bus_num}: {err:?}");
+                failed_device_ids.push((device_id, Some(host_irq)));
+                continue;
+            }
+            if !irq::enable_irq(host_irq) {
+                warn!("usbfs: failed to enable framework IRQ for bus {bus_num}");
+                if let Err(err) = guard.disable_irq() {
+                    warn!("usbfs: failed to roll back host IRQ on bus {bus_num}: {err:?}");
+                }
+                failed_device_ids.push((device_id, Some(host_irq)));
+                continue;
+            }
+            irq::bootstrap_irq(host_irq);
         }
 
         let devices = match ax_task::future::block_on(guard.host_mut().probe_devices()) {
             Ok(devices) => devices,
             Err(err) => {
                 warn!("usbfs: initial probe failed on bus {bus_num}: {err:?}");
-                failed_device_ids.push((device_id, irq_num));
+                if host_irq.is_some()
+                    && let Err(disable_err) = guard.disable_irq()
+                {
+                    warn!(
+                        "usbfs: failed to disable host IRQ after probe failure on bus {bus_num}: \
+                         {disable_err:?}"
+                    );
+                }
+                failed_device_ids.push((device_id, host_irq));
                 continue;
             }
         };
-
         info!("usbfs: host on bus {} initialized", bus_num);
         initialized += 1;
-        if let Some(irq_num) = irq_num {
-            irq::bootstrap_irq(irq_num);
-        }
         manager.apply_probe_results(device_id, bus_num, devices);
     }
 
@@ -1237,9 +1263,9 @@ pub(super) fn initialize_hosts(manager: &UsbFsManager) -> usize {
         });
     }
 
-    for (_, irq_num) in failed_device_ids {
-        if let Some(irq_num) = irq_num {
-            irq::free_irq(irq_num);
+    for (_, host_irq) in failed_device_ids {
+        if let Some(host_irq) = host_irq {
+            irq::free_irq(host_irq);
         }
     }
 
@@ -1333,19 +1359,28 @@ pub(super) fn discover_hosts() -> (Vec<UsbHostState>, Vec<PendingUsbIrqSlot>) {
             }
         };
 
-        let irq_num = guard.irq_num();
-        let irq_handler = match irq_num {
-            Some(_) => guard
-                .take_irq_handler()
-                .map(|(irq_num, handler)| (Some(irq_num), handler)),
-            None => guard.take_event_handler().map(|handler| (None, handler)),
-        };
+        let host_irq =
+            guard.irq_cloned().and_then(|irq| {
+                match ax_runtime::irq::resolve_binding_irq(irq.clone()) {
+                    Ok(id) => Some(id),
+                    Err(err) => {
+                        warn!(
+                            "usbfs: failed to resolve IRQ binding {irq:?} for {device_id:?}: \
+                             {err:?}"
+                        );
+                        None
+                    }
+                }
+            });
+        let root_hub_speed = guard.root_hub_speed();
+        let irq_handler = guard
+            .take_event_handler()
+            .map(|handler| (host_irq, handler));
         drop(guard);
 
-        if let Some((slot_irq_num, handler)) = irq_handler {
-            debug_assert_eq!(irq_num, slot_irq_num);
+        if let Some((slot_irq, handler)) = irq_handler {
             irq_slots.push(PendingUsbIrqSlot {
-                irq_num: slot_irq_num,
+                irq: slot_irq,
                 device_id,
                 bus_num,
                 handler,
@@ -1355,7 +1390,8 @@ pub(super) fn discover_hosts() -> (Vec<UsbHostState>, Vec<PendingUsbIrqSlot>) {
         initialized_hosts.push(UsbHostState {
             device_id,
             bus_num,
-            irq_num,
+            irq: host_irq,
+            root_hub_speed,
             needs_probe: true,
             next_device_num: 1,
             stable_id_to_device_num: BTreeMap::new(),

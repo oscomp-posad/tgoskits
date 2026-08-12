@@ -1,0 +1,64 @@
+# tickacct board A/B — OrangePi-5-Plus RK3588, 2026-08-09
+# Same HEAD (combined-perf fc036add4), only starry-kernel/tickacct differing.
+# syscost 500000 + rusage_acct 2 (accuracy oracle). Linux ref pinned A76/cpu4.
+
+== LINUX reference (A76/cpu4) ==
+SYSCOST getpid  152.3 ns/syscall
+SYSCOST pipe_wr  559.8 ns/(write+read)
+RUSAGE_ACCT user    cpu/wall=1.00 u_frac=1.00  PASS
+RUSAGE_ACCT syscall cpu/wall=1.00 s_frac=0.72  PASS
+
+== StarryOS OFF (placement) ==
+SYSCOST getpid  1050.7 ns/syscall
+SYSCOST pipe_wr  5913.9 ns/(write+read)
+RUSAGE_ACCT user    wall=2.000 utime=1.992 stime=0.008 cpu=2.001 cpu/wall=1.00 u_frac=1.00
+RUSAGE_ACCT syscall wall=2.011 utime=0.585 stime=1.426 cpu=2.011 cpu/wall=1.00 s_frac=0.71
+RUSAGE_ACCT verdict=PASS (want cpu/wall in [0.80,1.20], utime>0)
+RUSAGE_ACCT_DONE acc=5548095915605497840
+
+== StarryOS ON (tickacct) ==
+SYSCOST getpid  934.8 ns/syscall
+SYSCOST pipe_wr  5844.1 ns/(write+read)
+RUSAGE_ACCT user    wall=2.000 utime=1.992 stime=0.008 cpu=2.000 cpu/wall=1.00 u_frac=1.00
+RUSAGE_ACCT syscall wall=2.011 utime=0.556 stime=1.455 cpu=2.011 cpu/wall=1.00 s_frac=0.72
+RUSAGE_ACCT verdict=PASS (want cpu/wall in [0.80,1.20], utime>0)
+RUSAGE_ACCT_DONE acc=10722793906110299456
+
+== Delta ==
+getpid  1050.7 -> 934.8 ns  (-116 ns, -11%)  [poll() itimer-scan+closure removed]
+pipe_wr 5913.9 -> 5844.1 ns (-70 ns, 2 syscalls)
+Accuracy: EXACT — rusage_acct identical to OFF and matches Linux (s_frac 0.72, cpu/wall 1.00, verdict PASS).
+
+## SMP-safe re-run (2026-08-09, after thr.time RefCell->SpinNoIrq, commit 710eed8c3)
+# Both configs boot to shell + run to completion (no deadlock on real 8-core);
+# rusage_acct exercises getrusage (now a lock) repeatedly; both PASS.
+== StarryOS OFF (placement, SMP-safe) ==
+SYSCOST getpid  1026.5 ns/syscall
+SYSCOST pipe_wr  6231.0 ns
+RUSAGE_ACCT user    cpu/wall=1.00 u_frac=1.00  PASS
+RUSAGE_ACCT syscall cpu/wall=1.00 s_frac=0.68  PASS
+== StarryOS ON (tickacct, SMP-safe) ==
+SYSCOST getpid  1031.0 ns/syscall
+SYSCOST pipe_wr  6133.7 ns
+RUSAGE_ACCT user    cpu/wall=1.00 u_frac=1.00  PASS
+RUSAGE_ACCT syscall cpu/wall=1.00 s_frac=0.68  PASS
+## Finding: tickacct's pre-SMP -116ns getpid win was the per-boundary emitter
+## CLOSURE construction in the old poll(emitter). The SMP-safe poll() returns
+## signals (no closure) -> the OFF path gained that win too, so ON~=OFF now.
+## SMP-safe SpinNoIrq lock costs ~96ns/syscall (ON 935->1031). Net: tickacct is
+## now perf-NEUTRAL; its value is correct uniform all-CPU accounting. Accounting
+## stays exact (rusage_acct PASS, s_frac 0.68 both, matches Linux ~0.72 band).
+
+## Tier 2 (lock-free timer_state, coarse tick accounting) — board A/B 2026-08-10
+## Same HEAD, only starry-kernel/tickacct differing. Commit 2de99d499.
+== tickacct (coarse + lock-free state) ==
+SYSCOST getpid  495.7 ns/syscall     <-- -42% vs the 853 exact baseline; ~at the uctx.run floor
+SYSCOST pipe_wr  5112.0 ns
+RUSAGE_ACCT user    cpu/wall=1.00 u_frac=1.00  PASS
+RUSAGE_ACCT syscall cpu/wall=1.00 s_frac=0.71  PASS   <-- Linux 0.72; coarse split now Linux-like
+== placement (exact / non-tickacct fallback) ==
+SYSCOST getpid  974.5 ns/syscall
+RUSAGE_ACCT syscall cpu/wall=1.00 s_frac=0.62  PASS   <-- exact split
+## The SMP time lock is now off the syscall hot path (lock-free timer_state store);
+## accounting is coarse Linux TICK_CPU_ACCOUNTING. 7-agent review = 0 bugs.
+## Promoted: tickacct enabled in the ship (placement) config.

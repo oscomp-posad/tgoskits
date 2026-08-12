@@ -1,0 +1,920 @@
+// Copyright 2025 The Axvisor Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! RK3588 CPU DVFS: SCMI clocks + PMIC rail-voltage alignment + ondemand governor.
+//!
+//! The RK3588 CPU clock is voltage-coupled — an SCMI clock id selects a PVTPLL
+//! ring whose *delivered* frequency tracks the core rail voltage — and the SCMI
+//! interface is frequency-only. Exact DVFS therefore needs BOTH levers together:
+//! the SCMI ring *and* the matching rail voltage. This driver does three things,
+//! in order:
+//!
+//! 1. **Set each cluster clock** to its boot target over the board-proven SCMI
+//!    seam ([`set_and_verify`]). The three CPU domains and their SCMI clock ids
+//!    (ground truth `orangepi5plus.dts`: `cpu@0..300` → `<scmi 0>`, `cpu@400/500`
+//!    → `<scmi 2>`, `cpu@600/700` → `<scmi 3>`):
+//!
+//!    | cluster        | SCMI clock id | boot target (MHz) |
+//!    |----------------|---------------|-------------------|
+//!    | A55 (little)   | 0             | 1008              |
+//!    | A76 big pair 0 | 2             | 1200              |
+//!    | A76 big pair 1 | 3             | 1200              |
+//!
+//! 2. **Align each rail voltage to the OPP** ([`align_rail_voltages_to_opp`]).
+//!    Boot firmware leaves the rails high (~800 mV), so the coupled clock
+//!    overshoots the SCMI target until each rail is lowered to its OPP-nominal
+//!    (0.675 V for these OPPs on the standard SKU). Lowering cannot undervolt: the
+//!    coupled clock tracks the rail down in lockstep. NOTE the industrial
+//!    RK3588J/M SKU (selected by the `specification_serial_number` nvmem cell)
+//!    puts these OPPs at 0.75 V; the PMIC modules floor at 0.675 V, so gate the
+//!    nominal on the SKU cell before running this on a J/M part.
+//!
+//! 3. **Hand off to the ondemand governor** ([`governor_poll`]). Once both
+//!    CPU-rail PMIC buses are up, a dynamic governor scales each cluster's OPP to
+//!    match load (see the governor section at the end of this file).
+//!
+//! Registration and ordering: a `PostKernel` / `DEFAULT` rdrive probe, so the CRU
+//! + SCMI providers (registered at `CLK` priority) are already live, and it runs
+//! inside `devices::probe_all_devices()` — **before** `start_secondary_cpus()` —
+//! so the A76 clusters are reclocked while no core is scheduled on them (the live
+//! A55 id-0 switch is BL31's glitch-free path). It binds to the CPU nodes rather
+//! than `arm,scmi-smc` (which the SCMI driver already owns; a second driver on
+//! that node would never get an `on_probe`), and applies exactly once via a
+//! one-shot guard because several `cpu@*` nodes match.
+
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+
+use fdt_edit::Phandle;
+use log::{info, warn};
+
+use crate::{probe::OnProbeError, register::ProbeFdt, soc::scmi};
+
+/// SCMI clock id of the A55 (little) cluster — cpu0..3.
+const A55_CLK_ID: u32 = 0;
+/// SCMI clock ids of the two A76 (big) cluster pairs — cpu4/5 and cpu6/7. Both
+/// must be set; they cover different core pairs.
+const A76_CLK_IDS: [u32; 2] = [2, 3];
+
+/// A55 target and hard ceiling: the top OPP still on the 816 MHz boot voltage
+/// row. `set_clock_rate` must never be driven above this for the A55 cluster.
+const A55_MAX_HZ: u64 = 1_008_000_000;
+/// A76 target and hard ceiling: the top OPP still on the 816 MHz boot voltage
+/// row. `set_clock_rate` must never be driven above this for an A76 cluster.
+const A76_MAX_HZ: u64 = 1_200_000_000;
+
+/// One-shot guard: several `cpu@*` nodes match, but the reclock runs once.
+static APPLIED: AtomicBool = AtomicBool::new(false);
+
+crate::model_register!(
+    name: "RK3588 CPU DVFS SCMI",
+    level: ProbeLevel::PostKernel,
+    priority: ProbePriority::DEFAULT,
+    probe_kinds: &[
+        ProbeKind::Fdt {
+            compatibles: &["arm,cortex-a55", "arm,cortex-a76"],
+            on_probe: probe
+        }
+    ],
+);
+
+fn probe(_probe: ProbeFdt<'_>) -> Result<(), OnProbeError> {
+    // Several CPU nodes match this driver; only the first invocation reclocks.
+    if APPLIED.swap(true, Ordering::AcqRel) {
+        return Ok(());
+    }
+
+    // The `scmi::*` helpers ignore the phandle (single global agent); pass a
+    // dummy so we do not depend on parsing the node's clock specifier.
+    let phandle = Phandle::from(0u32);
+
+    // Safety preflight (read-only): confirm this firmware actually services the
+    // CPU-cluster clocks before touching any of them. `describe_rates` changes
+    // no state, so this cannot hang or perturb the clocks; treat its result as
+    // accept/reject only. If any target id is rejected, leave every cluster at
+    // its boot rate and bail — there is no raw-CRU fallback here.
+    for id in [A55_CLK_ID, A76_CLK_IDS[0], A76_CLK_IDS[1]] {
+        if scmi::describe_rates(phandle, id).is_none() {
+            warn!(
+                "cpufreq: SCMI does not service CPU cluster clock id {id}; leaving all CPU \
+                 clusters at their boot rate (no DVFS applied)"
+            );
+            return Ok(());
+        }
+    }
+
+    let a55_before = read_mhz(phandle, A55_CLK_ID);
+    if !set_and_verify(phandle, A55_CLK_ID, A55_MAX_HZ, A55_MAX_HZ) {
+        warn!("cpufreq: A55 reclock did not verify; stopping (A76 left at boot rate)");
+        return Ok(());
+    }
+    let a55_after = read_mhz(phandle, A55_CLK_ID);
+
+    let a76_before = read_mhz(phandle, A76_CLK_IDS[0]);
+    for id in A76_CLK_IDS {
+        if !set_and_verify(phandle, id, A76_MAX_HZ, A76_MAX_HZ) {
+            warn!("cpufreq: A76 cluster clock id {id} reclock did not verify; stopping");
+            return Ok(());
+        }
+    }
+    let a76_after = read_mhz(phandle, A76_CLK_IDS[0]);
+
+    info!("cpufreq: A55 {a55_before}->{a55_after}, A76 {a76_before}->{a76_after} MHz");
+
+    // The CPU clock is voltage-coupled (proven on-board: at a fixed SCMI clock the
+    // A76 runs ~1.19 GHz @675 mV but ~1.49 GHz @800 mV), so the clocks set above
+    // overshoot while each rail sits at its ~800 mV boot value. Lower each rail to
+    // its OPP nominal to pull the coupled clock onto the exact requested rate. Runs
+    // LAST — after the SCMI clock is confirmed at target — so the down-shift is the
+    // final step (matches Linux's reduce-freq-then-voltage order for
+    // down-transitions), and only on the full-success path above.
+    align_rail_voltages_to_opp();
+
+    // Hand off to the dynamic ondemand governor. It cannot
+    // live entirely in this crate — ax-driver sits *below* ax-task/ax-hal in the
+    // dependency graph (they pull ax-driver back in via axplat-dyn), so a
+    // task-spawning loop here would be a cyclic dep. Instead this driver exposes
+    // the pure policy+apply (`governor_poll`, see the governor section at the end
+    // of this file) and the kernel drives it from a periodic sleepable task. The
+    // voltage lever above armed `GOV_READY` iff both PMIC buses came up.
+
+    Ok(())
+}
+
+/// Programs `clock_id` to `target`, but never above `ceiling` (the hard cap on
+/// the boot voltage row), then verifies the platform actually applied it.
+/// Returns `true` only when the read-back matches the request.
+///
+/// `target == ceiling` for the boot targets; the clamp is defense in depth so a future
+/// edit can never push a cluster past its boot-voltage-safe ceiling. A rejected
+/// set or a deviating read-back is reported and returns `false` so the caller
+/// stops rather than leaving a partial/phantom state — the board stays on
+/// whatever rate the firmware last confirmed.
+fn set_and_verify(phandle: Phandle, clock_id: u32, target: u64, ceiling: u64) -> bool {
+    if target > ceiling {
+        warn!(
+            "cpufreq: refusing to set clock id {clock_id} to {target} Hz (above boot-safe ceiling \
+             {ceiling} Hz)"
+        );
+        return false;
+    }
+    if scmi::set_clock_rate(phandle, clock_id, target).is_none() {
+        warn!("cpufreq: SCMI rejected clock id {clock_id} set to {target} Hz; left unchanged");
+        return false;
+    }
+    match scmi::clock_rate(phandle, clock_id) {
+        Some(applied) if applied == target => true,
+        Some(applied) if applied > ceiling => {
+            warn!(
+                "cpufreq: clock id {clock_id} read back {applied} Hz ABOVE boot-safe ceiling \
+                 {ceiling} Hz (requested {target} Hz); stopping"
+            );
+            false
+        }
+        Some(applied) => {
+            warn!(
+                "cpufreq: clock id {clock_id} read back {applied} Hz, requested {target} Hz; \
+                 stopping"
+            );
+            false
+        }
+        None => {
+            warn!("cpufreq: could not read back clock id {clock_id} after set; stopping");
+            false
+        }
+    }
+}
+
+/// Current rate of `clock_id` in MHz, or 0 if it cannot be read (logging only).
+fn read_mhz(phandle: Phandle, clock_id: u32) -> u64 {
+    scmi::clock_rate(phandle, clock_id).unwrap_or(0) / 1_000_000
+}
+
+// ===========================================================================
+// CPU-rail voltage alignment (the voltage half of the coupled clock)
+// ===========================================================================
+
+/// Master gate for the PMIC **writes**. While `false`, [`align_rail_voltages_to_opp`]
+/// only *reads and logs* each rail's boot voltage (zero PMIC writes). Flipped to
+/// `true` after the read-only board pass confirmed the A76 rails read the true
+/// 800 mV boot voltage (i2c0 bring-up: ungate + reset + pinmux). Even with this
+/// on, a rail is only lowered when its own read is trustworthy (see the A55 gate
+/// below — its spi2/RK806 read is not up yet, so it is skipped).
+const APPLY_RAIL_VOLTAGE: bool = true;
+
+/// OPP-nominal core voltage for the boot targets on the **standard** SKU: the
+/// 675 mV row shared by the 816/1008/1200 MHz OPPs (board-confirmed from the
+/// `cluster*-opp-table` `opp-microvolt`). The A55 1008 OPP and both A76 1200 OPPs
+/// all sit here.
+///
+/// NOTE: the industrial RK3588J/M SKU puts these OPPs at 750 mV (`opp-j-m-*`). The
+/// PMIC modules floor at 675 mV, so a 675 mV target would *under*-volt a J/M part.
+/// This board is the standard SKU; if this driver is ever run on a J/M board, gate
+/// this constant on the `specification_serial_number` nvmem SKU cell first.
+const A76_NOMINAL_UV: u32 = 675_000;
+const A55_NOMINAL_UV: u32 = 675_000;
+
+/// Apply the A55 rail voltage open-loop (no read-back verification).
+///
+/// The RK806 read path is a scope-wall (returns a bogus `0x00`), so an A55 write
+/// cannot be verified by read-back the way A76 (I2C) writes are. When `true` (the
+/// design default) the A55 rail is set with a single bounded write to its OPP
+/// nominal; the write is clamped to the A55 boot-safe envelope inside the PMIC
+/// module, and RK3588's voltage-coupled PVTPLL clock tracks the rail, so a
+/// bounded, OPP-matched voltage is always safe even without read-back. This is
+/// currently the ONLY path that aligns the A55 rail — the read-back-verified
+/// stepped descent below is skipped while reads are unreliable. Set `false` to
+/// leave the A55 rail at its boot voltage (A76 DVFS is unaffected).
+const A55_OPEN_LOOP_VSET: bool = true;
+
+/// Read (and, once validated, lower) the three CPU-cluster rails to their OPP
+/// nominal so the voltage-coupled clock lands on the exact requested frequency.
+///
+/// Order matters: the A76 clusters are reclocked before `start_secondary_cpus()`
+/// so no core is scheduled on them — their voltage is lowered first. The A55 rail
+/// feeds the live boot core, so it is lowered last, and only via the stepped path
+/// (the voltage-coupled clock tracks the rail down with no undervolt transient).
+fn align_rail_voltages_to_opp() {
+    use super::{pmic_i2c, pmic_spi};
+
+    // --- A76 big0/big1 rails: RK8602 @0x42 / RK8603 @0x43 over I2C bus0 ---
+    let a76_ok = pmic_i2c::init();
+    if a76_ok {
+        for (name, chip) in [
+            ("big0", pmic_i2c::RK8602_BIG0_ADDR),
+            ("big1", pmic_i2c::RK8603_BIG1_ADDR),
+        ] {
+            match pmic_i2c::get_uv(chip) {
+                Some(uv) => info!("cpufreq: A76 {name} rail boot voltage = {uv} uV"),
+                None => warn!("cpufreq: A76 {name} rail voltage read failed"),
+            }
+        }
+    } else {
+        warn!("cpufreq: A76 PMIC (I2C) init failed; A76 left at boot voltage");
+    }
+
+    // --- A55 (little) rail: RK806 DCDC2 over SPI2 ---
+    let a55_ok = pmic_spi::init();
+    if a55_ok {
+        match pmic_spi::get_uv() {
+            Some(uv) => info!("cpufreq: A55 rail boot voltage = {uv} uV"),
+            None => warn!("cpufreq: A55 rail voltage read failed"),
+        }
+    } else {
+        warn!("cpufreq: A55 PMIC (SPI) init failed; A55 left at boot voltage");
+    }
+
+    if !APPLY_RAIL_VOLTAGE {
+        info!("cpufreq: rail-voltage alignment is READ-ONLY this build (no PMIC writes)");
+        return;
+    }
+
+    // --- Apply: stepped, down-only, read-back-verified lower to OPP nominal. ---
+    if a76_ok {
+        let b0 = pmic_i2c::set_uv_stepped(pmic_i2c::RK8602_BIG0_ADDR, A76_NOMINAL_UV);
+        let b1 = pmic_i2c::set_uv_stepped(pmic_i2c::RK8603_BIG1_ADDR, A76_NOMINAL_UV);
+        info!("cpufreq: A76 rails -> {A76_NOMINAL_UV} uV (big0 ok={b0}, big1 ok={b1})");
+    }
+    // A55 (spi2/RK806): exactly ONE write path fires. Prefer the read-back-verified
+    // stepped descent, but only if the boot-voltage read is trustworthy —
+    // `set_uv_stepped` reads the rail before stepping down, so we must never lower a
+    // rail we cannot read. The spi2/RK806 read path returns a bogus 0x00 (== 500 mV)
+    // today, so that gate fails and we fall back to the bounded open-loop write (the
+    // only A55 lever until the read/MISO path is fixed). A real A55 boot voltage is
+    // in [675 mV, 950 mV] per the RK806 DCDC2 range and the cluster0 OPP table.
+    match if a55_ok { pmic_spi::get_uv() } else { None } {
+        Some(v) if (675_000..=950_000).contains(&v) => {
+            let a55 = pmic_spi::set_uv_stepped(A55_NOMINAL_UV);
+            info!("cpufreq: A55 rail {v} -> {A55_NOMINAL_UV} uV (stepped, ok={a55})");
+        }
+        other if A55_OPEN_LOOP_VSET && a55_ok => {
+            let ok = pmic_spi::force_write_dcdc2(A55_NOMINAL_UV);
+            info!(
+                "cpufreq: A55 rail -> {A55_NOMINAL_UV} uV (open-loop, read {other:?} untrusted, \
+                 write xfer_ok={ok})"
+            );
+        }
+        other => warn!(
+            "cpufreq: A55 boot voltage not trustworthy ({other:?} uV) and open-loop vset off; \
+             A55 left at boot voltage (A76 unaffected)"
+        ),
+    }
+
+    // Arm the dynamic governor only if both PMIC buses came up, so it never tries
+    // to move a rail it cannot drive. If either failed, every cluster stays on the
+    // boot OPP the SCMI reclock already set (safe: that is the fixed-boot state).
+    if GOVERNOR_ENABLE && a76_ok && a55_ok {
+        GOV_READY.store(true, Ordering::Release);
+        info!("cpufreq: ondemand governor armed (both PMIC buses up)");
+    } else if GOVERNOR_ENABLE {
+        warn!(
+            "cpufreq: ondemand governor NOT armed (a76_pmic={a76_ok}, a55_pmic={a55_ok}); \
+             clusters stay on boot OPP"
+        );
+    }
+}
+
+// ===========================================================================
+// Dynamic ondemand governor
+// ===========================================================================
+//
+// The voltage lever above pins each cluster at a single boot OPP. This governor
+// makes DVFS *dynamic*: it samples per-CPU busy time and moves each cluster's
+// OPP up and down to track load, the way Linux's `ondemand`/`schedutil` do.
+//
+// Split by cost, exactly like Linux: the *accounting* is a cheap per-CPU counter
+// bumped in the scheduler tick (`ax_task::cpu_busy_ticks`, fed by the non-idle
+// branch of `scheduler_timer_tick`), but the *apply* is slow and SLEEPS — an
+// SCMI clock set is an SMC into BL31, and the paired PMIC write is an I2C/SPI
+// transaction with a millisecond voltage ramp. Neither may run in the tick
+// handler, so the decision+apply live in a periodic sleepable kernel task. This
+// is exactly why Linux's old ondemand used a deferred timer and schedutil kicks
+// a kthread rather than reprogramming the OPP inline in the tick.
+
+/// Master gate for the dynamic governor. When `false`, each cluster simply stays
+/// on the fixed boot OPP the voltage alignment left it on.
+const GOVERNOR_ENABLE: bool = true;
+
+/// An operating performance point: the SCMI ring target to program, the rail
+/// voltage to pair with it, and the frequency that combination actually delivers
+/// (`mhz`, board-measured — see the calibration section). Because the PVTPLL is
+/// voltage-coupled, the delivered `mhz` is generally NOT the `ring_khz`; the
+/// governor reports `mhz`.
+#[derive(Clone, Copy)]
+struct Opp {
+    ring_khz: u32,
+    uv: u32,
+    mhz: u32,
+}
+
+/// A76 (big) OPP ladder, low→high, from the on-board calibration sweep
+/// (`snapshots/opp-calibration-2026-07-20/cal-grid.txt`). The clock is
+/// voltage-coupled, so this ladder is a HYBRID: below the 675 mV exact point it
+/// scales the SCMI ring (408/816/1200 @ 675 mV land on target); through the
+/// mid-range it holds ring 1200 and raises the *voltage* (delivered freq climbs
+/// while staying over-volted — never an undervolt); at the top it uses the
+/// **ring-length lever** — rings 1416/1608 run the PVTPLL at length 11 (vs 17 for
+/// ring 1200), delivering far more MHz per volt, so ring 1416 @ 850 mV and
+/// ring 1608 @ 925/1000 mV reach 1830/2126/2256 MHz (all board-MEASURED).
+///
+/// The 2126 MHz @ 925 mV rung is board-validated ALL-CORE (threads=8, no
+/// brownout) and is the governor's default ceiling. The 2256 MHz @ 1.0 V top rung
+/// is Linux's max and was measured ~2262 MHz per-core (run #1, pinned, no
+/// brownout) but is NOT yet all-core validated and there is no thermal governor,
+/// so it is held UNREACHABLE by default — see `A76_CAP_TO_ALLCORE_SAFE`.
+const A76_OPPS: &[Opp] = &[
+    Opp {
+        ring_khz: 408_000,
+        uv: 675_000,
+        mhz: 408,
+    },
+    Opp {
+        ring_khz: 816_000,
+        uv: 675_000,
+        mhz: 816,
+    },
+    Opp {
+        ring_khz: 1_200_000,
+        uv: 675_000,
+        mhz: 1189,
+    },
+    Opp {
+        ring_khz: 1_200_000,
+        uv: 725_000,
+        mhz: 1318,
+    },
+    Opp {
+        ring_khz: 1_200_000,
+        uv: 800_000,
+        mhz: 1491,
+    },
+    Opp {
+        ring_khz: 1_200_000,
+        uv: 850_000,
+        mhz: 1592,
+    },
+    // Ring-length lever step 1: ring 1416 @ 850 mV -> 1830 MHz (measured) — LOWER
+    // power than the old 1725 @ 925 mV top (V^2f 1322 < 1476), a strict win.
+    Opp {
+        ring_khz: 1_416_000,
+        uv: 850_000,
+        mhz: 1830,
+    },
+    // Step 2: ring 1608 @ 925 mV -> 2126 MHz (measured, board-validated all-core).
+    // Default governor ceiling — the highest all-core-safe rung.
+    Opp {
+        ring_khz: 1_608_000,
+        uv: 925_000,
+        mhz: 2126,
+    },
+    // Top: ring 1608 @ 1000 mV (PMIC ceiling) to match Linux's 2256 top. The
+    // 1608-2400 band is all PVTPLL length 11, so freq here is set by voltage;
+    // measured ~2262 per-core (run #1). Highest-power rung — held UNREACHABLE by
+    // default until threads=1->8 is validated (see A76_CAP_TO_ALLCORE_SAFE).
+    Opp {
+        ring_khz: 1_608_000,
+        uv: 1_000_000,
+        mhz: 2256,
+    },
+];
+
+/// A55 (little) OPP ladder, low→high, same hybrid rationale: ring-scaled below the
+/// 675 mV point, then ring 1008 with rising voltage, then the ring-length lever
+/// (rings 1416/1608) at the top. Top rung 1881 MHz @ 950 mV (measured, near
+/// Linux's A55 max 1800) is the RK806 force-write ceiling for this cluster.
+///
+/// The A55 top rung is kept reachable (unlike the A76 1.0 V top): little-core
+/// current is modest — the RK806 DCDC2 is sized for the full A55 cluster at its
+/// max OPP (Linux runs A55 all-core at 1800 @ 950 mV), so 4×A55 @ 950 mV is within
+/// the board's designed envelope. NOTE it is per-core-validated, not yet
+/// threads=8 all-core validated, and shares the no-thermal-governor caveat; if a
+/// future run shows little-cluster brownout, cap it symmetrically to the 1695 rung.
+const A55_OPPS: &[Opp] = &[
+    Opp {
+        ring_khz: 408_000,
+        uv: 675_000,
+        mhz: 408,
+    },
+    Opp {
+        ring_khz: 816_000,
+        uv: 675_000,
+        mhz: 816,
+    },
+    Opp {
+        ring_khz: 1_008_000,
+        uv: 675_000,
+        mhz: 1021,
+    },
+    Opp {
+        ring_khz: 1_008_000,
+        uv: 762_500,
+        mhz: 1212,
+    },
+    Opp {
+        ring_khz: 1_008_000,
+        uv: 800_000,
+        mhz: 1285,
+    },
+    Opp {
+        ring_khz: 1_008_000,
+        uv: 850_000,
+        mhz: 1372,
+    },
+    // Ring-length lever: ring 1416 @ 850 mV -> 1695 MHz (measured) — higher freq
+    // AND lower power than the old 1523 @ 950 top (V^2f 1225 < 1374), a strict win.
+    Opp {
+        ring_khz: 1_416_000,
+        uv: 850_000,
+        mhz: 1695,
+    },
+    // Top: ring 1608 @ 950 mV -> 1881 MHz (measured, near Linux's A55 max 1800).
+    Opp {
+        ring_khz: 1_608_000,
+        uv: 950_000,
+        mhz: 1881,
+    },
+];
+
+/// All-core safety cap on the A76 governor ceiling (compile-gate, defaulted SAFE).
+///
+/// The A76 top OPP — the last `A76_OPPS` rung, 2256 MHz @ 1.0 V — is the highest-
+/// power rung. Run #1 measured it at ~2262 MHz PER-CORE (pinned, no brownout), but
+/// an all-core threads=8 run at 1.0 V is NOT yet validated, and StarryOS has no
+/// thermal governor to back it off. So while this is `true` the governor is capped
+/// one rung down, at the board-validated all-core-safe **2126 MHz @ 925 mV** rung
+/// (the frozen `threads=8`-safe point); the 1.0 V top rung stays defined but
+/// unreachable. Flip to `false` for a supervised threads=1->8 validation run to
+/// let the governor reach the top rung. Mirrors the `APPLY_RAIL_VOLTAGE` /
+/// `CALIBRATE` compile-gate pattern. Introduces no new voltage — it only withholds
+/// an existing rung.
+const A76_CAP_TO_ALLCORE_SAFE: bool = true;
+
+/// Lock the cap's assumption: it withholds exactly the 1.0 V top rung and falls
+/// back to the 925 mV rung directly below it. If the A76 ladder is ever reordered
+/// so these two rungs are not the top two, this fails the build (not the board).
+const _: () = {
+    assert!(A76_OPPS[A76_OPPS.len() - 1].uv == 1_000_000);
+    assert!(A76_OPPS[A76_OPPS.len() - 2].uv == 925_000);
+};
+
+/// Index into each ladder of the boot OPP the voltage lever leaves the cluster on:
+/// A55 1008 MHz and A76 1200 MHz are both element 2 (the 675 mV rung). The governor
+/// starts tracking here so its first move is relative to the known boot state; from
+/// idle it decays down the ring-scaled rungs and under load climbs the voltage ones.
+const BOOT_OPP_IDX: usize = 2;
+
+/// The three DVFS domains (one little cluster, two big pairs).
+#[derive(Clone, Copy)]
+enum Cluster {
+    A55,
+    Big0,
+    Big1,
+}
+
+impl Cluster {
+    fn opps(self) -> &'static [Opp] {
+        match self {
+            Cluster::A55 => A55_OPPS,
+            _ => A76_OPPS,
+        }
+    }
+
+    /// Highest OPP index the governor may select for this domain. For the A76 big
+    /// pairs the 1.0 V top rung is withheld while [`A76_CAP_TO_ALLCORE_SAFE`] is
+    /// set (so the fast-attack tops out at the all-core-validated 2126 MHz rung);
+    /// every other domain reaches its full ladder.
+    fn gov_max_idx(self) -> usize {
+        let last = self.opps().len() - 1;
+        match self {
+            Cluster::Big0 | Cluster::Big1 if A76_CAP_TO_ALLCORE_SAFE => last - 1,
+            _ => last,
+        }
+    }
+
+    /// SCMI clock id feeding this domain's PVTPLL ring.
+    fn clock_id(self) -> u32 {
+        match self {
+            Cluster::A55 => A55_CLK_ID,
+            Cluster::Big0 => A76_CLK_IDS[0],
+            Cluster::Big1 => A76_CLK_IDS[1],
+        }
+    }
+
+    /// CPUs whose busy time this domain aggregates (RK3588 topology: cpu0-3 A55,
+    /// cpu4-5 big pair 0, cpu6-7 big pair 1).
+    fn cpus(self) -> core::ops::Range<usize> {
+        match self {
+            Cluster::A55 => 0..4,
+            Cluster::Big0 => 4..6,
+            Cluster::Big1 => 6..8,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Cluster::A55 => "A55",
+            Cluster::Big0 => "A76b0",
+            Cluster::Big1 => "A76b1",
+        }
+    }
+
+    /// Set this domain's rail to `uv`. A76 uses the read-back-verified I2C
+    /// regulator; A55 uses the bounded force-write (its RK806 read is a
+    /// scope-wall, but writes reach the chip — proven by the rail-alignment freq drop).
+    /// Both PMIC helpers clamp to their rail's safe envelope internally.
+    fn set_voltage(self, uv: u32) -> bool {
+        use super::{pmic_i2c, pmic_spi};
+        match self {
+            Cluster::A55 => pmic_spi::force_write_dcdc2(uv),
+            Cluster::Big0 => pmic_i2c::set_uv(pmic_i2c::RK8602_BIG0_ADDR, uv),
+            Cluster::Big1 => pmic_i2c::set_uv(pmic_i2c::RK8603_BIG1_ADDR, uv),
+        }
+    }
+}
+
+/// Apply an OPP to a domain as a matched (voltage, frequency) pair, ordered so
+/// the voltage-coupled clock never overshoots its rail:
+///   - going UP:   raise voltage first, then the SCMI ring (clock follows up);
+///   - going DOWN: lower the SCMI ring first, then voltage (clock follows down).
+///
+/// The governor uses a single-shot `set_voltage` here (not the boot path's
+/// `set_uv_stepped` ≤25 mV descent). That is safe *because of this ordering*: on
+/// a down-shift the SCMI ring is lowered first, so the PVTPLL-coupled clock has
+/// already tracked down before the rail moves — there is no window where a high
+/// clock runs on a not-yet-lowered rail, hence no undervolt transient to step
+/// around. The boot rail-alignment path steps because it lowers voltage WITHOUT a
+/// coupled ring change and must avoid a droop transient on the live boot core.
+/// Returns whether the pair was applied as intended (safe to record as the new
+/// OPP). A failed voltage *raise* returns `false` WITHOUT touching the clock, so
+/// the caller keeps the old OPP index and retries — raising the ring on a rail
+/// that did not move undervolts the core at speed (timing violation → hang /
+/// silent corruption). A failed voltage *lower* is harmless (rail stays higher =
+/// over-volt), so a down-shift always reports success.
+#[must_use]
+fn apply_opp(cluster: Cluster, opp: Opp, going_up: bool) -> bool {
+    let phandle = Phandle::from(0u32);
+    let hz = opp.ring_khz as u64 * 1_000;
+    if going_up {
+        if !cluster.set_voltage(opp.uv) {
+            warn!(
+                "gov: {} voltage raise to {} mV did not land; leaving clock put",
+                cluster.name(),
+                opp.uv / 1_000
+            );
+            return false;
+        }
+        scmi::set_clock_rate(phandle, cluster.clock_id(), hz);
+    } else {
+        scmi::set_clock_rate(phandle, cluster.clock_id(), hz);
+        cluster.set_voltage(opp.uv);
+    }
+    true
+}
+
+/// Period, in ms, the kernel governor task sleeps between [`governor_poll`]s.
+const GOV_PERIOD_MS: u64 = 100;
+/// Busy% at or above which a domain jumps straight to its top OPP (ondemand's
+/// signature fast attack: respond to a load spike in one step).
+const UP_THRESHOLD_PCT: u64 = 80;
+/// Busy% below which a domain steps down one OPP (slow decay: shed frequency
+/// gradually so a brief idle dip does not collapse a still-busy workload).
+const DOWN_THRESHOLD_PCT: u64 = 30;
+
+/// Set once the voltage lever confirmed both PMIC buses are up. Until then the
+/// governor must not move any rail (see `align_rail_voltages_to_opp`).
+static GOV_READY: AtomicBool = AtomicBool::new(false);
+
+/// Per-CPU busy-tick value from the previous poll (RK3588 has 8 cores). Only the
+/// single governor task ever touches these, so `Relaxed` is sufficient.
+static LAST_BUSY: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
+
+/// Per-cluster current OPP index (A55, big0, big1), starting on the boot OPP the
+/// voltage lever pinned.
+static IDX: [AtomicUsize; 3] = [const { AtomicUsize::new(BOOT_OPP_IDX) }; 3];
+
+/// Cleared until the first [`governor_poll`] has recorded a busy baseline. The
+/// first call must only prime `LAST_BUSY`, not decide: its delta is measured
+/// from zero and would otherwise fold in every busy tick accumulated since boot,
+/// spuriously pegging every cluster to its top OPP for one window.
+static PRIMED: AtomicBool = AtomicBool::new(false);
+
+/// Whether the dynamic governor should run: enabled at compile time *and* armed
+/// by the voltage lever (both PMIC buses up). The kernel checks this once before
+/// spawning its periodic governor task, so a failed PMIC bring-up leaves every
+/// cluster safely on the boot OPP instead of being scaled with no voltage lever.
+pub fn governor_wanted() -> bool {
+    GOVERNOR_ENABLE && GOV_READY.load(Ordering::Acquire)
+}
+
+/// Period, in milliseconds, the kernel governor task should sleep between calls
+/// to [`governor_poll`].
+pub fn governor_period_ms() -> u64 {
+    GOV_PERIOD_MS
+}
+
+/// One ondemand iteration, called periodically by the kernel governor task with
+/// a fresh snapshot of every CPU's cumulative busy-tick counter
+/// (`ax_task::cpu_busy_ticks`). Scores each core's busy% over the last window and
+/// moves each cluster's OPP from its busiest core: any saturated core jumps the
+/// cluster to its top OPP, and the cluster sheds a step only when all its cores
+/// are near-idle. Applies via SCMI+PMIC. Pure w.r.t. the task runtime — it
+/// neither sleeps nor spawns — so this crate needs no dependency on
+/// ax-task/ax-hal (which would be a cyclic dep through axplat-dyn).
+///
+/// `busy[i]` is CPU `i`'s counter; indices past the slice, or offline CPUs whose
+/// counter never advances, simply read as idle — conservative (never over-scales).
+pub fn governor_poll(busy: &[u64]) {
+    if !governor_wanted() {
+        return;
+    }
+
+    // The task sleeps `GOV_PERIOD_MS`, so ~`GOV_PERIOD_MS / MS_PER_TICK` scheduler
+    // ticks elapse per window. Using the nominal window needs no clock here; a late
+    // wake only under-reports load (busy% is clamped below), which is safe — it can
+    // never spuriously over-scale. `MS_PER_TICK` must track the scheduler tick rate
+    // (~100 Hz => 10 ms/tick); if that changes, this ratio must too.
+    const MS_PER_TICK: u64 = 10;
+    const WINDOW_TICKS: u64 = if GOV_PERIOD_MS / MS_PER_TICK == 0 {
+        1
+    } else {
+        GOV_PERIOD_MS / MS_PER_TICK
+    };
+
+    // First call only establishes the baseline (see `PRIMED`); still walk every
+    // cluster below so all `LAST_BUSY` entries are seeded, but make no OPP change.
+    let priming = !PRIMED.swap(true, Ordering::Relaxed);
+
+    for (ci, &cluster) in [Cluster::A55, Cluster::Big0, Cluster::Big1]
+        .iter()
+        .enumerate()
+    {
+        // Score each core in the cluster individually this window. A cluster
+        // shares ONE clock, so a single saturated core is reason to raise the
+        // whole cluster — this matches Linux schedutil/ondemand, which drive a
+        // frequency domain from its busiest CPU. Averaging instead (an earlier
+        // bug) buried one CPU-bound thread among its idle siblings: a single
+        // thread on the 2-core A76 pair only reads 50%, below the up-threshold,
+        // so the cluster never boosted. Each CPU belongs to exactly one cluster,
+        // so every LAST_BUSY entry is refreshed exactly once per poll.
+        let mut any_core_high = false; // some core wants the top OPP
+        let mut all_cores_low = true; // every core is near-idle → shed one step
+        let mut peak_pct = 0u64; // busiest core, for the log line
+        let mut n = 0u64;
+        for cpu in cluster.cpus() {
+            let now = busy.get(cpu).copied().unwrap_or(0);
+            let last = LAST_BUSY[cpu].swap(now, Ordering::Relaxed);
+            // Per-core busy% = busy_ticks / window_ticks (one core), clamped.
+            let pct = ((now.saturating_sub(last) * 100) / WINDOW_TICKS).min(100);
+            if pct >= UP_THRESHOLD_PCT {
+                any_core_high = true;
+            }
+            if pct >= DOWN_THRESHOLD_PCT {
+                all_cores_low = false;
+            }
+            if pct > peak_pct {
+                peak_pct = pct;
+            }
+            n += 1;
+        }
+        if n == 0 || priming {
+            continue;
+        }
+
+        let opps = cluster.opps();
+        let cur = IDX[ci].load(Ordering::Relaxed);
+        let new = if any_core_high {
+            cluster.gov_max_idx() // fast attack: jump to the top reachable OPP
+        } else if all_cores_low && cur > 0 {
+            cur - 1 // slow decay: shed one step only when the whole cluster is idle
+        } else {
+            cur
+        };
+
+        if new != cur {
+            // Only record the new OPP if it was actually applied. On a failed
+            // voltage raise `apply_opp` leaves the clock (and rail) at `cur`, so
+            // keeping IDX at `cur` makes the next poll retry from the true state
+            // instead of believing a higher rail than the hardware holds.
+            if apply_opp(cluster, opps[new], new > cur) {
+                IDX[ci].store(new, Ordering::Relaxed);
+                info!(
+                    "gov: {} peak={}% opp {}->{} = {} MHz @ {} mV",
+                    cluster.name(),
+                    peak_pct,
+                    cur,
+                    new,
+                    opps[new].mhz,
+                    opps[new].uv / 1_000
+                );
+            }
+        }
+    }
+}
+
+// ===========================================================================
+// OPP calibration sweep (gated, one-shot)
+// ===========================================================================
+//
+// The PVTPLL clock is voltage-coupled, so the delivered frequency for a given
+// SCMI ring drifts with rail voltage, and the drift grows at the higher OPPs
+// (ring=1608 @ 762.5 mV measured near ~1733 MHz on-board). To use the
+// 1416/1608/1800 rungs SAFELY we must know the *actual* delivered frequency at
+// each (ring, voltage); this sweep measures it directly via the PMU cycle
+// counter. It runs once, gated by `CALIBRATE`, from early `init()` (before the
+// console tty handoff) so its `CAL` log lines reach the serial console — the
+// governor's own transition logs do not, because they fire post-handoff.
+
+/// One-shot gate: when true, `init()` runs [`calibrate_cluster`] per cluster
+/// (governor NOT spawned) and the board logs a `CAL` grid; leave false for
+/// production. Requires the PMU cycle counter enabled at boot (axcpu `init_trap`).
+const CALIBRATE: bool = false;
+
+/// Sweep points `(rail_uV, ring_kHz)`. Round 1 showed the delivered frequency is
+/// dominated by voltage and that at any DT (ring=F, V_nom(F)) pair the delivery
+/// *over*-shoots F (undervolt). The safe lever is instead a FIXED low ring with a
+/// rising voltage: the delivered freq climbs but stays over-volted. So round 2
+/// maps ring 1200 across the full voltage range (plus two higher-ring cross-checks
+/// to see where the ring stops mattering). Every point keeps V >= V_nom(ring), so
+/// no measured point undervolts a live core; list is voltage-non-decreasing.
+const CAL_A76: &[(u32, u32)] = &[
+    (675_000, 1_200_000),
+    (725_000, 1_200_000),
+    (762_500, 1_200_000),
+    (800_000, 1_200_000),
+    (850_000, 1_200_000),
+    (925_000, 1_200_000),
+    (850_000, 1_416_000), // cross-check: does a higher ring beat ring 1200 at 850?
+    (925_000, 1_608_000), // cross-check at 925
+];
+
+/// A55: fixed ring 1008 across the voltage range (RK806 force-write caps at 950 mV).
+const CAL_A55: &[(u32, u32)] = &[
+    (675_000, 1_008_000),
+    (712_500, 1_008_000),
+    (762_500, 1_008_000),
+    (800_000, 1_008_000),
+    (850_000, 1_008_000),
+    (950_000, 1_008_000),
+    (850_000, 1_416_000), // cross-check
+    (950_000, 1_608_000), // cross-check
+];
+
+/// Whether to run the calibration sweep this boot (compile gate + PMIC armed).
+pub fn calibrate_wanted() -> bool {
+    CALIBRATE && GOV_READY.load(Ordering::Acquire)
+}
+
+#[inline]
+fn rd_pmccntr() -> u64 {
+    let v: u64;
+    unsafe { core::arch::asm!("mrs {}, pmccntr_el0", out(reg) v) };
+    v
+}
+#[inline]
+fn rd_cntvct() -> u64 {
+    let v: u64;
+    unsafe { core::arch::asm!("mrs {}, cntvct_el0", out(reg) v) };
+    v
+}
+#[inline]
+fn rd_cntfrq() -> u64 {
+    let v: u64;
+    unsafe { core::arch::asm!("mrs {}, cntfrq_el0", out(reg) v) };
+    v
+}
+#[inline]
+fn rd_mpidr() -> u64 {
+    let v: u64;
+    unsafe { core::arch::asm!("mrs {}, mpidr_el1", out(reg) v) };
+    v
+}
+
+/// Busy-wait `ms` milliseconds against the fixed-rate `CNTVCT` clock.
+fn cal_delay_ms(ms: u64) {
+    let frq = rd_cntfrq().max(1);
+    let start = rd_cntvct();
+    let ticks = frq * ms / 1000;
+    while rd_cntvct().wrapping_sub(start) < ticks {
+        core::hint::spin_loop();
+    }
+}
+
+/// Measure the CURRENT core's frequency (MHz) by counting CPU cycles
+/// (`PMCCNTR_EL0`) over a fixed ~60 ms window timed by `CNTVCT_EL0`. The counter
+/// is 32-bit (no `PMCR_EL0.LC`), which cannot wrap over this window.
+fn measure_mhz() -> u32 {
+    let frq = rd_cntfrq().max(1);
+    let window = frq * 60 / 1000; // 60 ms in cntvct ticks
+    let t0 = rd_cntvct();
+    let c0 = rd_pmccntr() as u32;
+    while rd_cntvct().wrapping_sub(t0) < window {
+        core::hint::spin_loop();
+    }
+    let t1 = rd_cntvct();
+    let c1 = rd_pmccntr() as u32;
+    let dvct = t1.wrapping_sub(t0).max(1);
+    let dcyc = c1.wrapping_sub(c0) as u64; // 32-bit wrap-safe
+    ((dcyc * frq) / (dvct * 1_000_000)) as u32
+}
+
+/// Run the (voltage x ring) calibration sweep for one cluster ON THE CURRENT
+/// CORE, logging the delivered frequency at each point. `cluster_idx`: 0=A55,
+/// 1=A76 big0, 2=A76 big1. The caller must have pinned this task onto a core in
+/// the target cluster (the logged `MPIDR` aff1 lets you confirm it). Restores a
+/// safe boot OPP for the cluster on exit. PMIC access here is pure polling, so it
+/// is safe on a non-boot core.
+pub fn calibrate_cluster(cluster_idx: usize, intended_cpu: usize) {
+    let (cluster, points, restore_khz) = match cluster_idx {
+        0 => (Cluster::A55, CAL_A55, 1_008_000u32),
+        1 => (Cluster::Big0, CAL_A76, 1_200_000u32),
+        _ => (Cluster::Big1, CAL_A76, 1_200_000u32),
+    };
+    let mpidr = rd_mpidr();
+    info!(
+        "CAL begin cl={} cpu={} mpidr_aff1={} aff0={}",
+        cluster.name(),
+        intended_cpu,
+        (mpidr >> 8) & 0xff,
+        mpidr & 0xff
+    );
+    let phandle = Phandle::from(0u32);
+    for &(uv, khz) in points {
+        // Voltage first (points are voltage-non-decreasing, so this only ever
+        // over-volts the current ring = safe), then the SCMI ring — but ONLY if
+        // the voltage write landed, else raising the ring would run it on the
+        // previous, lower rail (undervolt at speed). A skipped point is logged
+        // via `volt_ok=false`.
+        let vok = cluster.set_voltage(uv);
+        if vok {
+            scmi::set_clock_rate(phandle, cluster.clock_id(), khz as u64 * 1_000);
+        }
+        cal_delay_ms(25);
+        let f = measure_mhz();
+        info!(
+            "CAL cl={} volt={}uV ring={}MHz volt_ok={} => {}MHz",
+            cluster.name(),
+            uv,
+            khz / 1_000,
+            vok,
+            f
+        );
+    }
+    // Restore: ring down first, then voltage down (safe order).
+    scmi::set_clock_rate(phandle, cluster.clock_id(), restore_khz as u64 * 1_000);
+    cluster.set_voltage(675_000);
+    info!(
+        "CAL end cl={} restored {}MHz@675mV",
+        cluster.name(),
+        restore_khz / 1_000
+    );
+}

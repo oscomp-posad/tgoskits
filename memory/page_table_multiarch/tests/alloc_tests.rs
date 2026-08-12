@@ -284,3 +284,32 @@ fn test_dealloc_loongarch64() -> PagingResult<()> {
     >()?;
     Ok(())
 }
+
+/// Locks in the per-arch `NEED_FLUSH_ON_MAP` wiring: a fresh (unused → present)
+/// `map` skips TLB maintenance on architectures that never cache not-present
+/// translations (aarch64, x86_64), and keeps it on those that may (LoongArch here;
+/// RISC-V via the trait default). `remap`/`protect`/`unmap` touch valid entries
+/// and always flush regardless. This guards against a fresh map silently regaining
+/// a per-page broadcast TLBI, or a not-yet-verified arch losing a required flush.
+///
+/// The arch metadata modules are `target_arch`-gated, so each assertion is checked
+/// when built for its own target (x86_64 on the host CI; the others via their arch
+/// builds), mirroring the per-arch `test_dealloc_*` tests above.
+#[test]
+fn need_flush_on_map_wiring_is_arch_correct() {
+    #[cfg(target_arch = "x86_64")]
+    assert!(
+        !ax_page_table_multiarch::x86_64::X64PagingMetaData::NEED_FLUSH_ON_MAP,
+        "x86_64 never caches not-present entries: a fresh map must not flush",
+    );
+    #[cfg(target_arch = "aarch64")]
+    assert!(
+        !ax_page_table_multiarch::aarch64::A64PagingMetaData::NEED_FLUSH_ON_MAP,
+        "aarch64 never caches not-present translations: a fresh map must not flush",
+    );
+    #[cfg(target_arch = "loongarch64")]
+    assert!(
+        ax_page_table_multiarch::loongarch64::LA64MetaData::NEED_FLUSH_ON_MAP,
+        "LoongArch TLB semantics unverified here: keep flushing fresh maps",
+    );
+}

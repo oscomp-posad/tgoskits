@@ -47,7 +47,7 @@ Wait for the Orange Pi Linux login shell. The login banner prints the IP address
 for example:
 
 ```text
-IP: <BOARD-IP>
+IP: 10.3.10.219
 ```
 
 If the banner scrolls away, query it from the serial shell:
@@ -57,7 +57,7 @@ ip -br addr
 ```
 
 Use that address from another host terminal. The examples below use
-`BOARD_IP=<BOARD-IP>`; replace it with the address printed by your board.
+`BOARD_IP=10.3.10.219`; replace it with the address printed by your board.
 
 If passwordless SSH is not already configured, install a temporary host key into
 the Linux user from the serial shell:
@@ -77,7 +77,7 @@ chmod 600 ~/.ssh/authorized_keys
 Copy the helper source from the host to the board:
 
 ```bash
-export BOARD_IP=<BOARD-IP>
+export BOARD_IP=10.3.10.219
 
 ssh orangepi@${BOARD_IP} 'rm -rf ~/tgoskits-uvc-fps && mkdir -p ~/tgoskits-uvc-fps'
 rsync -az --delete \
@@ -115,7 +115,7 @@ stdin:
 
 ```bash
 ssh orangepi@${BOARD_IP} "
-  sudo install -m 0755 \
+  printf '%s\n' orangepi | sudo -S install -m 0755 \
     ~/tgoskits-uvc-fps/target/release/uvc-fps \
     /usr/bin/uvc-fps
 "
@@ -128,7 +128,7 @@ because `/dev/bus/usb` is not writable by the default `orangepi` user:
 ssh orangepi@${BOARD_IP} "
   rm -rf /tmp/uvc-frames &&
   mkdir -p /tmp/uvc-frames &&
-  sudo \
+  printf '%s\n' orangepi | sudo -S \
     /usr/bin/uvc-fps \
       --device 0 \
       --format mjpeg \

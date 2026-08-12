@@ -15,19 +15,10 @@ const char *to_string(ArmAction a) {
     return "none";
 }
 
-GrabResult TraceArmBackend::grab() {
-    std::printf("TENNIS_ARM grab\n");
-    return GrabResult::Captured;
-}
+void TraceArmBackend::grab() { std::printf("TENNIS_ARM grab\n"); }
 
-bool TraceArmBackend::release() {
-    std::printf("TENNIS_ARM release\n");
-    return true;
-}
+void TraceArmBackend::release() { std::printf("TENNIS_ARM release\n"); }
 
-bool TraceArmBackend::ready() {
-    std::printf("TENNIS_ARM ready\n");
-    return true;
-}
+void TraceArmBackend::ready() { std::printf("TENNIS_ARM ready\n"); }
 
 } // namespace tennis

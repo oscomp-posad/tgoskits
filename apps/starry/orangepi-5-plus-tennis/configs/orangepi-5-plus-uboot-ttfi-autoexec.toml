@@ -1,0 +1,21 @@
+# TTFI measurement (AUTO-EXEC): boot the tennis kernel over serial ymodem and
+# let PID1 init auto-launch the bench — no interactive shell, no command typed.
+#
+# This is the apples-to-apples launch protocol vs Linux (whose systemd unit
+# auto-execs run_ttfi.sh at boot). Dropping shell_prefix AND shell_init_cmd makes
+# the ostool runner skip the prompt-wait/type step entirely (ShellAutoInitMatcher
+# is None unless BOTH are set) and just watch success_regex — removing the ~2.5s
+# runner idle+type artifact that the shell-typed config (orangepi-5-plus-uboot-ttfi.toml)
+# incurs.
+#
+# REQUIRES `/autoexec.sh` on the board ext4 rootfs containing:
+#     exec sh /tennis_app/run_ttfi.sh
+# init.sh execs it as PID1 (see os/StarryOS/starryos/src/init.sh auto-exec hook).
+# Without that file the kernel drops to an interactive shell and nothing runs.
+serial = "/dev/cu.usbserial-AQ03MLX2"
+baud_rate = "1500000"
+dtb_file = "os/StarryOS/configs/board/orangepi-5-plus.dtb"
+
+success_regex = ["TENNIS_TTFI_DONE"]
+fail_regex = ["panicked at"]
+timeout = 420

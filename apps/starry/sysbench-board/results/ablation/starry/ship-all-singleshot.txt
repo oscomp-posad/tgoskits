@@ -1,0 +1,52 @@
+### ABL profile=all tag=run Linux 10.0.0
+A55_1T     events per second:   360.92
+A76_1T     events per second:   896.18
+ALL_8T     events per second:  5006.51
+MUTEX8     total time:                          0.8508s
+MEM8 20480.00 MiB transferred (33399.06 MiB/sec)
+-- schbench m1t4 --
+Wakeup Latencies percentiles (usec) runtime 10 (s) (3322 total samples)
+Request Latencies percentiles (usec) runtime 10 (s) (3319 total samples)
+RPS percentiles (requests) runtime 10 (s) (11 total samples)
+current rps: 333.00
+Wakeup Latencies percentiles (usec) runtime 10 (s) (3325 total samples)
+Request Latencies percentiles (usec) runtime 10 (s) (3325 total samples)
+RPS percentiles (requests) runtime 10 (s) (11 total samples)
+average rps: 332.50
+SYSCOST SYSCOST getpid  473.1 ns/syscall
+SYSCOST SYSCOST pipe_wr  3517.1 ns/(write+read)
+THP PHASE single_2M      bytes=2097152 readers=0 split=1 iters=8 ok=8 corrupt=0 rej=0
+THP PHASE smp_2M         bytes=2097152 readers=7 split=1 iters=16 ok=16 corrupt=0 rej=0
+THP PHASE nosplit_32M    bytes=33554432 readers=0 split=0 iters=6 ok=6 corrupt=0 rej=0
+THP PHASE split_32M      bytes=33554432 readers=0 split=1 iters=6 ok=6 corrupt=0 rej=0
+THP THP_NARROW_DONE
+MEMBW2 MEM_BW2 UNPIN threads=1 aggregate=29.8 GB/s
+MEMBW2   T0 cpu-residency: 4 4 4  (29.8 GB/s)
+MEMBW2 MEM_BW2 UNPIN threads=2 aggregate=52.7 GB/s
+MEMBW2   T0 cpu-residency: 6 6 6  (23.5 GB/s)
+MEMBW2   T1 cpu-residency: 4 4 4  (29.2 GB/s)
+MEMBW2 MEM_BW2 UNPIN threads=4 aggregate=90.7 GB/s
+MEMBW2   T0 cpu-residency: 7 7 7  (20.7 GB/s)
+MEMBW2   T1 cpu-residency: 6 6 6  (24.1 GB/s)
+MEMBW2   T2 cpu-residency: 5 5 5  (21.0 GB/s)
+MEMBW2   T3 cpu-residency: 4 4 4  (24.8 GB/s)
+MEMBW2 MEM_BW2 UNPIN threads=8 aggregate=150.7 GB/s
+MEMBW2   T0 cpu-residency: 3 3 3  (10.8 GB/s)
+MEMBW2   T1 cpu-residency: 4 4 4  (26.2 GB/s)
+MEMBW2   T2 cpu-residency: 6 6 6  (26.7 GB/s)
+MEMBW2   T3 cpu-residency: 7 7 7  (26.4 GB/s)
+MEMBW2   T4 cpu-residency: 0 0 0  (10.8 GB/s)
+MEMBW2   T5 cpu-residency: 1 1 1  (10.8 GB/s)
+MEMBW2   T6 cpu-residency: 2 2 2  (10.9 GB/s)
+MEMBW2   T7 cpu-residency: 5 5 5  (28.1 GB/s)
+MEMBW2 MEM_BW2_DONE mode=UNPIN
+BAR2 BAR2 T1 cpu 5 5
+BAR2 BAR2 T0 cpu 6 6
+BAR2 BAR2_DONE
+HB -P g2 : Time: 1.806
+HB -P g5 : Time: 3.432
+HB -P g10 : Time: 1.052
+HB -T g2 : Time: 7.123
+HB -T g5 : Time: 1.840
+HB -T g10 : Time: 1.799
+### ABL_DONE profile=all tag=run >>>ABLDONE<<<

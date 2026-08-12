@@ -1,0 +1,15 @@
+# Board validation of the not-present-huge-block UAF + leak fixes (commits
+# 2b176f37c is_table, 7dfeea99a huge-frame-free, ca395531b 4K-frame-free +
+# lazy paddr-0 guard). Driven by scripts/board/sdboot-run.py.
+#   thp_protnone : mprotect(PROT_NONE) on THP + COW + 4K + lazy (the 3 fixes)
+#   thp_narrow   : THP split/realloc (no-regression from the is_table walk change)
+#   thp_nohugepage: MADV_NOHUGEPAGE split path (no-regression)
+[net]
+serial = "/dev/cu.usbserial-AQ03MLX2"
+baud_rate = "1500000"
+dtb_file = "os/StarryOS/configs/board/orangepi-5-plus.dtb"
+shell_prefix = "root@starry:/root #"
+shell_init_cmd = "echo PROTNONE_BEGIN; /home/orangepi/thp_protnone; echo NARROW_BEGIN; /home/orangepi/thp_narrow; echo NOHUGE_BEGIN; /home/orangepi/thp_nohugepage; echo FULL_RUN_DONE; sleep 1; sync; reboot -f"
+success_regex = ["(?m)^FULL_RUN_DONE\\s*$"]
+fail_regex = ["THP_PROTNONE_FAIL", "SEGV phase=", "panicked at", "Unhandled( Synchronous)? [Ee]xception", "Kernel panic", "Synchronous Abort"]
+timeout = 480

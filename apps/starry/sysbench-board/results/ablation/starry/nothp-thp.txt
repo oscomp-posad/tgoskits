@@ -1,0 +1,14 @@
+### ABL profile=thp tag=run reps=3 Linux 10.0.0
+THP r1 PHASE single_2M      bytes=2097152 readers=0 split=1 iters=8 ok=8 corrupt=0 rej=0
+THP r1 PHASE smp_2M         bytes=2097152 readers=7 split=1 iters=16 ok=16 corrupt=0 rej=0
+THP r1 PHASE nosplit_32M    bytes=33554432 readers=0 split=0 iters=6 ok=6 corrupt=0 rej=0
+THP r1 PHASE split_32M      bytes=33554432 readers=0 split=1 iters=6 ok=6 corrupt=0 rej=0
+THP r2 PHASE single_2M      bytes=2097152 readers=0 split=1 iters=8 ok=8 corrupt=0 rej=0
+THP r2 PHASE smp_2M         bytes=2097152 readers=7 split=1 iters=16 ok=16 corrupt=0 rej=0
+THP r2 PHASE nosplit_32M    bytes=33554432 readers=0 split=0 iters=6 ok=6 corrupt=0 rej=0
+THP r2 PHASE split_32M      bytes=33554432 readers=0 split=1 iters=6 ok=6 corrupt=0 rej=0
+THP r3 PHASE single_2M      bytes=2097152 readers=0 split=1 iters=8 ok=8 corrupt=0 rej=0
+THP r3 PHASE smp_2M         bytes=2097152 readers=7 split=1 iters=16 ok=16 corrupt=0 rej=0
+THP r3 PHASE nosplit_32M    bytes=33554432 readers=0 split=0 iters=6 ok=6 corrupt=0 rej=0
+THP r3 PHASE split_32M      bytes=33554432 readers=0 split=1 iters=6 ok=6 corrupt=0 rej=0
+### ABL_DONE profile=thp tag=run >>>ABLDONE<<<

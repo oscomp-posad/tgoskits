@@ -1,0 +1,45 @@
+# Board run config for perf-validate on the Orange Pi 5 Plus.
+#
+# The `perf-validate` binary lives PRE-STAGED on the board's persistent ext4 at
+# /usr/local/bin/perf-validate. The board runner deploys only the KERNEL, so —
+# like every other orangepi board case (e.g. npu-yolov8's /guest/npu_demo) —
+# userspace assets are provisioned OUT-OF-BAND, once, not per CI run. Build the
+# binary from the committed source with `./deploy.sh build` and place it on the
+# board (`./deploy.sh deploy`, or scp + `sync`); see README.md.
+#
+# If the binary is absent, the `not found` fail_regex below fails the case FAST
+# instead of hanging to the 900s timeout.
+#
+# NOTE: the SAME validator source (src/perf_validate.c) has a byte-identical copy
+# at test-suit/starryos/qemu/system/perf-validate, which builds from source and
+# runs in CI under QEMU (selftest mode) — so the validator LOGIC already has
+# deterministic CI coverage; this board case adds only the silicon-only checks.
+#
+# It auto-discovers topology and prints PASS/FAIL/SKIP/INFO per check, then:
+#   BOARD_PERF_SUMMARY ...
+#   BOARD_PERF_VALIDATE_VERDICT <FULL|PARTIAL|FAIL|INVALID>
+#   BOARD_PERF_VALIDATE_DONE     (unique final sentinel)
+#
+# Today (smp1 boot): VERDICT PARTIAL = "single-core regression anchor passed;
+# big.LITTLE UNVALIDATED, blocked by the smp8 boot hang" — that is a SUCCESS.
+# When smp8 boots, VERDICT FULL. So success matches FULL|PARTIAL; FAIL/INVALID
+# (and panic / not-found) fail. ostool tears down on the FIRST success match, so
+# we gate on the explicit verdict line, and DONE is the unconditional last line —
+# a hang after partial output times out instead of matching an early line.
+board_type   = "OrangePi-5-Plus"
+shell_prefix = "root@starry:/root #"
+shell_init_cmd = "/usr/local/bin/perf-validate"
+success_regex = ['(?m)^BOARD_PERF_VALIDATE_VERDICT (FULL|PARTIAL)\s*$']
+fail_regex = [
+  '(?m)^BOARD_PERF_VALIDATE_VERDICT (FAIL|INVALID)',
+  # Binary not provisioned on the board rootfs — fail fast instead of hanging to
+  # the 900s timeout (the shell prints "<path>: not found" / "No such file").
+  '(?mi)perf-validate:? +(not found|no such file)',
+  '(?i)\bpanic(?:ked)?\b',
+  '(?i)segmentation fault',
+  '(?i)SIGSEGV',
+  'exit with code: 139',
+]
+# SMP-ROTATE / SMP-MIGRATE / RDPMC-3 loops are long on real silicon; the smp8
+# ymodem transfer + full-matrix run needs headroom over the smp1 anchor.
+timeout = 900

@@ -3,14 +3,14 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
-use core::ffi::c_long;
+use core::{ffi::c_long, sync::atomic::Ordering};
 
 use ax_errno::{AxError, AxResult};
+use ax_kspin::SpinRwLock as RwLock;
 use ax_runtime::hal::time::TimeValue;
 use ax_task::{AxTaskRef, TaskInner, WeakAxTaskRef, current};
 use bytemuck::AnyBitPattern;
 use linux_raw_sys::general::ROBUST_LIST_LIMIT;
-use spin::RwLock;
 use starry_process::{Pid, Process, ProcessGroup, Session};
 use starry_signal::{SignalInfo, Signo};
 use starry_vm::{VmMutPtr, VmPtr};
@@ -322,16 +322,22 @@ pub fn register_session(session: &Arc<Session>) {
 /// Accumulates CPU time for `task` from a timer-tick IRQ context.
 ///
 /// Unlike `poll_timer`, this never emits signals, making it safe to call
-/// from interrupt handlers.
+/// from interrupt handlers. Only the non-`tickacct` build uses it (the boot-CPU
+/// `register_timer_callback` in procfs); under `tickacct` the every-CPU
+/// `TaskExt::on_tick` hook accounts CPU time on all CPUs instead.
+#[cfg(not(feature = "tickacct"))]
 pub fn tick_cpu_time(task: &TaskInner) {
     let Some(thr) = task.try_as_thread() else {
         return;
     };
-    let Ok(mut time) = thr.time.try_borrow_mut() else {
-        // Reentrant borrow means the task is mid-state-transition; skip.
+    let state = TimerState::from_u8(thr.timer_state.load(Ordering::Relaxed));
+    let floor = thr.resume_floor_ns();
+    let Some(mut time) = thr.time.try_lock() else {
+        // Lock contended (mid state-transition, or a cross-CPU reader/alarm);
+        // skip. Runs from IRQ context, so it must never block.
         return;
     };
-    time.tick();
+    time.tick(state, floor);
 }
 
 /// Returns the accumulated `(utime, stime)` for a task without side effects.
@@ -339,7 +345,9 @@ pub fn task_cpu_time(task: &TaskInner) -> (TimeValue, TimeValue) {
     let Some(thr) = task.try_as_thread() else {
         return (TimeValue::ZERO, TimeValue::ZERO);
     };
-    let Ok(time) = thr.time.try_borrow() else {
+    let Some(time) = thr.time.try_lock() else {
+        // Contended snapshot (the task is mid-accounting on its own CPU); report
+        // zero rather than block a `/proc` reader, matching the prior behavior.
         return (TimeValue::ZERO, TimeValue::ZERO);
     };
     time.output()
@@ -350,14 +358,16 @@ pub fn poll_timer(task: &TaskInner) {
     let Some(thr) = task.try_as_thread() else {
         return;
     };
-    let Ok(mut time) = thr.time.try_borrow_mut() else {
-        // reentrant borrow, likely IRQ
-        return;
-    };
-    let emitter = |signo| {
+    // Called from the alarm task (a normal task context, possibly a different
+    // CPU than the target). Hold the lock only for the poll; emit the returned
+    // itimer signals after releasing it — signal delivery must not run under the
+    // IRQ-disabling time lock.
+    let state = TimerState::from_u8(thr.timer_state.load(Ordering::Relaxed));
+    let floor = thr.resume_floor_ns();
+    let fired = thr.time.lock().poll(state, floor);
+    for signo in fired.into_iter().flatten() {
         send_signal_thread_inner(task, thr, SignalInfo::new_kernel(signo));
-    };
-    time.poll(emitter);
+    }
 }
 
 /// Poll the process-level POSIX timers.
@@ -369,20 +379,60 @@ pub fn poll_process_timer(pid: Pid) {
     }
 }
 
-/// Sets the timer state.
+/// Sets the timer state at a User/Kernel boundary (syscall entry/return).
 pub fn set_timer_state(task: &TaskInner, state: TimerState) {
     let Some(thr) = task.try_as_thread() else {
         return;
     };
-    let Ok(mut time) = thr.time.try_borrow_mut() else {
-        // reentrant borrow, likely IRQ
+
+    // Coarse Linux `TICK_CPU_ACCOUNTING` (tickacct): the common syscall boundary
+    // just flips the lock-free User/Kernel state — NO lock, NO accounting. The
+    // utime/stime totals advance purely on the timer tick (`on_tick`, every CPU)
+    // and the context switch (`on_leave`), which sample this state. Only when an
+    // interval timer is armed do we fall through to take the lock, account
+    // precisely, and service ITIMER_VIRTUAL/PROF. Removing the SMP `time` lock
+    // from the syscall hot path is the whole point — it is ~300 ns/syscall.
+    #[cfg(feature = "tickacct")]
+    if !thr.itimer_armed.load(Ordering::Relaxed) {
+        thr.timer_state.store(state as u8, Ordering::Relaxed);
         return;
+    }
+
+    // Exact per-boundary accounting (non-tickacct build), or the rare
+    // armed-itimer path under tickacct: bill the OUTGOING state's slice under the
+    // lock, then flip the state. The lock is IRQ-disabling; collect any itimer
+    // signals and emit them AFTER unlocking — signal delivery must not run under
+    // the time lock. Called at syscall boundaries (task context, the thread's
+    // own CPU), so it can block briefly on rare cross-CPU contention without
+    // reentrancy.
+    let old = TimerState::from_u8(thr.timer_state.load(Ordering::Relaxed));
+    // Under `tickacct`, resync the lock-free `itimer_armed` hint from the same
+    // locked snapshot: a one-shot itimer that just fired inside `poll()` is now
+    // disarmed, so the hint self-corrects here instead of lingering `true` until
+    // the next `sys_setitimer`.
+    #[cfg(feature = "tickacct")]
+    let fired = {
+        let mut t = thr.time.lock();
+        // Read the resume floor *under* the lock: the IRQ-disabling `SpinNoIrq`
+        // guard prevents this thread from being descheduled+resumed (which would
+        // bump `resume_ns`) between the read and `poll()`, so the floor cannot go
+        // stale and re-admit a descheduled gap.
+        let floor = thr.resume_floor_ns();
+        let fired = t.poll(old, floor);
+        thr.itimer_armed
+            .store(t.has_armed_itimer(), Ordering::Relaxed);
+        fired
     };
-    let emitter = |signo| {
+    #[cfg(not(feature = "tickacct"))]
+    let fired = {
+        let mut t = thr.time.lock();
+        let floor = thr.resume_floor_ns();
+        t.poll(old, floor)
+    };
+    thr.timer_state.store(state as u8, Ordering::Relaxed);
+    for signo in fired.into_iter().flatten() {
         send_signal_thread_inner(task, thr, SignalInfo::new_kernel(signo));
-    };
-    time.poll(emitter);
-    time.set_state(state);
+    }
 }
 
 #[repr(C)]
@@ -546,6 +596,13 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
         }
     }
 
+    // Free any per-task perf HW counters attached to this thread before the fd
+    // table is torn down, so the PMU slots are released even if a perf fd
+    // outlives the task (its own `Drop::free_hw` is idempotent). Runs for every
+    // exiting thread, not just the last in the group.
+    #[cfg(target_arch = "aarch64")]
+    crate::perf::task::on_task_exit(thr);
+
     // Robust futex ownership must be released before clone-child-tid wakes a
     // pthread joiner; otherwise userspace can observe thread exit before the
     // OWNER_DIED handoff has been written.
@@ -594,6 +651,7 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
         // this, a child fork → F_SETLK → exit would permanently pin the
         // record in FCNTL_LOCKS and block all later acquirers.
         crate::syscall::release_pid_locks(process.pid());
+        crate::syscall::release_pid_flock_locks(process.pid());
 
         // Snapshot children BEFORE process.exit() reparents them to init
         // via mem::take. Otherwise process.children() returns an empty
@@ -666,6 +724,36 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
             }
         }
 
+        // If this process was the init of a non-root PID namespace,
+        // send SIGKILL to all remaining processes in that namespace
+        // (Linux: zap_pid_ns_processes).
+        {
+            let ns = thr.proc_data.nsproxy.lock();
+            let pid_ns_lock = ns.pid_ns.lock();
+            if pid_ns_lock.level > 0 && pid_ns_lock.init_global_tid() == Some(process.pid() as u64)
+            {
+                let ns_ptr = Arc::as_ptr(&ns.pid_ns) as usize;
+                drop(pid_ns_lock);
+                drop(ns);
+
+                let proc_table = PROCESS_TABLE.read();
+                let victims: Vec<Pid> = proc_table
+                    .values()
+                    .filter(|pd| {
+                        pd.proc.pid() != process.pid()
+                            && Arc::as_ptr(&pd.nsproxy.lock().pid_ns) as usize == ns_ptr
+                    })
+                    .map(|pd| pd.proc.pid())
+                    .collect();
+                drop(proc_table);
+
+                let sig = SignalInfo::new_kernel(Signo::SIGKILL);
+                for pid in victims {
+                    let _ = send_signal_to_process(pid, Some(sig.clone()));
+                }
+            }
+        }
+
         // Process exit state is published before waking pidfd/wait waiters.
         unsafe { thr.proc_data.exit_event.wake(axpoll::IoEvents::IN) };
 
@@ -718,6 +806,11 @@ pub fn zap_thread(tid: Pid) -> AxResult<()> {
     let task = get_task(tid)?;
     let thr = task.try_as_thread().ok_or(AxError::OperationNotPermitted)?;
     thr.set_exit_request();
-    task.interrupt();
+    // `interrupt()` alone is a no-op for a thread parked on a raw `WaitQueue`
+    // (pipe read, futex wait) — no interrupt waker is registered there — so a
+    // SIGKILLed sibling would linger until async GC, deferring `clear()` and
+    // its frame reclaim. `wake_task` force-unblocks the parked thread so it
+    // returns, observes the pending exit, and runs `do_exit` synchronously.
+    ax_task::wake_task(&task);
     Ok(())
 }

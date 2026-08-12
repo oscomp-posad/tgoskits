@@ -46,6 +46,7 @@ model_register!(
 mod binding_info;
 mod binding_resolver;
 pub mod error;
+mod irq_binding;
 pub mod mmio;
 #[cfg(any(
     feature = "block",
@@ -72,6 +73,8 @@ pub mod vsock;
 pub mod jpeg;
 #[cfg(feature = "pci")]
 pub mod pci;
+#[cfg(feature = "rk3588-pwm")]
+pub mod pwm;
 #[cfg(feature = "rga")]
 pub mod rga;
 #[cfg(feature = "rknpu")]
@@ -81,23 +84,75 @@ pub mod serial;
 #[cfg(any(
     feature = "rockchip-soc",
     feature = "rockchip-pm",
-    feature = "sg2002-placeholder",
-    feature = "rockchip-dwmmc"
+    feature = "rockchip-dwmmc",
+    feature = "starfive-soc"
 ))]
 pub mod soc;
-#[cfg(all(feature = "rtc", plat_dyn))]
+#[cfg(feature = "rtc")]
 pub mod time;
 #[cfg(feature = "usb")]
 pub mod usb;
 #[cfg(virtio_dev)]
 pub mod virtio;
 
-pub use binding_info::BindingInfo;
+/// RK3588 CPU DVFS ondemand governor, exposed as a stable, arch-neutral entry
+/// the kernel can drive from a periodic task without knowing the SoC specifics.
+///
+/// The governor's *policy + apply* live in the (arch-specific) cpufreq driver,
+/// but its *loop* — sleeping between samples and reading the per-CPU busy
+/// counters — cannot live in this crate: ax-driver sits below ax-task/ax-hal in
+/// the dependency graph, so spawning a task here would be a cyclic dependency.
+/// The kernel therefore owns the loop and calls [`cpufreq::governor_poll`] each
+/// tick. When the DVFS feature is off these are no-ops so callers stay generic.
+pub mod cpufreq {
+    #[cfg(feature = "rk3588-cpufreq")]
+    pub use crate::soc::rockchip::cpufreq::{
+        calibrate_cluster, calibrate_wanted, governor_period_ms, governor_poll, governor_wanted,
+    };
+
+    /// Feature-off stub: no governor, so the kernel never spawns its task.
+    #[cfg(not(feature = "rk3588-cpufreq"))]
+    pub fn governor_wanted() -> bool {
+        false
+    }
+    /// Feature-off stub.
+    #[cfg(not(feature = "rk3588-cpufreq"))]
+    pub fn governor_period_ms() -> u64 {
+        100
+    }
+    /// Feature-off stub.
+    #[cfg(not(feature = "rk3588-cpufreq"))]
+    pub fn governor_poll(_busy: &[u64]) {}
+    /// Feature-off stub: no calibration.
+    #[cfg(not(feature = "rk3588-cpufreq"))]
+    pub fn calibrate_wanted() -> bool {
+        false
+    }
+    /// Feature-off stub.
+    #[cfg(not(feature = "rk3588-cpufreq"))]
+    pub fn calibrate_cluster(_cluster_idx: usize, _intended_cpu: usize) {}
+}
+
+/// One-shot RK3588 DDR/DMC frequency ramp (see [`crate::soc::rockchip::ddr_dvfs`]).
+/// The kernel calls [`ddr_dvfs::ramp_to_max`] once at boot; with the feature off it
+/// is a no-op so callers stay generic.
+pub mod ddr_dvfs {
+    #[cfg(feature = "rk3588-ddr-dvfs")]
+    pub use crate::soc::rockchip::ddr_dvfs::ramp_to_max;
+
+    /// Feature-off stub: no DDR ramp.
+    #[cfg(not(feature = "rk3588-ddr-dvfs"))]
+    pub fn ramp_to_max() {}
+}
+
 #[cfg(feature = "pci")]
 pub use binding_info::PciIrqRequirement;
+pub use binding_info::{BindingInfo, BindingIrq, BindingIrqBinding, BindingIrqSource, FdtIrqSpec};
 #[cfg(feature = "pci")]
 pub use binding_resolver::binding_info_from_pci;
 pub use binding_resolver::{
     binding_info_from_acpi, binding_info_from_acpi_route, binding_info_from_fdt,
+    binding_irq_from_named_fdt_interrupt,
 };
 pub use error::{Error, Result};
+pub use irq_binding::IrqBindingLease;

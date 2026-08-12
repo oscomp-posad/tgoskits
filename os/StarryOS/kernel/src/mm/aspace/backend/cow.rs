@@ -13,6 +13,8 @@ use ax_runtime::hal::{
     mem::phys_to_virt,
     paging::{MappingFlags, PageSize, PageTableCursor, PagingError},
 };
+#[cfg(feature = "thp")]
+use ax_runtime::hal::paging::PageTable;
 use ax_sync::Mutex;
 
 use super::{
@@ -21,7 +23,12 @@ use super::{
 };
 
 struct FrameRefCnt {
-    count: u8,
+    /// Number of address spaces sharing this frame COW. A `u8` overflowed at 255
+    /// sharers — a read-only libc/text frame shared by ~250 forked processes
+    /// (e.g. `hackbench -P g10`) tripped it and `fork()` failed with EFAULT. Linux
+    /// uses a 32-bit refcount; `u32` (4 billion sharers) is effectively unbounded
+    /// here, and the overflow path now returns `NoMemory` (ENOMEM), not EFAULT.
+    count: u32,
 }
 
 impl FrameRefCnt {
@@ -40,7 +47,7 @@ struct FrameTableRefCount {
 }
 
 impl FrameTableRefCount {
-    const INITIAL_CNT: u8 = 1;
+    const INITIAL_CNT: u32 = 1;
 
     const fn new() -> Self {
         Self {
@@ -75,6 +82,324 @@ impl FrameTableRefCount {
 }
 
 static FRAME_TABLE: SpinNoIrq<FrameTableRefCount> = SpinNoIrq::new(FrameTableRefCount::new());
+
+#[cfg(feature = "thp")]
+const HUGE_2M: PageSize = PageSize::Size2M;
+/// Number of 4 KiB sub-pages in a 2 MiB block.
+#[cfg(feature = "thp")]
+const HUGE_2M_SUBPAGES: usize = HUGE_2M as usize / PAGE_SIZE_4K; // 512
+
+/// How a prepared 2 MiB block split will be committed. Any allocation needed to
+/// break COW is done up front in [`prepare_huge_split_2m`], so committing is
+/// (buddy metadata + page-table) work that does not allocate a data frame.
+#[cfg(feature = "thp")]
+pub(crate) enum HugeSplitTarget {
+    /// Exclusive frame (refcount 1): explode the same 2 MiB buddy block in place
+    /// and re-map the 512 leaf PTEs to the *same* physical pages (no copy).
+    InPlace,
+    /// COW break into a fresh contiguous 2 MiB frame (already copied): drop the
+    /// shared ref and explode the new block.
+    CopiedContiguous(PhysAddr),
+    /// COW break into 512 independent 4 KiB frames (already copied) under
+    /// fragmentation: drop the shared ref; the frames are already order-0.
+    CopiedScattered(alloc::vec::Vec<PhysAddr>),
+}
+
+/// A resident 2 MiB block ready to be split to 4 KiB, with any COW-break copy
+/// **and** the 4 KiB leaf page table already allocated. Produced by
+/// [`prepare_huge_split_2m`], consumed by [`commit_huge_split_2m`], or released
+/// by [`abort_huge_split_2m`].
+#[cfg(feature = "thp")]
+pub(crate) struct HugeSplitPlan {
+    block_va: VirtAddr,
+    old_paddr: PhysAddr,
+    flags: MappingFlags,
+    target: HugeSplitTarget,
+    /// Pre-reserved, zeroed leaf page table spliced in at commit. Reserving it
+    /// here (not on the first `map` after unmapping the block) is what makes the
+    /// commit allocation-free, hence atomic against a fragmented / OOM heap.
+    table_paddr: PhysAddr,
+}
+
+/// Phase 1 (fallible, no page-table / refcount / charge mutation): decide how to
+/// split the resident 2 MiB block at `block_va`, pre-allocate + fill any COW-break
+/// copy, and reserve the 4 KiB leaf page table the commit will splice in. Returns
+/// `Ok(None)` when the block is not a resident 2 MiB block (lazy / already split).
+/// On allocation failure returns `Err` with nothing left allocated, so the caller
+/// can split a whole area atomically: prepare every block first, and only if all
+/// succeed commit them (an infallible, allocation-free phase 2).
+///
+/// - Exclusive frame (refcount 1): no allocation ([`HugeSplitTarget::InPlace`]).
+/// - COW-shared frame (refcount > 1, after fork): copy the 2 MiB into a fresh
+///   contiguous 2 MiB frame, or 512 individual 4 KiB frames under fragmentation,
+///   so a COW break never fails for lack of an order-9 block.
+#[cfg(feature = "thp")]
+pub(crate) fn prepare_huge_split_2m(
+    block_va: VirtAddr,
+    pt: &PageTable,
+) -> AxResult<Option<HugeSplitPlan>> {
+    debug_assert!(
+        HUGE_2M.is_aligned(block_va.as_usize()),
+        "block_va not 2M-aligned"
+    );
+
+    let (old_paddr, flags, size) = match pt.query(block_va) {
+        Ok(v) => v,
+        Err(PagingError::NotMapped) => return Ok(None),
+        // A not-present huge block (`mprotect(PROT_NONE)` over this THP block) is
+        // reported as `MappedToHugePage`; it still owns a frame and must be split
+        // (into not-present 4 KiB leaves, preserving its flags) so a partial op can
+        // cut through it. `query` hides it because it carries no live translation.
+        Err(PagingError::MappedToHugePage) => match pt.peek_not_present_huge_block(block_va) {
+            Some(v) => v,
+            None => return Ok(None),
+        },
+        Err(_) => return Err(AxError::BadAddress),
+    };
+    if size != HUGE_2M {
+        // Already split, or never a huge block: nothing to do.
+        return Ok(None);
+    }
+
+    // Classify the frame as exclusive or COW-shared.
+    let frame_ref = FRAME_TABLE
+        .lock()
+        .get_frame_ref(old_paddr)
+        .ok_or(AxError::BadAddress)?;
+    let shared = {
+        let cnt = frame_ref.lock();
+        assert!(cnt.count > 0, "splitting unreferenced huge frame");
+        cnt.count > 1
+    };
+
+    let target = if !shared {
+        HugeSplitTarget::InPlace
+    } else if let Ok(new_paddr) = alloc_frame(false, HUGE_2M) {
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                phys_to_virt(old_paddr).as_ptr(),
+                phys_to_virt(new_paddr).as_mut_ptr(),
+                HUGE_2M as usize,
+            );
+        }
+        HugeSplitTarget::CopiedContiguous(new_paddr)
+    } else {
+        // Scatter fallback: copy into 512 independent 4 KiB frames.
+        let mut frames = alloc::vec::Vec::with_capacity(HUGE_2M_SUBPAGES);
+        for i in 0..HUGE_2M_SUBPAGES {
+            match alloc_frame(false, PageSize::Size4K) {
+                Ok(f) => {
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            phys_to_virt(old_paddr + i * PAGE_SIZE_4K).as_ptr(),
+                            phys_to_virt(f).as_mut_ptr(),
+                            PAGE_SIZE_4K,
+                        );
+                    }
+                    frames.push(f);
+                }
+                Err(err) => {
+                    // Roll back the partial scatter allocation; the shared 2 MiB
+                    // frame is untouched (ref not dropped) so peers stay safe.
+                    for f in frames {
+                        dealloc_frame(f, PageSize::Size4K);
+                    }
+                    return Err(err);
+                }
+            }
+        }
+        HugeSplitTarget::CopiedScattered(frames)
+    };
+
+    // Reserve the 4 KiB leaf page table now, so the commit is allocation-free
+    // and therefore atomic against OOM. On failure roll back any COW-break copy
+    // and leave nothing allocated.
+    let table_paddr = match pt.alloc_intermediate_table() {
+        Ok(paddr) => paddr,
+        Err(e) => {
+            dealloc_split_target(target);
+            return Err(e.into());
+        }
+    };
+
+    Ok(Some(HugeSplitPlan {
+        block_va,
+        old_paddr,
+        flags,
+        target,
+        table_paddr,
+    }))
+}
+
+/// Free the data frames a [`HugeSplitTarget`] holds (the pre-allocated COW-break
+/// copy, if any). Shared by the prepare rollback and [`abort_huge_split_2m`].
+#[cfg(feature = "thp")]
+fn dealloc_split_target(target: HugeSplitTarget) {
+    match target {
+        HugeSplitTarget::InPlace => {}
+        HugeSplitTarget::CopiedContiguous(new_paddr) => dealloc_frame(new_paddr, HUGE_2M),
+        HugeSplitTarget::CopiedScattered(frames) => {
+            for f in frames {
+                dealloc_frame(f, PageSize::Size4K);
+            }
+        }
+    }
+}
+
+/// Release a prepared-but-not-committed split (frees the COW-break copy and the
+/// reserved leaf page table). Used to roll back an atomic whole-area split when a
+/// later block fails to prepare.
+#[cfg(feature = "thp")]
+pub(crate) fn abort_huge_split_2m(pt: &PageTable, plan: HugeSplitPlan) {
+    pt.dealloc_intermediate_table(plan.table_paddr);
+    dealloc_split_target(plan.target);
+}
+
+/// Phase 2 (commit): apply a prepared split — re-map the 2 MiB block PTE as 512
+/// leaf PTEs, convert the [`FRAME_TABLE`] refcount and RSS charge to 4 KiB, and
+/// (for a COW break) drop this address space's reference to the shared frame.
+/// Preserves the block's current PTE permissions on the 512 leaf PTEs, so COW
+/// write-protection (lazy first-write copy) is not broken by the split.
+///
+/// Infallible: both the COW-break copy and the leaf page table were reserved in
+/// [`prepare_huge_split_2m`], so this performs no *recoverable* allocation and
+/// cannot return an error that leaves a half-split (torn) mapping. (It still uses
+/// the infallible global allocator for `FRAME_TABLE` / RSS book-keeping nodes,
+/// which abort on true OOM like everywhere else in the kernel — they never tear.)
+/// Must be called with the owning [`super::AddrSpace`] locked.
+#[cfg(feature = "thp")]
+pub(crate) fn commit_huge_split_2m(
+    plan: HugeSplitPlan,
+    acct: Option<&MemoryAccounting>,
+    pt: &mut PageTableCursor,
+) {
+    let HugeSplitPlan {
+        block_va,
+        old_paddr,
+        flags,
+        target,
+        table_paddr,
+    } = plan;
+
+    // Splice in the pre-reserved (zeroed) leaf page table, replacing the 2 MiB
+    // block descriptor. `split_huge_page_with` does the break-before-make
+    // (invalidate the block + complete the broadcast TLBI, then install the
+    // table) internally, so no extra flush is needed here. The block stays a
+    // present 2 MiB page under the address-space lock from prepare to here, so
+    // this cannot fail; treat a failure as a broken invariant.
+    pt.split_huge_page_with(block_va, table_paddr)
+        .expect("prepared 2 MiB block is no longer a huge mapping at commit");
+
+    // Establish the 512 target sub-frame physical addresses + buddy state.
+    let sub_paddrs: alloc::vec::Vec<PhysAddr> = match target {
+        HugeSplitTarget::InPlace => {
+            // Retag the same buddy block. Remove the single 2 MiB refcount entry
+            // first; it is re-registered as 512 4 KiB entries below.
+            FRAME_TABLE.lock().remove_frame(old_paddr);
+            super::split_frame(old_paddr);
+            (0..HUGE_2M_SUBPAGES)
+                .map(|i| old_paddr + i * PAGE_SIZE_4K)
+                .collect()
+        }
+        HugeSplitTarget::CopiedContiguous(new_paddr) => {
+            drop_shared_huge_ref(old_paddr);
+            super::split_frame(new_paddr);
+            (0..HUGE_2M_SUBPAGES)
+                .map(|i| new_paddr + i * PAGE_SIZE_4K)
+                .collect()
+        }
+        HugeSplitTarget::CopiedScattered(frames) => {
+            drop_shared_huge_ref(old_paddr);
+            frames
+        }
+    };
+
+    {
+        let mut table = FRAME_TABLE.lock();
+        for &pa in &sub_paddrs {
+            table.init_frame(pa);
+        }
+    }
+
+    // Install the 512 leaf PTEs into the pre-reserved table, preserving the
+    // block's permissions. These cannot allocate (the table already exists) and
+    // the slots are freshly zeroed, so none of these `map`s can fail; treat a
+    // failure as a broken invariant.
+    for (i, &pa) in sub_paddrs.iter().enumerate() {
+        pt.map(block_va + i * PAGE_SIZE_4K, pa, PageSize::Size4K, flags)
+            .expect("leaf map into the pre-reserved split table cannot fail");
+    }
+
+    // Convert the single 2 MiB RSS charge into 512 4 KiB charges so per-4 KiB
+    // unmap/reclassify finds an entry at each page VA. The sub-page VAs are fresh
+    // (only the 2 MiB VA was charged), so `record_charge_fresh` is infallible.
+    if let Some(acct) = acct {
+        let kind = match acct.charge_kind(block_va) {
+            Some(k) => {
+                acct.remove_charge(block_va);
+                k
+            }
+            None => RssKind::Anon,
+        };
+        for i in 0..HUGE_2M_SUBPAGES {
+            acct.record_charge_fresh(block_va + i * PAGE_SIZE_4K, kind);
+        }
+    }
+}
+
+/// Drop this address space's reference to a COW-shared 2 MiB frame after copying
+/// it privately. Peers keep their intact 2 MiB block view; the frame is freed
+/// only when the last sharer drops it.
+#[cfg(feature = "thp")]
+fn drop_shared_huge_ref(old_paddr: PhysAddr) {
+    let frame_ref = FRAME_TABLE
+        .lock()
+        .get_frame_ref(old_paddr)
+        .expect("shared huge frame vanished before commit");
+    frame_ref.lock().drop_frame(old_paddr, HUGE_2M);
+}
+
+fn cow_file_max_read_len(
+    file_len: u64,
+    file_end: Option<u64>,
+    file_read_offset: u64,
+    available: usize,
+) -> AxResult<usize> {
+    let effective_end = match file_end {
+        Some(end) => end,
+        None => {
+            if file_read_offset >= file_len {
+                return Err(AxError::BadAddress);
+            }
+            file_len
+        }
+    };
+    Ok(effective_end
+        .saturating_sub(file_read_offset)
+        .min(available as u64) as usize)
+}
+
+fn cow_file_max_read(
+    file: &FileBackend,
+    file_end: Option<u64>,
+    file_read_offset: u64,
+    available: usize,
+) -> AxResult<usize> {
+    let file_len = if file_end.is_none() { file.len()? } else { 0 };
+    cow_file_max_read_len(file_len, file_end, file_read_offset, available)
+}
+
+#[cfg(axtest)]
+pub(crate) fn private_mmap_eof_check_for_test() -> bool {
+    matches!(
+        cow_file_max_read_len(4096, None, 4096, 4096),
+        Err(AxError::BadAddress)
+    ) && matches!(cow_file_max_read_len(4096, None, 2048, 4096), Ok(2048))
+        && matches!(
+            cow_file_max_read_len(4096, Some(8192), 4096, 4096),
+            Ok(4096)
+        )
+}
 
 /// Copy-on-write mapping backend.
 ///
@@ -132,11 +457,16 @@ impl CowBackend {
 
     /// PTE flags applied by [`super::Backend::protect`].
     ///
-    /// File-backed private mappings keep PTEs read-only after `mprotect(+W)` so
-    /// the first store still faults into [`Self::handle_cow_fault`] for RSS
-    /// reclassify without touching charge at mprotect time (fork sibling case).
+    /// Every private (Cow) mapping — file-backed AND anonymous — keeps its PTEs
+    /// read-only after `mprotect(+W)`, so the first store faults into
+    /// [`Self::handle_cow_fault`], which COW-breaks a shared frame (refcount > 1,
+    /// after fork: copy + remap + drop the shared ref) or simply re-enables write
+    /// on an exclusive frame (refcount == 1). Without this an anonymous COW-shared
+    /// page got a writable PTE on the shared frame with no break, so a store in one
+    /// forked process was visible in the other (inter-process corruption). File-backed
+    /// mappings additionally use the deferred fault for RSS reclassify.
     pub(super) fn pte_flags_for_protect(&self, new_flags: MappingFlags) -> MappingFlags {
-        if self.file.is_some() && new_flags.contains(MappingFlags::WRITE) {
+        if new_flags.contains(MappingFlags::WRITE) {
             new_flags - MappingFlags::WRITE
         } else {
             new_flags
@@ -226,9 +556,14 @@ impl CowBackend {
 
             let file_read_offset =
                 *file_start + vaddr.as_usize().saturating_sub(file_vaddr_base.as_usize()) as u64;
-            let max_read = file_end
-                .map_or(u64::MAX, |end| end.saturating_sub(file_read_offset))
-                .min((buf.len() - start) as u64) as usize;
+            let max_read =
+                match cow_file_max_read(file, *file_end, file_read_offset, buf.len() - start) {
+                    Ok(max_read) => max_read,
+                    Err(err) => {
+                        self.deinit_frame(frame);
+                        return Err(err);
+                    }
+                };
 
             if let Err(err) = file.read_at(&mut &mut buf[start..start + max_read], file_read_offset)
             {
@@ -274,9 +609,7 @@ impl CowBackend {
         let n = run.len();
         let total = n * ps;
         let file_read_offset = file_start + (v0.as_usize() - file_vaddr_base.as_usize()) as u64;
-        let max_read = file_end
-            .map_or(u64::MAX, |end| end.saturating_sub(file_read_offset))
-            .min(total as u64) as usize;
+        let max_read = cow_file_max_read(file, *file_end, file_read_offset, total)?;
         let mut buf = alloc::vec![0u8; total];
         if max_read > 0 {
             file.read_at(&mut &mut buf[..max_read], file_read_offset)?;
@@ -314,7 +647,7 @@ impl CowBackend {
         drop(frame_table);
         let mut frame = frame.lock();
         assert!(frame.count > 0, "invalid frame reference count");
-        debug_assert!(frame.count < u8::MAX, "frame reference count near overflow");
+        debug_assert!(frame.count < u32::MAX, "frame reference count near overflow");
         match frame.count {
             1 => {
                 pt.protect(vaddr, vma_flags)?;
@@ -326,6 +659,14 @@ impl CowBackend {
                 return Ok(());
             }
             _ => {
+                // For a 2 MiB (THP) backend this copies the whole 2 MiB block on
+                // the first write and remaps it writable at 2 MiB, so the child
+                // keeps a private huge page (one 2 MiB memcpy per COW'd block,
+                // then all writable — coarse but correct; the RSS/write
+                // amplification for sparse post-fork writes is the accepted THP
+                // tradeoff). Under fragmentation `alloc_new_frame` returns
+                // NoMemory, which the fault handler turns into a 4 KiB split +
+                // retry (see `split_huge_area`).
                 let new_frame = self.alloc_new_frame(false)?;
                 unsafe {
                     core::ptr::copy_nonoverlapping(
@@ -535,11 +876,17 @@ impl BackendOps for CowBackend {
                         .ok_or(AxError::BadAddress)?;
                     let mut frame = frame.lock();
                     assert!(frame.count > 0, "referencing unreferenced frame");
-                    frame.count += 1;
-                    if frame.count == u8::MAX {
-                        warn!("frame reference count overflow");
-                        return Err(AxError::BadAddress);
-                    }
+                    // Overflow is effectively unreachable with a u32 refcount, but
+                    // if it ever happens report it as ENOMEM (out of a shareable
+                    // resource) rather than EFAULT — a fork hitting a real limit
+                    // must not look like a bad pointer to userspace.
+                    frame.count = match frame.count.checked_add(1) {
+                        Some(c) => c,
+                        None => {
+                            warn!("frame reference count overflow");
+                            return Err(AxError::NoMemory);
+                        }
+                    };
                     old_pt.protect(vaddr, cow_flags)?;
                     new_pt.map(vaddr, paddr, self.size, cow_flags)?;
                     if let (Some(parent), Some(child)) = (acct.parent, acct.child)
@@ -548,7 +895,15 @@ impl BackendOps for CowBackend {
                         child.copy_charge_from(parent, vaddr)?;
                     }
                 }
-                Err(PagingError::NotMapped) => {}
+                // A not-present huge block (a THP block whose present bit was
+                // cleared by `mprotect(PROT_NONE)`) has no valid translation to
+                // clone into the child — `query` reports it as `MappedToHugePage`
+                // because it is neither a normal mapping nor a table. Skip it like
+                // an unmapped page: the parent keeps its sole reference (freed on
+                // its own unmap), and the child inherits the VMA but not this
+                // inaccessible page. Without this, fork of a process that
+                // PROT_NONE'd a THP region fails with EFAULT.
+                Err(PagingError::NotMapped) | Err(PagingError::MappedToHugePage) => {}
                 Err(_) => return Err(AxError::BadAddress),
             };
         }

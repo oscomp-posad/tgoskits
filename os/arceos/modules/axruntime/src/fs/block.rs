@@ -1,10 +1,8 @@
 use alloc::{boxed::Box, string::String, vec::Vec};
-#[cfg(feature = "irq")]
-use core::ptr::NonNull;
 
 use ax_alloc::UsageKind;
 use ax_fs_ng::{
-    block::runtime::{BlockIrqAction, RdifBlockDevice},
+    block::runtime::{BlockIrqSource, RdifBlockDevice},
     os::{
         BlockIrqOutcome, BlockIrqRegistrar, BlockIrqRegistration, BlockTaskOps, BlockTimeProvider,
         FsPage, FsPageProvider,
@@ -53,6 +51,12 @@ impl BlockTaskOps for RuntimeTaskOps {
         ax_task::current_may_uninit().map(|curr| curr.id().as_u64())
     }
 
+    fn can_block(&self) -> bool {
+        crate::is_init_ok()
+            && ax_task::current_may_uninit().is_some()
+            && !ax_task::in_atomic_context()
+    }
+
     fn task_yield(&self) {
         ax_task::yield_now();
     }
@@ -61,14 +65,12 @@ impl BlockTaskOps for RuntimeTaskOps {
         BLOCK_IO_WAIT_WQ.wait();
     }
 
-    fn task_wait_until(&self, condition: &dyn Fn() -> bool) {
-        BLOCK_IO_WAIT_WQ.wait_until(condition);
+    fn task_wait_timeout(&self, dur: core::time::Duration) -> bool {
+        BLOCK_IO_WAIT_WQ.wait_timeout(dur)
     }
 
-    fn task_wait_until_timeout(&self, condition: &dyn Fn() -> bool, timeout: core::time::Duration) -> bool {
-        // `wait_timeout_until` returns true on timeout, false if the condition
-        // became true; invert so we return true iff the condition was observed.
-        !BLOCK_IO_WAIT_WQ.wait_timeout_until(timeout, condition)
+    fn task_wait_until(&self, condition: &dyn Fn() -> bool) {
+        BLOCK_IO_WAIT_WQ.wait_until(condition);
     }
 
     fn wake_task(&self, task_id: u64) {
@@ -92,7 +94,7 @@ impl BlockTaskOps for RuntimeTaskOps {
     }
 
     fn spawn(&self, name: String, f: Box<dyn FnOnce() + Send + 'static>) {
-        ax_task::spawn_raw(f, name, ax_config::TASK_STACK_SIZE);
+        ax_task::spawn_raw(f, name, crate::runtime_default_task_stack_size());
     }
 }
 
@@ -101,29 +103,17 @@ struct RuntimeBlockIrqRegistrar;
 
 #[cfg(feature = "irq")]
 struct RuntimeBlockIrqRegistration {
-    _inner: crate::irq::HandlerRegistration<RuntimeBlockIrqState>,
+    _inner: crate::irq::Registration,
 }
+
+// SAFETY: The registration token is kept in the global block runtime only to
+// own the IRQ action lifetime. The move-only boxed callback state is owned by
+// the IRQ framework and is not exposed through this token.
+unsafe impl Sync for RuntimeBlockIrqRegistration {}
 
 #[cfg(feature = "irq")]
 impl BlockIrqRegistration for RuntimeBlockIrqRegistration {}
 
-#[cfg(feature = "irq")]
-struct RuntimeBlockIrqState {
-    action: BlockIrqAction,
-}
-
-#[cfg(feature = "irq")]
-unsafe fn handle_block_irq(
-    _ctx: ax_hal::irq::IrqContext,
-    data: NonNull<()>,
-) -> ax_hal::irq::IrqReturn {
-    let state = unsafe { data.cast::<RuntimeBlockIrqState>().as_ref() };
-    match state.action.run() {
-        BlockIrqOutcome::Handled => ax_hal::irq::IrqReturn::Handled,
-    }
-}
-
-#[cfg(feature = "irq")]
 fn map_block_irq_error(err: ax_hal::irq::IrqError) -> ax_errno::AxError {
     match err {
         ax_hal::irq::IrqError::InvalidIrq | ax_hal::irq::IrqError::InvalidCpu => {
@@ -135,6 +125,7 @@ fn map_block_irq_error(err: ax_hal::irq::IrqError) -> ax_errno::AxError {
         ax_hal::irq::IrqError::Busy | ax_hal::irq::IrqError::InIrqContext => {
             ax_errno::AxError::ResourceBusy
         }
+        ax_hal::irq::IrqError::Timeout => ax_errno::AxError::TimedOut,
         ax_hal::irq::IrqError::NoMemory => ax_errno::AxError::NoMemory,
         ax_hal::irq::IrqError::NotFound => ax_errno::AxError::NotFound,
         ax_hal::irq::IrqError::Controller => ax_errno::AxError::Io,
@@ -146,13 +137,15 @@ impl BlockIrqRegistrar for RuntimeBlockIrqRegistrar {
     fn register_shared(
         &self,
         name: String,
-        irq: usize,
-        action: BlockIrqAction,
+        irq: irq_framework::IrqId,
+        mut action: Box<dyn FnMut(ax_hal::irq::IrqContext) -> BlockIrqOutcome + Send + 'static>,
     ) -> ax_errno::AxResult<Box<dyn BlockIrqRegistration>> {
-        let state = RuntimeBlockIrqState { action };
-        crate::irq::HandlerRegistration::register_shared(name, irq, state, handle_block_irq)
-            .map(|inner| Box::new(RuntimeBlockIrqRegistration { _inner: inner }) as _)
-            .map_err(map_block_irq_error)
+        crate::irq::Registration::register_shared(name, irq, move |ctx| match action(ctx) {
+            BlockIrqOutcome::Handled => ax_hal::irq::IrqReturn::Handled,
+            BlockIrqOutcome::Wake => ax_hal::irq::IrqReturn::Wake,
+        })
+        .map(|inner| Box::new(RuntimeBlockIrqRegistration { _inner: inner }) as _)
+        .map_err(map_block_irq_error)
     }
 }
 
@@ -182,10 +175,46 @@ fn take_rdif_block_devices() -> Vec<RdifBlockDevice> {
         .into_iter()
         .map(|block| {
             let name = String::from(block.name());
-            let irq_num = block.irq_num();
-            RdifBlockDevice::new(name, irq_num, block.into_interface())
+            let irqs = resolve_block_irqs(&block);
+            RdifBlockDevice::new_with_irqs(name, irqs, block.into_interface())
         })
         .collect()
+}
+
+#[cfg(feature = "irq")]
+fn resolve_block_irqs(block: &ax_driver::block::RdifBlockDevice) -> Vec<BlockIrqSource> {
+    block
+        .irq_sources()
+        .iter()
+        .filter_map(|source| {
+            resolve_block_irq(Some(source.irq.clone())).map(|irq| BlockIrqSource {
+                source_id: source.source_id,
+                irq,
+            })
+        })
+        .collect()
+}
+
+#[cfg(not(feature = "irq"))]
+fn resolve_block_irqs(_block: &ax_driver::block::RdifBlockDevice) -> Vec<BlockIrqSource> {
+    Vec::new()
+}
+
+#[cfg(feature = "irq")]
+fn resolve_block_irq(irq: Option<ax_driver::BindingIrq>) -> Option<irq_framework::IrqId> {
+    let irq = irq?;
+    match crate::irq::resolve_binding_irq(irq) {
+        Ok(id) => Some(id),
+        Err(err) => {
+            warn!("failed to resolve block IRQ: {err:?}");
+            None
+        }
+    }
+}
+
+#[cfg(not(feature = "irq"))]
+fn resolve_block_irq(_irq: Option<ax_driver::BindingIrq>) -> Option<irq_framework::IrqId> {
+    None
 }
 
 #[cfg(test)]

@@ -23,6 +23,14 @@ public:
     ~Camera();
 
     bool start(int device, int width, int height, int fps);
+
+    // `start()` split so the caller can overlap the cheap open+format-negotiation
+    // (USB control transfers) with other work (e.g. model init) and only kick off
+    // the ISO streaming flood afterwards. Call `begin_streaming()` once, after a
+    // successful `open_and_negotiate()`.
+    bool open_and_negotiate(int device, int width, int height, int fps);
+    bool begin_streaming();
+
     void stop();
 
     // If a frame newer than the last polled one is available, copy it into
@@ -30,14 +38,11 @@ public:
     // (no copy performed -- only the frame id is peeked under the lock).
     bool poll(LatestFrame &frame, int64_t &capture_ts_ns);
 
-    // Discard consecutive structurally valid frames until the stream is stable
-    // enough for control, or fail after the bounded startup timeout.
-    bool warm_up(int valid_frames, int timeout_ms);
-
     UvcCaptureCounters counters();
 
 private:
     UvcCaptureSession session_;
+    UvcCaptureOptions opts_{}; // retained between open_and_negotiate() and begin_streaming()
     uint64_t last_id_ = 0;
     bool started_ = false;
 };

@@ -71,6 +71,27 @@ pub trait PagingMetaData: Sync + Send {
     /// The maximum physical address.
     const PA_MAX_ADDR: usize = (1 << Self::PA_MAX_BITS) - 1;
 
+    /// Whether [`map`](PageTable64Cursor::map)ping a *fresh* (not-present →
+    /// present) entry requires TLB maintenance for that address.
+    ///
+    /// A successful `map` only ever installs into an unused (not-present) entry —
+    /// it returns [`PagingError::AlreadyMapped`] otherwise. On architectures that
+    /// never cache not-present translations (aarch64, x86_64), no stale entry can
+    /// exist, so making a page present needs no TLB flush. This is exactly why
+    /// Linux `set_pte` / demand faults skip the flush, and skipping it here removes
+    /// a broadcast TLBI (+ full-system barrier) per faulted page — the dominant
+    /// per-page cost of a first-touch storm.
+    ///
+    /// Architectures that permit negative caching of invalid PTEs must keep this
+    /// `true`: RISC-V may require an `sfence.vma` after an invalid → valid
+    /// transition, and LoongArch is unverified.
+    ///
+    /// This flag governs **only** `map` (unused → valid). `remap`/`protect`/`unmap`
+    /// change or remove *valid* entries (break-before-make) and always flush,
+    /// regardless of this flag. Defaults to `true` so a new architecture is correct
+    /// until its TLB semantics have been verified.
+    const NEED_FLUSH_ON_MAP: bool = true;
+
     /// The virtual address to be translated in this page table.
     ///
     /// This associated type allows more flexible use of page tables structs
@@ -97,6 +118,34 @@ pub trait PagingMetaData: Sync + Send {
     /// If `vaddr` is [`None`], flushes the entire TLB. Otherwise, flushes the
     /// TLB entry at the given virtual address.
     fn flush_tlb(vaddr: Option<Self::VirtAddr>);
+
+    /// Issues a TLB invalidation for `vaddr` **without** waiting for it to
+    /// complete on other cores.
+    ///
+    /// This lets a caller batch many by-VA invalidations behind a single
+    /// completion barrier ([`flush_tlb_sync`](Self::flush_tlb_sync)) instead of
+    /// paying one barrier per address. It is **only** sound to defer the barrier
+    /// when nothing observes the invalidation before the matching
+    /// `flush_tlb_sync` — in particular, a page-table frame whose parent entry
+    /// was cleared must NOT be freed or reused until `flush_tlb_sync` has run, or
+    /// a stale walk on another core could read the reused frame.
+    ///
+    /// The default is a fully-synchronous single flush, which is always correct;
+    /// only architectures that separate the invalidation from its completion
+    /// barrier (aarch64) gain anything by overriding it. Overrides MUST keep any
+    /// leading store-ordering barrier that break-before-make relies on.
+    #[inline]
+    fn flush_tlb_nosync(vaddr: Self::VirtAddr) {
+        Self::flush_tlb(Some(vaddr));
+    }
+
+    /// Completes any outstanding [`flush_tlb_nosync`](Self::flush_tlb_nosync)
+    /// invalidations and synchronizes the issuing core.
+    ///
+    /// The default is a no-op, correct because the default `flush_tlb_nosync`
+    /// already completed inline.
+    #[inline]
+    fn flush_tlb_sync() {}
 }
 
 /// The low-level **OS-dependent** helpers that must be provided for

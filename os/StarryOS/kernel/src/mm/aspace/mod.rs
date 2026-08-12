@@ -185,11 +185,24 @@ impl AddrSpace {
         populate: bool,
         backend: Backend,
     ) -> AxResult {
+        self.map_with_reported_flags(start, size, flags, flags, populate, backend)
+    }
+
+    pub fn map_with_reported_flags(
+        &mut self,
+        start: VirtAddr,
+        size: usize,
+        flags: MappingFlags,
+        reported_flags: MappingFlags,
+        populate: bool,
+        backend: Backend,
+    ) -> AxResult {
         self.validate_region(start, size)?;
 
         {
             let _rss = RssAccountingGuard::enter(&self.rss);
-            let area = MemoryArea::new(start, size, flags, backend);
+            let area =
+                MemoryArea::new_with_reported_flags(start, size, flags, reported_flags, backend);
             self.areas.map(area, &mut self.pt, false)?;
         }
         self.vm_stat.on_map((size / PAGE_SIZE_4K) as u64);
@@ -212,21 +225,54 @@ impl AddrSpace {
         let end = start + size;
 
         loop {
+            #[cfg(feature = "thp")]
+            let mut downgrade_area: Option<VirtAddr> = None;
             let (area_end, callback) = {
                 let Some(area) = self.areas.find(start) else {
                     break;
                 };
-                let range = VirtAddrRange::new(start, area.end().min(end));
+                let page_size = area.backend().page_size();
+                // Align the fill range to the AREA's page size, not the caller's. The
+                // demand path (`prepare_user_memory` for a small user access such as a
+                // 4-byte futex word) hands us a 4 KiB-aligned range, but a THP (2 MiB)
+                // backend's `populate` requires a 2 MiB-aligned range (`pages_in`) and
+                // otherwise faults `InvalidInput` — which surfaced to userspace as a
+                // spurious EFAULT ("Bad address") on a valid pointer. Widen to the
+                // containing large page, clamped to the area bounds (first touch fills
+                // the whole huge page, which is exactly the THP intent). For a 4 KiB
+                // area this is a no-op since `start`/`end` are already 4 KiB-aligned.
+                let range = VirtAddrRange::new(
+                    start.align_down(page_size).max(area.start()),
+                    area.end().min(end.align_up(page_size)),
+                );
                 let flags = area.flags();
-                let (_, callback) = area.backend().populate(
+                #[cfg(feature = "thp")]
+                let area_start = area.start();
+                match area.backend().populate(
                     range,
                     flags,
                     access_flags,
                     Some(&self.rss),
                     &mut self.pt.cursor(),
-                )?;
-                (area.end(), callback)
+                ) {
+                    Ok((_, callback)) => (area.end(), callback),
+                    // THP fragmentation fallback: a 2 MiB anon area that cannot
+                    // obtain an order-9 frame is downgraded to 4 KiB and the same
+                    // `start` retried at 4 KiB below (never fail an eager fill on
+                    // a fragmented heap).
+                    #[cfg(feature = "thp")]
+                    Err(AxError::NoMemory) if page_size == PageSize::Size2M => {
+                        downgrade_area = Some(area_start);
+                        (area.end(), None)
+                    }
+                    Err(err) => return Err(err),
+                }
             };
+            #[cfg(feature = "thp")]
+            if let Some(area_start) = downgrade_area {
+                self.split_huge_area(area_start)?;
+                continue;
+            }
             // Run the eviction cleanup the populate deferred (unmap + TLB flush
             // for page-cache pages evicted during this fill). Dropping it — as
             // the old code did — frees an evicted frame while its user PTE still
@@ -255,6 +301,12 @@ impl AddrSpace {
     pub fn discard_range(&mut self, start: VirtAddr, size: usize) -> AxResult {
         self.validate_region(start, size)?;
         let end = start + size;
+
+        // THP: a sub-2 MiB DONTNEED on a promoted huge area rounds inward to a
+        // no-op (regression) unless the partially-covered area is split to 4 KiB
+        // first.
+        #[cfg(feature = "thp")]
+        self.split_huge_for_partial_op(start, end)?;
 
         let mut frags: alloc::vec::Vec<(VirtAddrRange, Backend)> = alloc::vec::Vec::new();
         for area in self.areas.iter() {
@@ -293,6 +345,12 @@ impl AddrSpace {
     pub fn unmap(&mut self, start: VirtAddr, size: usize) -> AxResult {
         self.validate_region(start, size)?;
 
+        // THP: a partial munmap that cuts through a promoted 2 MiB area must
+        // split it to 4 KiB first, else the memory-set shrink/split lands
+        // mid-block and errors (DynPageIter None) or clears the whole block.
+        #[cfg(feature = "thp")]
+        self.split_huge_for_partial_op(start, start + size)?;
+
         // Compute the actual mapped bytes being removed (unmap is already O(n)).
         let end = start + size;
         let removed_pages: u64 = self
@@ -309,6 +367,11 @@ impl AddrSpace {
         let _rss = RssAccountingGuard::enter(&self.rss);
         crate::syscall::memfd_on_aspace_unmap_range(self, start, size);
         self.areas.unmap(start, size, &mut self.pt)?;
+        // Free any intermediate page table this unmap emptied (e.g. an L3 table
+        // stranded when a huge-page split's leaves are removed, or any leaf table
+        // whose whole 2 MiB span was unmapped), instead of leaking it until the
+        // address space is torn down.
+        self.pt.reclaim_empty_tables(start, size);
         self.vm_stat.on_unmap(removed_pages);
         Ok(())
     }
@@ -342,10 +405,21 @@ impl AddrSpace {
         flags: MappingFlags,
         backend: Backend,
     ) -> AxResult {
+        self.replace_area_metadata_with_reported_flags(start, size, flags, flags, backend)
+    }
+
+    pub fn replace_area_metadata_with_reported_flags(
+        &mut self,
+        start: VirtAddr,
+        size: usize,
+        flags: MappingFlags,
+        reported_flags: MappingFlags,
+        backend: Backend,
+    ) -> AxResult {
         self.validate_region(start, size)?;
 
         crate::syscall::memfd_on_aspace_replace_metadata(self, start, size, flags, &backend);
-        let area = MemoryArea::new(start, size, flags, backend);
+        let area = MemoryArea::new_with_reported_flags(start, size, flags, reported_flags, backend);
         self.areas.replace_area_metadata(area)?;
         Ok(())
     }
@@ -467,18 +541,50 @@ impl AddrSpace {
         })
     }
 
+    /// Synchronizes instruction fetch after modifying executable memory through this address space.
+    pub fn sync_modified_text(&self, start: VirtAddr, size: usize) -> AxResult {
+        if size == 0 {
+            return Ok(());
+        }
+
+        self.process_area_data(start, size, |dst, _offset, sync_size| {
+            ax_runtime::hal::cache::clean_dcache_to_pou(dst, sync_size);
+        })?;
+        ax_runtime::hal::cache::flush_icache_all();
+        Ok(())
+    }
+
     /// Updates mapping within the specified virtual address range.
     ///
     /// Returns an error if the address range is out of the address space or not
     /// aligned.
     pub fn protect(&mut self, start: VirtAddr, size: usize, flags: MappingFlags) -> AxResult {
+        self.protect_with_reported_flags(start, size, flags, flags)
+    }
+
+    pub fn protect_with_reported_flags(
+        &mut self,
+        start: VirtAddr,
+        size: usize,
+        flags: MappingFlags,
+        reported_flags: MappingFlags,
+    ) -> AxResult {
         self.validate_region(start, size)?;
+
+        // THP: a partial mprotect that cuts through a promoted 2 MiB area must
+        // split it to 4 KiB first (single backend page size per VMA).
+        #[cfg(feature = "thp")]
+        self.split_huge_for_partial_op(start, start + size)?;
 
         let touched_memfds =
             crate::syscall::memfd_collect_metas_touching_mprotect_range(self, start, size);
         let _rss = RssAccountingGuard::enter(&self.rss);
-        self.areas
-            .protect(start, size, |_| Some(flags), &mut self.pt)?;
+        self.areas.protect_with_reported_flags(
+            start,
+            size,
+            |_, _| Some((flags, reported_flags)),
+            &mut self.pt,
+        )?;
         crate::syscall::memfd_resync_shared_writable_counts_after_mprotect(self, &touched_memfds);
 
         Ok(())
@@ -527,6 +633,164 @@ impl AddrSpace {
         false
     }
 
+    /// THP: collect the start address of every `Size2M` anonymous area that
+    /// overlaps `[start, end)`. When `partial_only` is set, only areas an op
+    /// boundary strictly bisects (partial coverage) are returned; otherwise every
+    /// overlapping huge area is returned. Read-only pre-pass for the split helpers
+    /// below, which then call `split_huge_area` on each collected start.
+    #[cfg(feature = "thp")]
+    fn collect_huge_area_starts(
+        &self,
+        start: VirtAddr,
+        end: VirtAddr,
+        partial_only: bool,
+    ) -> alloc::vec::Vec<VirtAddr> {
+        let mut to_split = alloc::vec::Vec::new();
+        for area in self.areas.iter() {
+            if area.start() >= end {
+                break;
+            }
+            if area.end() <= start {
+                continue;
+            }
+            let is_huge = matches!(
+                area.backend(),
+                Backend::Cow(c) if c.is_anonymous() && c.page_size() == PageSize::Size2M
+            );
+            // Partial coverage: an op boundary lies strictly inside the area.
+            let partial = area.start() < start || end < area.end();
+            if is_huge && (!partial_only || partial) {
+                to_split.push(area.start());
+            }
+        }
+        to_split
+    }
+
+    /// THP: split every `Size2M` anonymous area that operation `[start, end)`
+    /// only *partially* covers into 4 KiB PTEs, so a following sub-2 MiB
+    /// `unmap`/`protect`/`discard` on it is well-formed. Areas fully contained
+    /// in `[start, end)` are left as 2 MiB blocks (whole-block ops stay valid).
+    #[cfg(feature = "thp")]
+    fn split_huge_for_partial_op(&mut self, start: VirtAddr, end: VirtAddr) -> AxResult {
+        for area_start in self.collect_huge_area_starts(start, end, true) {
+            self.split_huge_area(area_start)?;
+        }
+        Ok(())
+    }
+
+    /// THP: split *every* `Size2M` anonymous area overlapping `[start, end)` down
+    /// to 4 KiB — including fully-covered ones — implementing `MADV_NOHUGEPAGE`.
+    /// Unlike [`split_huge_for_partial_op`](Self::split_huge_for_partial_op),
+    /// which only splits areas an op boundary bisects, this splits all overlapping
+    /// huge areas so the range holds no huge pages afterward. Since THP-lite only
+    /// promotes at mmap time and never re-promotes, splitting is sufficient.
+    #[cfg(feature = "thp")]
+    fn split_huge_range(&mut self, start: VirtAddr, end: VirtAddr) -> AxResult {
+        for area_start in self.collect_huge_area_starts(start, end, false) {
+            self.split_huge_area(area_start)?;
+        }
+        Ok(())
+    }
+
+    /// THP: split any transparent huge pages in `[start, start+size)` back to
+    /// 4 KiB, implementing Linux `MADV_NOHUGEPAGE`. A no-op without the `thp`
+    /// feature (no huge pages exist) or when the range holds none.
+    ///
+    /// Granularity note: because a `MemoryArea` carries a single backend page
+    /// size, any huge area the range touches is split in full — the part outside
+    /// `[start, start+size)` is downgraded to 4 KiB too, and (THP-lite never
+    /// re-promotes) stays 4 KiB. This over-application is content-preserving and
+    /// matches `split_huge_for_partial_op`. It may allocate (COW-break of a
+    /// shared huge block), so it can return `NoMemory` where Linux — which only
+    /// sets a VMA flag — would not.
+    pub fn split_huge_pages(&mut self, start: VirtAddr, size: usize) -> AxResult {
+        self.validate_region(start, size)?;
+        #[cfg(feature = "thp")]
+        self.split_huge_range(start, start + size)?;
+        Ok(())
+    }
+
+    /// THP: convert one entire `Size2M` anonymous area to 4 KiB granularity.
+    ///
+    /// Every resident 2 MiB block is re-mapped as 512 leaf PTEs and the area's
+    /// backend page size is downgraded to 4 KiB. A [`MemoryArea`] carries a
+    /// single backend page size, so touching any block forces the whole area
+    /// down to 4 KiB — the PTEs and the backend size stay consistent.
+    ///
+    /// Atomic against allocation failure. Phase 1
+    /// ([`prepare_huge_split_2m`](backend::prepare_huge_split_2m)) pre-allocates
+    /// *both* every COW-break data copy *and* every 4 KiB leaf page table; if any
+    /// block cannot be prepared, the prepared ones are released
+    /// ([`abort_huge_split_2m`](backend::abort_huge_split_2m)) and the area is
+    /// left untouched (a valid `Size2M` area). Phase 2
+    /// ([`commit_huge_split_2m`](backend::commit_huge_split_2m)) then splices in
+    /// the reserved tables and re-maps the leaves without allocating, so it
+    /// cannot fail partway. A fragmented / OOM heap therefore never leaves the
+    /// area in a mixed 2 MiB/4 KiB state — either the whole area splits or none of
+    /// it does.
+    #[cfg(feature = "thp")]
+    fn split_huge_area(&mut self, area_start: VirtAddr) -> AxResult {
+        let (start, end, size, flags, reported_flags) = {
+            let Some(area) = self.areas.find(area_start) else {
+                return Ok(());
+            };
+            match area.backend() {
+                Backend::Cow(c) if c.is_anonymous() && c.page_size() == PageSize::Size2M => {}
+                _ => return Ok(()),
+            }
+            (
+                area.start(),
+                area.end(),
+                area.size(),
+                area.flags(),
+                area.reported_flags(),
+            )
+        };
+
+        // Phase 1: prepare every resident block (pre-allocates COW-break copies
+        // and the leaf page tables). On any failure release what was prepared and
+        // leave the area untouched.
+        let mut plans = alloc::vec::Vec::new();
+        let mut va = start;
+        let mut prepare_err = None;
+        while va < end {
+            match backend::prepare_huge_split_2m(va, &self.pt) {
+                Ok(Some(plan)) => plans.push(plan),
+                Ok(None) => {}
+                Err(err) => {
+                    prepare_err = Some(err);
+                    break;
+                }
+            }
+            va += PageSize::Size2M as usize;
+        }
+        if let Some(err) = prepare_err {
+            for plan in plans {
+                backend::abort_huge_split_2m(&self.pt, plan);
+            }
+            return Err(err);
+        }
+
+        // Phase 2: commit each prepared block. Commit is infallible (the leaf
+        // table and any COW-break copy were reserved in phase 1), so once phase 1
+        // succeeds the whole area splits — it can never be left partway.
+        for plan in plans {
+            let mut cursor = self.pt.cursor();
+            backend::commit_huge_split_2m(plan, Some(&self.rss), &mut cursor);
+        }
+
+        // PTEs are now 4 KiB; downgrade the VMA to a fresh 4 KiB anon backend.
+        let new_backend = Backend::new_alloc(start, PageSize::Size4K, "");
+        self.replace_area_metadata_with_reported_flags(
+            start,
+            size,
+            flags,
+            reported_flags,
+            new_backend,
+        )?;
+        Ok(())
+    }
+
     /// Handles a page fault at the given address.
     ///
     /// `access_flags` indicates the access type that caused the page fault.
@@ -537,37 +801,77 @@ impl AddrSpace {
         if !self.va_range.contains(vaddr) {
             return false;
         }
-        if let Some(area) = self.areas.find(vaddr) {
-            let flags = area.flags();
-            if flags.contains(access_flags) {
-                let page_size = area.backend().page_size();
-                let populate_result = area.backend().populate(
-                    VirtAddrRange::from_start_size(vaddr.align_down(page_size), page_size as _),
-                    flags,
-                    access_flags,
-                    Some(&self.rss),
-                    &mut self.pt.cursor(),
-                );
-                return match populate_result {
-                    Ok((n, callback)) => {
-                        if let Some(cb) = callback {
-                            cb(self);
-                        }
-                        if n == 0 {
-                            warn!("No pages populated for {vaddr:?} ({flags:?})");
-                            false
-                        } else {
-                            true
-                        }
-                    }
-                    Err(err) => {
-                        warn!("Failed to populate pages for {vaddr:?} ({flags:?}): {err}");
-                        false
-                    }
-                };
+        let Some((flags, page_size, _area_start)) = self
+            .areas
+            .find(vaddr)
+            .map(|area| (area.flags(), area.backend().page_size(), area.start()))
+        else {
+            return false;
+        };
+        if !flags.contains(access_flags) {
+            return false;
+        }
+
+        let range = VirtAddrRange::from_start_size(vaddr.align_down(page_size), page_size as _);
+        // `mut` only under `thp`, where the fragmentation fallback below reassigns
+        // it; a plain binding otherwise keeps the non-thp build warning-free.
+        #[cfg(feature = "thp")]
+        let mut populate_result = self.populate_range(range, flags, access_flags);
+        #[cfg(not(feature = "thp"))]
+        let populate_result = self.populate_range(range, flags, access_flags);
+
+        // THP fragmentation fallback: a 2 MiB anon block that cannot obtain an
+        // order-9 buddy frame downgrades its whole area to 4 KiB and re-faults
+        // at 4 KiB, so a fragmented heap never turns a huge promotion into a
+        // fatal fault. The exclusive in-place split needs no allocation.
+        #[cfg(feature = "thp")]
+        if matches!(populate_result, Err(AxError::NoMemory))
+            && page_size == PageSize::Size2M
+            && self.split_huge_area(_area_start).is_ok()
+        {
+            let range4k =
+                VirtAddrRange::from_start_size(vaddr.align_down(PageSize::Size4K), PAGE_SIZE_4K);
+            populate_result = self.populate_range(range4k, flags, access_flags);
+        }
+
+        match populate_result {
+            Ok((n, callback)) => {
+                if let Some(cb) = callback {
+                    cb(self);
+                }
+                if n == 0 {
+                    warn!("No pages populated for {vaddr:?} ({flags:?})");
+                    false
+                } else {
+                    true
+                }
+            }
+            Err(err) => {
+                warn!("Failed to populate pages for {vaddr:?} ({flags:?}): {err}");
+                false
             }
         }
-        false
+    }
+
+    /// Populates the area covering `range.start` over `range` via its backend.
+    /// Thin helper so [`handle_page_fault`](Self::handle_page_fault) can drop the
+    /// area borrow between the huge attempt and a 4 KiB fallback retry.
+    fn populate_range(
+        &mut self,
+        range: VirtAddrRange,
+        flags: MappingFlags,
+        access_flags: MappingFlags,
+    ) -> AxResult<(usize, Option<backend::PopulateCallback>)> {
+        let Some(area) = self.areas.find(range.start) else {
+            return Err(AxError::BadAddress);
+        };
+        area.backend().populate(
+            range,
+            flags,
+            access_flags,
+            Some(&self.rss),
+            &mut self.pt.cursor(),
+        )
     }
 
     /// Attempts to clone the current address space into a new one.
@@ -605,7 +909,13 @@ impl AddrSpace {
                 },
             )?;
 
-            let new_area = MemoryArea::new(area.start(), area.size(), area.flags(), new_backend);
+            let new_area = MemoryArea::new_with_reported_flags(
+                area.start(),
+                area.size(),
+                area.flags(),
+                area.reported_flags(),
+                new_backend,
+            );
             let start = new_area.start();
             {
                 let aspace = guard.deref_mut();

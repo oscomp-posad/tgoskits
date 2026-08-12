@@ -1,0 +1,17 @@
+# WAKEPROF config: cross-core wake-latency profiling. Deliberately wake_affine OFF so
+# schbench wakes SPREAD cross-core (the ~1ms path) and /proc/wakeprof captures the
+# xcore avg/max + deferred-handshake fraction. THP + LB + wakeprof.
+target = "aarch64-unknown-none-softfloat"
+features = [
+  "ax-driver/rockchip-soc",
+  "ax-driver/rockchip-sdhci",
+  "ax-driver/rockchip-dwmmc",
+  "ax-driver/rk3588-cpufreq",
+  "ax-driver/rk3588-ddr-dvfs",
+  "starry-kernel/thp",
+  "starry-kernel/sched-loadbalance",
+  "starry-kernel/wakeprof",
+  "starry-kernel/idle-poll",
+]
+log = "Info"
+max_cpu_num = 8

@@ -1,0 +1,36 @@
+root@starry:/root # /schbench -m 1 -t 4 -r 3
+Wakeup Latencies percentiles (usec) runtime 3 (s) (636 total samples)
+	  50.0th: 803        (186 samples)
+	  90.0th: 1806       (255 samples)
+	* 99.0th: 15728      (57 samples)
+	  99.9th: 16672      (6 samples)
+	  50.0th: 15184      (196 samples)
+	  90.0th: 16368      (250 samples)
+	* 99.0th: 18720      (56 samples)
+	  99.9th: 26976      (6 samples)
+RPS percentiles (requests) runtime 3 (s) (4 total samples)
+	  20.0th: 0          (1 samples)
+	* 50.0th: 206        (1 samples)
+	  90.0th: 213        (2 samples)
+average rps: 212.00
+root@starry:/root # /schbench -m 2 -t 8 -r 3
+Wakeup Latencies percentiles (usec) runtime 3 (s) (451 total samples)
+	  50.0th: 12848      (133 samples)
+	  90.0th: 94592      (181 samples)
+	* 99.0th: 203520     (40 samples)
+	  99.9th: 338432     (4 samples)
+	  50.0th: 28192      (135 samples)
+	  90.0th: 124544     (179 samples)
+	* 99.0th: 312832     (41 samples)
+	  99.9th: 356864     (4 samples)
+RPS percentiles (requests) runtime 3 (s) (4 total samples)
+	  20.0th: 0          (1 samples)
+	* 50.0th: 137        (1 samples)
+	  90.0th: 140        (2 samples)
+average rps: 150.33
+root@starry:/root # /hackbench -p -g 2 -P
+Running in process mode with 2 groups using 40 file descriptors each (== 80 tasks)
+Time: 2.071
+root@starry:/root # /hackbench -p -g 5 -P
+Running in process mode with 5 groups using 40 file descriptors each (== 200 tasks)
+Time: 3.645

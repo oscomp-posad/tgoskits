@@ -1,0 +1,31 @@
+[37m[232.460440 0:2 ax_task::run_queue:225] [32mocc-diag[0] chosen=4 occ=[4 0 0 0 0 0 0 0] cap=[530 530 530 530 1024 1024 1024 1024] online=0xff[m
+[m[37m[232.465234 0:2 ax_task::run_queue:225] [32mocc-diag[1] chosen=4 occ=[4 0 0 0 0 0 0 0] cap=[530 530 530 530 1024 1024 1024 1024] online=0xff[m
+[m[37m[232.468744 0:2 ax_task::run_queue:225] [32mocc-diag[2] chosen=4 occ=[4 0 0 0 0 0 0 0] cap=[530 530 530 530 1024 1024 1024 1024] online=0xff[m
+[m[37m[232.474494 0:2 ax_task::run_queue:225] [32mocc-diag[3] chosen=4 occ=[4 0 0 0 0 0 0 0] cap=[530 530 530 530 1024 1024 1024 1024] online=0xff[m
+[m[37m[232.478041 0:2 ax_task::run_queue:225] [32mocc-diag[4] chosen=4 occ=[1 0 0 0 0 0 0 0] cap=[530 530 530 530 1024 1024 1024 1024] online=0xff[m
+[m[37m[232.521533 0:2 ax_task::run_queue:225] [32mocc-diag[5] chosen=4 occ=[1 0 0 0 0 0 0 0] cap=[530 530 530 530 1024 1024 1024 1024] online=0xff[m
+[m[37m[232.525649 0:2 ax_task::run_queue:225] [32mocc-diag[6] chosen=4 occ=[1 0 0 0 0 0 0 0] cap=[530 530 530 530 1024 1024 1024 1024] online=0xff[m
+[m[37m[232.529856 0:2 ax_task::run_queue:225] [32mocc-diag[7] chosen=4 occ=[1 0 0 0 0 0 0 0] cap=[530 530 530 530 1024 1024 1024 1024] online=0xff[m
+FM_BEGIN
+FM_UNAME 10.0.0 aarch64
+FM_PSB c=0     events per second:   370.09
+FM_PSB c=1     events per second:   371.41
+FM_PSB c=2     events per second:   369.54
+FM_PSB c=3     events per second:   371.37
+FM_PSB c=4     events per second:   911.43
+FM_PSB c=5     events per second:   913.40
+FM_PSB c=6     events per second:   913.08
+FM_PSB c=7     events per second:   912.58
+FM_PM c0 MEMBW core=0 landed=0 mb=128 firsttouch_s=0.0334 memcpy_GBps=7.179 read_GBps=4.486 acc=202020202000000 
+FM_PM c4 MEMBW core=4 landed=4 mb=128 firsttouch_s=0.0240 memcpy_GBps=12.270 read_GBps=8.468 acc=202020202000000 
+FM_CPU t=1     events per second:   912.12
+FM_CPU t=2     events per second:  1814.80
+FM_CPU t=4     events per second:  2706.81
+FM_CPU t=8     events per second:  1816.19
+FM_THR8     total number of events:              2861
+FM_MUTEX8     total time:                          2.2907s
+FM_MEM8 bs=1M op=write 8192.00 MiB transferred (19667.44 MiB/sec)
+FM_MEM8 bs=1M op=read 8192.00 MiB transferred (26492.95 MiB/sec)
+FM_MEM8 bs=1K op=write 1258.20 MiB transferred (125.76 MiB/sec)
+FM_MEM8 bs=1K op=read 1322.77 MiB transferred (132.14 MiB/sec)
+FM_DONE

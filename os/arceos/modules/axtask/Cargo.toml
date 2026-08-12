@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 name = "ax-task"
 repository = "https://github.com/rcore-os/tgoskits"
-version = "0.5.22"
+version = "0.6.4"
 
 [features]
 default = []
@@ -13,8 +13,6 @@ default = []
 irq = ["ax-hal/irq", "dep:ax-timer-list"]
 ipi = ["irq", "ax-hal/ipi", "dep:ax-ipi"]
 multitask = [
-  "stack-canary",
-  "dep:ax-config",
   "dep:axpoll",
   "dep:ax-sched",
   "dep:ax-cpumask",
@@ -29,7 +27,6 @@ multitask = [
 ]
 preempt = ["irq", "ax-percpu?/preempt", "ax-kernel-guard/preempt"]
 smp = ["ax-kspin/smp"]
-stack-canary = []
 stack-guard-page = ["multitask", "dep:ax-alloc", "dep:ax-mm", "ax-hal/paging"]
 lockdep = [
   "multitask",
@@ -38,6 +35,12 @@ lockdep = [
   "ax-lockdep/task-context",
 ]
 task-ext = ["dep:extern-trait"]
+# Per-tick CPU-time accounting hook. When enabled, `on_timer_irq` calls
+# `TaskExt::on_tick` on the task running on each CPU once per scheduler tick, so
+# the OS layer can advance utime/stime without a syscall boundary (Linux
+# `TICK_CPU_ACCOUNTING`). Requires `task-ext` (the hook is a `TaskExt` method).
+# Off by default: pure ArceOS unikernels pay nothing.
+task-tick-hook = ["task-ext"]
 tls = ["ax-hal/tls"]
 # Cross-crate tracepoint hook for the scheduler context switch.
 # Enabling this exposes a `SchedTracepoint` interface (via `ax-crate-interface`)
@@ -48,8 +51,83 @@ tracepoint-hooks = ["multitask"]
 uspace = ["ax-hal/uspace"]
 
 sched-cfs = ["multitask", "preempt"]
-sched-fifo = ["multitask"]
 sched-rr = ["multitask", "preempt"]
+
+# Capacity-aware big.LITTLE task placement (initial + wake). Placement-only: a
+# new/woken task is steered to the least-loaded eligible core, preferring a big
+# (A76) core when idle so a lone compute thread does not land on a little (A55)
+# core. Does NOT migrate already-running tasks (no idle-pull / push balancing).
+# Requires smp: there is nothing to place across on a single core.
+sched-loadbalance = ["smp"]
+
+# wake_affine: on a wakeup, co-locate the wakee on the waker's core when it is
+# lightly loaded (Linux `wake_affine`). OPT-IN, OFF by default. NOTE: an earlier
+# board A/B that appeared to REGRESS hackbench was later found to be CONTAMINATED
+# by the COW-refcount fork EFAULT bug (FrameRefCnt u8->u32, since fixed). A clean
+# RK3588 A/B (2026-08-06, only this flag differing) shows wake_affine ON is a net
+# win: schbench m1t4 wakeup p50 1023us->9us (near Linux 6us), hackbench -P g2/g5
+# better, with a small -P g10 regression. Kept OFF as the conservative default
+# pending promotion; see `select_wake_run_queue` + SCHEDBENCH_BOARD_RESULTS_2026-08-06.md.
+sched-loadbalance-wake-affine = ["sched-loadbalance"]
+
+# Relax the wake_affine gate from `occ(waker) <= 1` to a load compare against the
+# wakee's previous CPU (Linux `wake_affine_weight`). The `<= 1` gate disables the
+# cache-local hand-off under oversubscription (occ >= 2 everywhere), forcing sync
+# ping-pong wakes onto the ~1 ms cross-core path — a hackbench scaling cliff at
+# >1:1 load. With this, a ping-pong PAIR coalesces onto one CPU (zero cross-core
+# wakes) while independent bursts still spread. See select_wake_run_queue.
+wake-affine-loaded = ["sched-loadbalance-wake-affine"]
+
+# CPU-boundness-gated wake spread: on a wakeup, if the wakee is CPU-bound (high EWMA
+# run-stint, `is_cpu_bound`), prefer a fully-idle sibling (`select_idle_sibling`) over
+# the wake_affine coalesce, so two long-running compute/bandwidth workers do not
+# timeslice one core (fixes mem_bw2 2T unpinned ~21.7 vs pinned ~42.9). Serial
+# ping-pong partners (short EWMA stint) and the oversubscribed case (no idle sibling)
+# keep the exact wake_affine path, preserving the messaging win. OFF by default;
+# layered on wake_affine. See select_wake_run_queue / select_idle_sibling and
+# SCHED_SPREAD_VERIFIED_2026-08-12.md. Promote only after a board A/B.
+sched-loadbalance-wake-spread = ["sched-loadbalance-wake-affine"]
+
+# Wake-idle-sibling placement: makes `select_idle_sibling` unconditional — on a wakeup
+# ANY wakee (not just a CPU-bound one) prefers a fully-idle sibling (its idle prev CPU
+# first, else the biggest idle core) over the wake_affine coalesce. Un-bunches barrier-
+# woken concurrent workers that wake-spread's EWMA can't catch (a one-shot startup
+# barrier has no run-history): across the barrier's multi-step wake (cond → mutex
+# lock/unlock) the racing workers transiently occupy each other's prev core, so a
+# prev-ONLY check fails and wake_affine co-locates them — checking ANY idle core is
+# race-robust (occ bumped at enqueue → the 2nd wakee never sees the 1st's core idle).
+# Fixes mem_bw2 / sysbench-memory 2T (~24 → ~50 GB/s on RK3588). Self-limiting: under
+# oversubscription no idle core exists → `select_idle_sibling` None → wake_affine
+# coalesces (messaging untouched). Only cheap with idle-poll (idle core picked up
+# immediately, no ~1ms SGI-to-WFI stall); layered on wake-spread. See select_wake_run_queue.
+sched-loadbalance-wake-idle-sibling = ["sched-loadbalance-wake-spread"]
+
+# Newidle work-stealing: an idle CPU pulls one genuinely-excess Ready task off the
+# busiest remote before halting (Linux `newidle_balance`). Guarded by an is-busy
+# source gate + a MIGRATION_COST cache-hotness horizon so a briefly-blocked task is
+# never stolen off its warm core. OPT-IN on top of the placement-only default:
+# enable only after a board A/B, since unguarded runtime migration historically
+# regressed single-thread sysbench ~0.46x on RK3588 (cross-cluster refill thrash).
+sched-loadbalance-pull = ["sched-loadbalance"]
+
+# Periodic push-balance (scheduler-tick path, busy cores only): a busy CPU sheds one
+# Ready task to the least-loaded remote when clearly imbalanced (threads > cores, so
+# no core is idle for pull to fire). Most opt-in; shares the pull cache-hotness guard.
+sched-loadbalance-push = ["sched-loadbalance"]
+
+# Wakeup-latency profiling (diagnostic, off by default). Instruments the wake path
+# to measure wake-to-run latency split by local vs cross-core (plus the deferred
+# on_cpu-handshake count), exposed to userspace via `/proc/wakeprof`. Used to
+# localise the ~1ms cross-core wake cost on RK3588. Zero cost when off.
+wakeprof = ["multitask"]
+
+# Poll-idle (Linux `poll_idle`): before deep WFI, spin-check the run queue for a
+# bounded window and run a task the moment it's enqueued. Fixes the board-measured
+# ~1ms cross-core wake floor on RK3588, where the reschedule SGI does not promptly
+# wake a WFI CPU (confirmed: 87% of SGIs target a halted CPU yet delivery is ~1ms) —
+# spinning picks the task up directly without relying on the SGI waking WFI. Falls
+# back to WFI when genuinely idle (power). Requires sched-loadbalance (runnable count).
+idle-poll = ["sched-loadbalance"]
 
 host-test = [
   "ax-hal/host-test",
@@ -61,7 +139,6 @@ test = ["host-test"]
 
 [dependencies]
 ax-alloc = {workspace = true, optional = true}
-ax-config = {workspace = true, optional = true}
 ax-cpumask = { workspace = true, optional = true }
 ax-crate-interface = {workspace = true, optional = true}
 ax-errno.workspace = true
@@ -88,3 +165,6 @@ spin = {workspace = true, optional = true}
 
 [target.'cfg(not(target_os = "none"))'.dev-dependencies]
 ax-hal = { workspace = true, features = ["fp-simd"] }
+
+[build-dependencies]
+quote = "1.0"

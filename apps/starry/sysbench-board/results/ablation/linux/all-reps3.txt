@@ -1,0 +1,67 @@
+### ABL profile=all tag=linux3 reps=3 Linux 6.1.43-rockchip-rk3588
+A55_1T r1     events per second:   349.12
+A55_1T r2     events per second:   349.10
+A55_1T r3     events per second:   349.11
+A76_1T r1     events per second:   961.36
+A76_1T r2     events per second:   962.58
+A76_1T r3     events per second:   961.79
+ALL_8T r1     events per second:  5223.56
+ALL_8T r2     events per second:  5221.71
+ALL_8T r3     events per second:  5216.56
+MUTEX8 r1     total time:                          0.4753s
+MUTEX8 r2     total time:                          0.4823s
+MUTEX8 r3     total time:                          0.4814s
+MEM8 r1 20480.00 MiB transferred (55290.26 MiB/sec)
+MEM8 r2 20480.00 MiB transferred (56046.37 MiB/sec)
+MEM8 r3 20480.00 MiB transferred (56192.54 MiB/sec)
+SCH_m1t4 r1 rps=198.70 p50wake=6
+SCH_m1t4 r2 rps=198.60 p50wake=6
+SCH_m1t4 r3 rps=198.40 p50wake=6
+SYSCOST r1 SYSCOST getpid  142.6 ns/syscall
+SYSCOST r2 SYSCOST getpid  186.6 ns/syscall
+SYSCOST r3 SYSCOST getpid  167.0 ns/syscall
+THP r1 PHASE single_2M      bytes=2097152 readers=0 split=1 iters=8 ok=0 corrupt=0 rej=8
+THP r1 PHASE smp_2M         bytes=2097152 readers=7 split=1 iters=16 ok=0 corrupt=0 rej=16
+THP r1 PHASE nosplit_32M    bytes=33554432 readers=0 split=0 iters=6 ok=6 corrupt=0 rej=0
+THP r1 PHASE split_32M      bytes=33554432 readers=0 split=1 iters=6 ok=0 corrupt=0 rej=6
+THP r2 PHASE single_2M      bytes=2097152 readers=0 split=1 iters=8 ok=0 corrupt=0 rej=8
+THP r2 PHASE smp_2M         bytes=2097152 readers=7 split=1 iters=16 ok=0 corrupt=0 rej=16
+THP r2 PHASE nosplit_32M    bytes=33554432 readers=0 split=0 iters=6 ok=6 corrupt=0 rej=0
+THP r2 PHASE split_32M      bytes=33554432 readers=0 split=1 iters=6 ok=0 corrupt=0 rej=6
+THP r3 PHASE single_2M      bytes=2097152 readers=0 split=1 iters=8 ok=0 corrupt=0 rej=8
+THP r3 PHASE smp_2M         bytes=2097152 readers=7 split=1 iters=16 ok=0 corrupt=0 rej=16
+THP r3 PHASE nosplit_32M    bytes=33554432 readers=0 split=0 iters=6 ok=6 corrupt=0 rej=0
+THP r3 PHASE split_32M      bytes=33554432 readers=0 split=1 iters=6 ok=0 corrupt=0 rej=6
+MEMBW2 r1 MEM_BW2 UNPIN threads=1 aggregate=34.0 GB/s
+MEMBW2 r1 MEM_BW2 UNPIN threads=2 aggregate=69.4 GB/s
+MEMBW2 r1 MEM_BW2 UNPIN threads=4 aggregate=136.4 GB/s
+MEMBW2 r1 MEM_BW2 UNPIN threads=8 aggregate=188.6 GB/s
+MEMBW2 r2 MEM_BW2 UNPIN threads=1 aggregate=33.8 GB/s
+MEMBW2 r2 MEM_BW2 UNPIN threads=2 aggregate=68.1 GB/s
+MEMBW2 r2 MEM_BW2 UNPIN threads=4 aggregate=137.7 GB/s
+MEMBW2 r2 MEM_BW2 UNPIN threads=8 aggregate=187.8 GB/s
+MEMBW2 r3 MEM_BW2 UNPIN threads=1 aggregate=34.2 GB/s
+MEMBW2 r3 MEM_BW2 UNPIN threads=2 aggregate=68.4 GB/s
+MEMBW2 r3 MEM_BW2 UNPIN threads=4 aggregate=134.2 GB/s
+MEMBW2 r3 MEM_BW2 UNPIN threads=8 aggregate=187.6 GB/s
+BAR2 BAR2 T1 cpu 4 4
+BAR2 BAR2 T0 cpu 3 6
+HB -P g2 r1 : Time: 0.036
+HB -P g2 r2 : Time: 0.026
+HB -P g2 r3 : Time: 0.028
+HB -P g5 r1 : Time: 0.049
+HB -P g5 r2 : Time: 0.044
+HB -P g5 r3 : Time: 0.039
+HB -P g10 r1 : Time: 0.071
+HB -P g10 r2 : Time: 0.072
+HB -P g10 r3 : Time: 0.072
+HB -T g2 r1 : Time: 0.026
+HB -T g2 r2 : Time: 0.026
+HB -T g2 r3 : Time: 0.025
+HB -T g5 r1 : Time: 0.042
+HB -T g5 r2 : Time: 0.054
+HB -T g5 r3 : Time: 0.048
+HB -T g10 r1 : Time: 0.067
+HB -T g10 r2 : Time: 0.075
+HB -T g10 r3 : Time: 0.080
+### ABL_DONE profile=all tag=linux3 >>>ABLDONE<<<

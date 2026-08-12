@@ -65,8 +65,112 @@ impl From<MmapProt> for MappingFlags {
     }
 }
 
+fn reported_mapping_flags_from_prot(value: MmapProt) -> MappingFlags {
+    let mut flags = MappingFlags::empty();
+    if value.contains(MmapProt::READ) {
+        flags |= MappingFlags::READ;
+    }
+    if value.contains(MmapProt::WRITE) {
+        flags |= MappingFlags::WRITE;
+    }
+    if value.contains(MmapProt::EXEC) {
+        flags |= MappingFlags::EXECUTE;
+    }
+    if !flags.is_empty() {
+        flags |= MappingFlags::USER;
+    }
+    flags
+}
+
 fn capped_device_map_len(request_len: usize, available_len: usize, page_size: PageSize) -> usize {
     request_len.min(available_len.align_up(page_size))
+}
+
+/// THP-lite: is a private-anonymous `mmap` eligible for transparent 2 MiB
+/// promotion? Gated on a writable mapping of at least one 2 MiB block that does
+/// not opt out via `MAP_NORESERVE` (sparse touch would inflate RSS/VA) or a
+/// per-process `PR_SET_THP_DISABLE`.
+#[cfg(feature = "thp")]
+fn thp_eligible(
+    map_flags: MmapFlags,
+    mapping_flags: MappingFlags,
+    length: usize,
+    thp_disabled: bool,
+) -> bool {
+    length >= PageSize::Size2M as usize
+        && mapping_flags.contains(MappingFlags::WRITE)
+        && !map_flags.contains(MmapFlags::NORESERVE)
+        && !thp_disabled
+}
+
+/// THP-lite: back the interior of a large private-anonymous mapping with 2 MiB
+/// blocks. The region is carved into `[4 KiB head][2 MiB body][4 KiB tail]` —
+/// only the 2 MiB-aligned interior gets a `Size2M` backend; the unaligned edges
+/// stay `Size4K`. The whole area is never rounded up to 2 MiB (that would break
+/// `/proc/*/maps` and the mmap return length).
+///
+/// Returns `Ok(true)` when the mapping was installed, `Ok(false)` when alignment
+/// leaves no full 2 MiB block (caller falls back to a plain 4 KiB mapping). On a
+/// mid-carve error the whole region is unmapped so no partial mapping leaks.
+#[cfg(feature = "thp")]
+fn thp_map_promoted_anon(
+    aspace: &mut crate::mm::AddrSpace,
+    start: VirtAddr,
+    length: usize,
+    flags: MappingFlags,
+    reported_flags: MappingFlags,
+    populate: bool,
+) -> AxResult<bool> {
+    let region_end = start + length;
+    let body_start = start.align_up(PageSize::Size2M);
+    let body_end = region_end.align_down(PageSize::Size2M);
+    if body_start >= body_end {
+        // Misalignment leaves no full 2 MiB block; use the plain 4 KiB path.
+        return Ok(false);
+    }
+
+    let carve = |aspace: &mut crate::mm::AddrSpace| -> AxResult {
+        if start < body_start {
+            aspace.map_with_reported_flags(
+                start,
+                body_start - start,
+                flags,
+                reported_flags,
+                populate,
+                Backend::new_alloc(start, PageSize::Size4K, ""),
+            )?;
+        }
+        aspace.map_with_reported_flags(
+            body_start,
+            body_end - body_start,
+            flags,
+            reported_flags,
+            populate,
+            Backend::new_alloc(body_start, PageSize::Size2M, ""),
+        )?;
+        if body_end < region_end {
+            aspace.map_with_reported_flags(
+                body_end,
+                region_end - body_end,
+                flags,
+                reported_flags,
+                populate,
+                Backend::new_alloc(body_end, PageSize::Size4K, ""),
+            )?;
+        }
+        Ok(())
+    };
+
+    match carve(aspace) {
+        Ok(()) => Ok(true),
+        Err(err) => {
+            // Roll back any sub-area already mapped so the mmap fails atomically.
+            if let Err(e) = aspace.unmap(start, length) {
+                warn!("THP promote rollback unmap failed: {e:?}");
+            }
+            Err(err)
+        }
+    }
 }
 
 bitflags::bitflags! {
@@ -123,8 +227,9 @@ pub fn sys_mmap(
     let curr = current();
     let curr_aspace = curr.as_thread().proc_data.aspace();
     let mut aspace = curr_aspace.lock();
-    let permission_flags = MmapProt::from_bits_truncate(prot);
-    // TODO: check illegal flags for mmap
+    let Some(permission_flags) = MmapProt::from_bits(prot) else {
+        return Err(AxError::InvalidInput);
+    };
     let map_flags = match MmapFlags::from_bits(flags) {
         Some(flags) => flags,
         None => {
@@ -214,9 +319,8 @@ pub fn sys_mmap(
                     .as_ref()
                     .expect("file-backed mmap has cached device_mmap")
                 {
-                    #[cfg(feature = "rknpu")]
-                    Ok(DeviceMmap::PhysicalCached(..)) => false,
-                    Ok(DeviceMmap::Physical(..))
+                    Ok(DeviceMmap::PhysicalCached(..))
+                    | Ok(DeviceMmap::Physical(..))
                     | Ok(DeviceMmap::PhysicalResolved(..))
                     | Ok(DeviceMmap::PhysicalPages(..))
                     | Ok(DeviceMmap::Cache(_)) => false,
@@ -274,6 +378,7 @@ pub fn sys_mmap(
             let range = ion_file.phys_range();
             let buffer_len = range.size().align_up(page_size);
             let map_length = length.align_up(page_size);
+            let reported_mapping_flags = reported_mapping_flags_from_prot(permission_flags);
             info!(
                 "Ion buffer mmap: phys_addr=0x{:x}, buffer_size={}, requested_length={}, \
                  map_length={}",
@@ -304,7 +409,14 @@ pub fn sys_mmap(
                 ion_file.buffer().clone(),
             );
             let populate = map_flags.contains(MmapFlags::POPULATE);
-            aspace.map(start, map_length, ion_mapping_flags, populate, backend)?;
+            aspace.map_with_reported_flags(
+                start,
+                map_length,
+                ion_mapping_flags,
+                reported_mapping_flags,
+                populate,
+                backend,
+            )?;
             drop(aspace);
             info!(
                 "Ion buffer mmap success: vaddr=0x{:x}, length={}",
@@ -316,6 +428,35 @@ pub fn sys_mmap(
     }
 
     let mut mapping_flags: MappingFlags = permission_flags.into();
+    let reported_mapping_flags = reported_mapping_flags_from_prot(permission_flags);
+
+    // THP-lite: transparently back large, writable, private anonymous mappings
+    // with 2 MiB blocks (512x fewer faults + one TLB block entry per 2 MiB).
+    // Only the explicit (non-MAP_HUGETLB) 4 KiB anon path is promoted; the carve
+    // keeps unaligned edges at 4 KiB and falls through to the plain 4 KiB path
+    // when ineligible or when alignment leaves no full 2 MiB block.
+    #[cfg(feature = "thp")]
+    if anonymous
+        && matches!(map_type, MmapFlags::PRIVATE)
+        && page_size == PageSize::Size4K
+        && thp_eligible(
+            map_flags,
+            mapping_flags,
+            length,
+            curr.as_thread().proc_data.thp_disable() != 0,
+        )
+        && thp_map_promoted_anon(
+            &mut aspace,
+            start,
+            length,
+            mapping_flags,
+            reported_mapping_flags,
+            map_flags.contains(MmapFlags::POPULATE),
+        )?
+    {
+        drop(aspace);
+        return Ok(start.as_usize() as _);
+    }
 
     let backend = match map_type {
         MmapFlags::SHARED => {
@@ -340,7 +481,8 @@ pub fn sys_mmap(
                             None => Backend::new_linear(start, pa_va_offset, true),
                         }
                     }
-                    #[cfg(feature = "rknpu")]
+                    // Cacheable RAM (no UNCACHED): kernel and userspace share the
+                    // same Normal Inner-Shareable cacheable page coherently.
                     Ok(DeviceMmap::PhysicalCached(mut range, retain)) => {
                         range.start += offset;
                         if range.is_empty() {
@@ -396,7 +538,8 @@ pub fn sys_mmap(
                         }
                         match backend.clone() {
                             FileBackend::Cached(cache) => {
-                                // TODO(mivik): file mmap page size
+                                // File-backed mappings are always 4 KiB pages;
+                                // THP promotion applies to anonymous backends only.
                                 Backend::new_file(
                                     start,
                                     cache,
@@ -435,7 +578,8 @@ pub fn sys_mmap(
                                             None => Backend::new_linear(start, pa_va_offset, true),
                                         }
                                     }
-                                    #[cfg(feature = "rknpu")]
+                                    // Cacheable RAM (no UNCACHED): coherent
+                                    // kernel↔userspace sharing of the same page.
                                     DeviceMmap::PhysicalCached(range, retain) => {
                                         if range.is_empty() {
                                             return Err(AxError::InvalidInput);
@@ -520,8 +664,44 @@ pub fn sys_mmap(
     };
 
     let populate = map_flags.contains(MmapFlags::POPULATE);
-    aspace.map(start, length, mapping_flags, populate, backend)?;
+    aspace.map_with_reported_flags(
+        start,
+        length,
+        mapping_flags,
+        reported_mapping_flags,
+        populate,
+        backend,
+    )?;
     drop(aspace);
+
+    // perf side-band: an executable, file-backed mapping is (almost always) a
+    // shared library the dynamic loader just mapped. Emit a PERF_RECORD_MMAP2 to
+    // any per-task perf event monitoring this task so `perf report` can symbolize
+    // its samples. The perf ring itself is mapped PROT_READ|WRITE (no EXEC), so it
+    // is naturally excluded; anonymous executable maps (no file) too.
+    #[cfg(target_arch = "aarch64")]
+    if permission_flags.contains(MmapProt::EXEC)
+        && let Some(ref file) = file
+    {
+        let mut prot = 0u32;
+        if permission_flags.contains(MmapProt::READ) {
+            prot |= 1;
+        }
+        if permission_flags.contains(MmapProt::WRITE) {
+            prot |= 2;
+        }
+        prot |= 4; // PROT_EXEC
+        let path = file.path();
+        crate::perf::task::on_mmap_sideband(
+            curr.as_thread(),
+            start.as_usize(),
+            length,
+            offset,
+            prot,
+            matches!(map_type, MmapFlags::SHARED),
+            &path,
+        );
+    }
 
     Ok(start.as_usize() as _)
 }
@@ -585,7 +765,12 @@ pub fn sys_mprotect(addr: usize, length: usize, prot: u32) -> AxResult<isize> {
             memfd_check_write_seal_for_shared_file_backend(&backend)?;
         }
     }
-    aspace.protect(start_addr, length, permission_flags.into())?;
+    aspace.protect_with_reported_flags(
+        start_addr,
+        length,
+        permission_flags.into(),
+        reported_mapping_flags_from_prot(permission_flags),
+    )?;
 
     Ok(0)
 }
@@ -612,6 +797,7 @@ struct MremapMove<'a> {
     target_size: usize,
     src_backend: &'a Backend,
     flags: MappingFlags,
+    reported_flags: MappingFlags,
     dontunmap: bool,
     src_offset: usize,
 }
@@ -628,17 +814,24 @@ fn mremap_move(
         target_size,
         src_backend,
         flags,
+        reported_flags,
         dontunmap,
         src_offset,
     } = move_args;
     let move_size = src_size.min(target_size);
     let backend = src_backend.relocated(target, src_offset, aspace_ref)?;
 
-    aspace.map(target, target_size, flags, false, backend)?;
+    aspace.map_with_reported_flags(target, target_size, flags, reported_flags, false, backend)?;
 
     if dontunmap {
         let empty = Backend::new_alloc(src, src_backend.page_size(), "");
-        if let Err(e) = aspace.replace_area_metadata(src, move_size, flags, empty) {
+        if let Err(e) = aspace.replace_area_metadata_with_reported_flags(
+            src,
+            move_size,
+            flags,
+            reported_flags,
+            empty,
+        ) {
             let _ = aspace.unmap(target, target_size);
             return Err(e);
         }
@@ -647,7 +840,13 @@ fn mremap_move(
     if let Err(e) = aspace.move_pages(src, target, move_size) {
         if dontunmap {
             aspace
-                .replace_area_metadata(src, move_size, flags, src_backend.clone())
+                .replace_area_metadata_with_reported_flags(
+                    src,
+                    move_size,
+                    flags,
+                    reported_flags,
+                    src_backend.clone(),
+                )
                 .expect("restore source VMA metadata after failed mremap move");
         }
         let _ = aspace.unmap(target, target_size);
@@ -723,7 +922,7 @@ pub fn sys_mremap(
     let aspace_ref = &curr.as_thread().proc_data.aspace();
     let mut aspace = aspace_ref.lock();
 
-    let (vma_start, vma_end, vma_flags, src_backend, shared_pages, page_size) = {
+    let (vma_start, vma_end, vma_flags, vma_reported_flags, src_backend, shared_pages, page_size) = {
         let area = aspace.find_area(addr).ok_or(AxError::BadAddress)?;
         let shared_pages = match area.backend() {
             Backend::Shared(sb) => Some(sb.pages().clone()),
@@ -733,6 +932,7 @@ pub fn sys_mremap(
             area.start(),
             area.end(),
             area.flags(),
+            area.reported_flags(),
             area.backend().clone(),
             shared_pages,
             area.backend().page_size(),
@@ -775,7 +975,14 @@ pub fn sys_mremap(
             .map(VirtAddr::from)
             .ok_or(AxError::InvalidInput)?;
         let backend = Backend::new_shared(backend_start, pages);
-        aspace.map(target, new_size, vma_flags, false, backend)?;
+        aspace.map_with_reported_flags(
+            target,
+            new_size,
+            vma_flags,
+            vma_reported_flags,
+            false,
+            backend,
+        )?;
         return Ok(target.as_usize() as isize);
     }
 
@@ -805,6 +1012,7 @@ pub fn sys_mremap(
                 target_size: new_size,
                 src_backend: &src_backend,
                 flags: vma_flags,
+                reported_flags: vma_reported_flags,
                 dontunmap,
                 src_offset,
             },
@@ -833,6 +1041,7 @@ pub fn sys_mremap(
                 target_size: new_size,
                 src_backend: &src_backend,
                 flags: vma_flags,
+                reported_flags: vma_reported_flags,
                 dontunmap: true,
                 src_offset,
             },
@@ -865,6 +1074,7 @@ pub fn sys_mremap(
             target_size: new_size,
             src_backend: &src_backend,
             flags: vma_flags,
+            reported_flags: vma_reported_flags,
             dontunmap: false,
             src_offset,
         },
@@ -922,6 +1132,48 @@ pub fn sys_madvise(addr: usize, length: usize, advice: i32) -> AxResult<isize> {
             let length = align_up_4k(length);
             aspace.discard_range(VirtAddr::from(addr), length)?;
         }
+        // MADV_POPULATE_WRITE/READ prefault the range NOW so the first real
+        // access does not fault (Linux 5.14+). `populate_area` is the same
+        // primitive MAP_POPULATE and plain `mlock` use. Linux returns EINVAL if
+        // the requested access is not permitted by the mapping's protection
+        // (POPULATE_WRITE on a non-writable VMA, POPULATE_READ on PROT_NONE), so
+        // gate on `can_access_range` with the matching mask before populating.
+        // This lets latency-sensitive workloads (e.g. the RKNN pipeline) commit
+        // large DMA/model/scratch buffers up front, paying the fault cost once at
+        // a controlled point instead of during inference.
+        MADV_POPULATE_WRITE => {
+            let length = align_up_4k(length);
+            if !aspace.can_access_range(VirtAddr::from(addr), length, MappingFlags::WRITE) {
+                return Err(AxError::InvalidInput);
+            }
+            aspace.populate_area(VirtAddr::from(addr), length, MappingFlags::WRITE)?;
+        }
+        MADV_POPULATE_READ => {
+            let length = align_up_4k(length);
+            if !aspace.can_access_range(VirtAddr::from(addr), length, MappingFlags::READ) {
+                return Err(AxError::InvalidInput);
+            }
+            aspace.populate_area(VirtAddr::from(addr), length, MappingFlags::READ)?;
+        }
+        // MADV_WILLNEED is purely advisory ("will need soon"): best-effort
+        // read-prefault, and per man 2 madvise it must not fail on a range it
+        // cannot fully service — swallow per-fragment errors.
+        MADV_WILLNEED => {
+            let length = align_up_4k(length);
+            let _ = aspace.populate_area(VirtAddr::from(addr), length, MappingFlags::READ);
+        }
+        // MADV_NOHUGEPAGE: split any transparent huge pages in the range back to
+        // 4 KiB. THP-lite only promotes at mmap time and never re-promotes, so
+        // splitting the existing huge pages is the full effect (no khugepaged to
+        // re-collapse them). A no-op without the `thp` feature.
+        MADV_NOHUGEPAGE => {
+            aspace.split_huge_pages(VirtAddr::from(addr), align_up_4k(length))?;
+        }
+        // MADV_HUGEPAGE is accepted but a no-op: THP-lite has no on-demand
+        // collapse (khugepaged) to promote an already-mapped 4 KiB range. Large
+        // eligible private-anon mappings are promoted automatically at mmap time
+        // (see thp_map_promoted_anon); opt out with PR_SET_THP_DISABLE or
+        // MAP_NORESERVE.
         _ => {}
     }
 

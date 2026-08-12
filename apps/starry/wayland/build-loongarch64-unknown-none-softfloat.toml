@@ -2,8 +2,9 @@ target = "loongarch64-unknown-none-softfloat"
 env = {}
 log = "Warn"
 features = [
-  "ax-feat/rtc",
-  "ax-feat/display",
+  "axplat-dyn/efi",
+  "ax-runtime/rtc",
+  "ax-runtime/display",
   "ax-driver/serial",
   "ax-driver/virtio-blk",
   "ax-driver/virtio-gpu",

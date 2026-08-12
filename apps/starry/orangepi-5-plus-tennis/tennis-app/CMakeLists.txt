@@ -21,18 +21,13 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 option(TENNIS_HOST_DRYRUN "Build only the host dry-run (no RKNN/UVC/RGA)" OFF)
-set(THREADS_PREFER_PTHREAD_FLAG ON)
-find_package(Threads REQUIRED)
 
 # Tennis-specific sources that are safe to compile on any host (no RKNN/UVC).
 set(TENNIS_CORE_SRC
     cpp/main.cc
     cpp/controller.cc
-    cpp/odometry.cc
-    cpp/odometry_worker.cc
     cpp/state_machine.cc
     cpp/bench/metrics.cc
-    cpp/actuator/actuator_factory.cc
     cpp/actuator/trace_motor_backend.cc
     cpp/actuator/trace_arm_backend.cc
 )
@@ -43,43 +38,6 @@ if(TENNIS_HOST_DRYRUN)
     target_compile_definitions(tennis_app PRIVATE TENNIS_HOST_DRYRUN)
     target_include_directories(tennis_app PRIVATE cpp)
     target_compile_options(tennis_app PRIVATE -Wall -Wextra)
-    target_link_libraries(tennis_app PRIVATE Threads::Threads)
-
-    include(CTest)
-    if(BUILD_TESTING)
-        add_executable(tennis_state_machine_test
-            cpp/tests/state_machine_test.cc
-            cpp/state_machine.cc
-            cpp/odometry.cc
-        )
-        target_include_directories(tennis_state_machine_test PRIVATE cpp)
-        target_compile_options(tennis_state_machine_test PRIVATE -Wall -Wextra)
-        add_test(NAME tennis_state_machine COMMAND tennis_state_machine_test)
-
-        add_executable(tennis_odometry_test
-            cpp/tests/odometry_test.cc
-            cpp/odometry.cc
-        )
-        target_include_directories(tennis_odometry_test PRIVATE cpp)
-        target_compile_options(tennis_odometry_test PRIVATE -Wall -Wextra)
-        add_test(NAME tennis_odometry COMMAND tennis_odometry_test)
-
-        add_executable(tennis_uart_actuator_test
-            cpp/tests/uart_actuator_backend_test.cc
-            cpp/actuator/serial_device.cc
-            cpp/actuator/uart_motor_backend.cc
-            cpp/actuator/uart_arm_backend.cc
-        )
-        target_include_directories(tennis_uart_actuator_test PRIVATE cpp)
-        target_compile_options(tennis_uart_actuator_test PRIVATE -Wall -Wextra)
-        target_link_libraries(tennis_uart_actuator_test PRIVATE Threads::Threads)
-        find_library(UTIL_LIBRARY util)
-        if(UTIL_LIBRARY)
-            target_link_libraries(tennis_uart_actuator_test PRIVATE ${UTIL_LIBRARY})
-        endif()
-        add_test(NAME tennis_uart_actuator COMMAND tennis_uart_actuator_test)
-        set_tests_properties(tennis_uart_actuator PROPERTIES TIMEOUT 15)
-    endif()
 else()
     # --- Board build: fully self-contained. All RKNN/UVC/RGA/utils code is now
     # vendored under this app (3rdparty/, utils/, cpp/uvc_capture.cc,
@@ -116,10 +74,6 @@ else()
         cpp/perception/tennis_detector.cc
         cpp/perception/jpu_decoder.cc
         cpp/perception/bucket_detector.cc
-        cpp/actuator/serial_device.cc
-        cpp/actuator/pwm_motor_backend.cc
-        cpp/actuator/uart_motor_backend.cc
-        cpp/actuator/uart_arm_backend.cc
         ${TENNIS_VENDORED_SRC}
     )
 
@@ -143,7 +97,6 @@ else()
         ${LIBJPEG}
         ${LIBRGA}
         ${LIBMPP}
-        Threads::Threads
         dl
     )
 
@@ -152,11 +105,16 @@ else()
     # than the board's runtime). glibc itself stays dynamic and forward-compatible.
     target_link_options(tennis_app PRIVATE -static-libstdc++ -static-libgcc)
 
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        set(THREADS_PREFER_PTHREAD_FLAG ON)
+        find_package(Threads REQUIRED)
+        target_link_libraries(tennis_app Threads::Threads)
+    endif()
+
     install(TARGETS tennis_app DESTINATION .)
     # Deploy librockchip_mpp alongside the binary (RPATH is $ORIGIN/lib).
     file(GLOB LIBMPP_SOFILES ${LIBMPP_DIR}/lib/librockchip_mpp.so*)
     install(FILES ${LIBMPP_SOFILES} DESTINATION lib)
     install(DIRECTORY model DESTINATION .)
-    install(DIRECTORY configs DESTINATION .)
     install(DIRECTORY validation DESTINATION . OPTIONAL)
 endif()

@@ -195,14 +195,16 @@ impl JpegInfo {
 // `jpegd_setup_default_dht`, which fills both the luma (id 0) and chroma (id 1)
 // slots and then forces all four tables "present". Byte-for-byte identical to the
 // vendor tables so the [`crate::command`] table buffer matches `hal_jpegd_rkv`.
-const DEFAULT_DC_LUMA_BITS: [u8; 16] = [0, 1, 5, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0];
-const DEFAULT_DC_CHROMA_BITS: [u8; 16] = [0, 3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0];
+pub(crate) const DEFAULT_DC_LUMA_BITS: [u8; 16] = [0, 1, 5, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0];
+pub(crate) const DEFAULT_DC_CHROMA_BITS: [u8; 16] =
+    [0, 3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0];
 /// Both default DC tables share the same value list (0..=11).
-const DEFAULT_DC_VALS: [u8; MAX_DC_VALS] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+pub(crate) const DEFAULT_DC_VALS: [u8; MAX_DC_VALS] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
 
-const DEFAULT_AC_LUMA_BITS: [u8; 16] = [0, 2, 1, 3, 3, 2, 4, 3, 5, 5, 4, 4, 0, 0, 1, 0x7d];
+pub(crate) const DEFAULT_AC_LUMA_BITS: [u8; 16] =
+    [0, 2, 1, 3, 3, 2, 4, 3, 5, 5, 4, 4, 0, 0, 1, 0x7d];
 #[rustfmt::skip]
-const DEFAULT_AC_LUMA_VALS: [u8; MAX_AC_VALS] = [
+pub(crate) const DEFAULT_AC_LUMA_VALS: [u8; MAX_AC_VALS] = [
     0x01, 0x02, 0x03, 0x00, 0x04, 0x11, 0x05, 0x12, 0x21, 0x31, 0x41, 0x06, 0x13, 0x51, 0x61, 0x07,
     0x22, 0x71, 0x14, 0x32, 0x81, 0x91, 0xa1, 0x08, 0x23, 0x42, 0xb1, 0xc1, 0x15, 0x52, 0xd1, 0xf0,
     0x24, 0x33, 0x62, 0x72, 0x82, 0x09, 0x0a, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x25, 0x26, 0x27, 0x28,
@@ -216,9 +218,10 @@ const DEFAULT_AC_LUMA_VALS: [u8; MAX_AC_VALS] = [
     0xf9, 0xfa,
 ];
 
-const DEFAULT_AC_CHROMA_BITS: [u8; 16] = [0, 2, 1, 2, 4, 4, 3, 4, 7, 5, 4, 4, 0, 1, 2, 0x77];
+pub(crate) const DEFAULT_AC_CHROMA_BITS: [u8; 16] =
+    [0, 2, 1, 2, 4, 4, 3, 4, 7, 5, 4, 4, 0, 1, 2, 0x77];
 #[rustfmt::skip]
-const DEFAULT_AC_CHROMA_VALS: [u8; MAX_AC_VALS] = [
+pub(crate) const DEFAULT_AC_CHROMA_VALS: [u8; MAX_AC_VALS] = [
     0x00, 0x01, 0x02, 0x03, 0x11, 0x04, 0x05, 0x21, 0x31, 0x06, 0x12, 0x41, 0x51, 0x07, 0x61, 0x71,
     0x13, 0x22, 0x32, 0x81, 0x08, 0x14, 0x42, 0x91, 0xa1, 0xb1, 0xc1, 0x09, 0x23, 0x33, 0x52, 0xf0,
     0x15, 0x62, 0x72, 0xd1, 0x0a, 0x16, 0x24, 0x34, 0xe1, 0x25, 0xf1, 0x17, 0x18, 0x19, 0x1a, 0x26,
@@ -376,6 +379,11 @@ fn parse_dqt(body: &[u8], info: &mut JpegInfo) -> Result<(), ParseError> {
         if tq >= NUM_QUANT_TABLES {
             return Err(ParseError::TableIdOutOfRange);
         }
+        // Pq (precision) is 0 (8-bit) or 1 (16-bit) per T.81 Annex B.2.4.1; any
+        // other value is malformed.
+        if pq > 1 {
+            return Err(ParseError::BadSegment);
+        }
         info.qtbl_entry = info.qtbl_entry.saturating_add(1);
         if pq == 0 {
             if i + QUANT_LEN > body.len() {
@@ -459,6 +467,13 @@ fn parse_sof0(body: &[u8], info: &mut JpegInfo) -> Result<(), ParseError> {
     }
     info.height = u16::from_be_bytes([body[1], body[2]]);
     info.width = u16::from_be_bytes([body[3], body[4]]);
+    // A baseline frame must carry non-zero dimensions (height 0 would require a
+    // DNL marker, which this parser does not handle). Reject zero so it cannot
+    // reach `build_reg_array`, where `width.wrapping_sub(1)` would program a
+    // 65535-wide picture.
+    if info.width == 0 || info.height == 0 {
+        return Err(ParseError::BadSegment);
+    }
     let nc = body[5] as usize;
     if nc == 0 || nc > MAX_COMPONENTS {
         return Err(ParseError::TooManyComponents);
@@ -1043,16 +1058,81 @@ mod tests {
     }
 
     #[test]
-    fn parses_real_baseline_jpeg_asset() {
-        // The embedded self-test JPEG is a real 64x64 baseline 4:2:0 image
-        // (with APPn segments and a restart interval) produced by an encoder.
-        let info = parse(crate::SELFTEST_JPEG).expect("real baseline 4:2:0 JPEG should parse");
+    fn parses_generated_baseline_asset() {
+        // Parse the full self-test stream that `crate::selftest` builds from source
+        // (a 64x64 baseline 4:2:0 frame with the standard tables), end to end.
+        let mut buf = [0u8; crate::SELFTEST_JPEG_CAPACITY];
+        let n = crate::write_selftest_jpeg(&mut buf).expect("encode self-test JPEG");
+        let info = parse(&buf[..n]).expect("baseline 4:2:0 JPEG should parse");
         assert_eq!((info.width, info.height), (64, 64));
         assert_eq!(info.nb_components, 3);
         assert_eq!(info.yuv_mode, YuvMode::Yuv420);
-        assert!(info.restart_interval > 0);
         assert_eq!(info.qtbl_entry, 2);
         assert_eq!(info.htbl_entry, 0x0f);
         assert!(info.strm_offset > 0 && (info.strm_offset as usize) < info.pkt_len as usize);
+    }
+
+    #[test]
+    fn default_dht_assembles_into_table_buffer() {
+        // The DHT-less (UVC / motion-JPEG) camera path: the parser installs the
+        // standard Annex K.3 tables, and the command-layer table buffer must place
+        // those exact DC/AC values into each component's value region. The min-code
+        // assembly is covered byte-for-byte by command::tests against EXPECTED_TABLE;
+        // this exercises build_table_buffer on the *default* tables specifically.
+        let comps = yuv420_comps();
+        let q = qtables();
+        let none: Vec<(u8, [u8; 16], &[u8])> = std::vec![];
+        let (bytes, _off) = build_jpeg(0xC0, (64, 48), &comps, &q, &none, &none, None);
+        let info = parse(&bytes).expect("DHT-less baseline 4:2:0 should parse");
+        assert_eq!(info.htbl_entry, 0x0f);
+
+        let mut out = [0u8; crate::command::TABLE_SIZE];
+        crate::command::build_table_buffer(&info, &mut out);
+
+        // Value-table region: VALUE_TBL_OFFSET=704, 192 bytes per component, DC
+        // values at +0..12 and AC values at +16..16+162. Component 0 uses the luma
+        // slot (id 0); components 1 and 2 use the chroma slot (id 1).
+        let slots = [
+            (&info.dc_tables[0], &info.ac_tables[0]),
+            (&info.dc_tables[1], &info.ac_tables[1]),
+            (&info.dc_tables[1], &info.ac_tables[1]),
+        ];
+        for (k, (dc, ac)) in slots.iter().enumerate() {
+            let vbase = crate::command::VALUE_TBL_OFFSET + k * 192;
+            assert_eq!(
+                &out[vbase..vbase + 12],
+                &dc.vals[..],
+                "component {k} DC vals"
+            );
+            assert_eq!(
+                &out[vbase + 16..vbase + 16 + 162],
+                &ac.vals[..],
+                "component {k} AC vals"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_zero_dimensions() {
+        // A baseline frame with a zero dimension is malformed (no DNL handling).
+        let comps = yuv420_comps();
+        let q = qtables();
+        let dc: Vec<(u8, [u8; 16], &[u8])> = std::vec![
+            (0, DC_LUMA_BITS, &DC_LUMA_VALS[..]),
+            (1, DC_LUMA_BITS, &DC_LUMA_VALS[..])
+        ];
+        let ac: Vec<(u8, [u8; 16], &[u8])> = std::vec![
+            (0, AC_SMALL_BITS, &AC_SMALL_VALS[..]),
+            (1, AC_SMALL_BITS, &AC_SMALL_VALS[..])
+        ];
+        let (bytes, _off) = build_jpeg(0xC0, (0, 48), &comps, &q, &dc, &ac, None);
+        assert_eq!(parse(&bytes), Err(ParseError::BadSegment));
+    }
+
+    #[test]
+    fn rejects_bad_quant_precision() {
+        // Pq must be 0 (8-bit) or 1 (16-bit); a DQT with Pq=2 is malformed.
+        let mut info = JpegInfo::zeroed();
+        assert_eq!(parse_dqt(&[0x20], &mut info), Err(ParseError::BadSegment));
     }
 }

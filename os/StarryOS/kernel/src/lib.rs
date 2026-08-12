@@ -18,10 +18,15 @@ pub mod dyn_debug; // Re-export debug macros for use in other modules. It will o
 
 pub mod entry;
 
+#[cfg(axtest)]
+pub mod axtest_exports;
+
 mod cgroup;
 mod config;
 mod ebpf;
 mod file;
+#[cfg(function_tracer)]
+mod ftrace;
 mod kmod;
 pub mod kprobe;
 mod mm;

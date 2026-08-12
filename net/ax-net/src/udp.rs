@@ -32,6 +32,7 @@ use core::{
 
 use ax_errno::{AxError, AxResult, ax_bail, ax_err_type};
 use ax_io::prelude::*;
+use ax_kspin::SpinRwLock as RwLock;
 use ax_sync::Mutex;
 use axpoll::{IoEvents, Pollable};
 use smoltcp::{
@@ -41,7 +42,6 @@ use smoltcp::{
     storage::PacketMetadata,
     wire::{IpAddress, IpEndpoint, IpListenEndpoint, IpProtocol},
 };
-use spin::RwLock;
 
 use crate::{
     IpCmsg, RecvFlags, RecvOptions, SOCKET_SET, SendFlags, SendOptions, Shutdown, SocketAddrEx,
@@ -268,10 +268,12 @@ impl SocketOps for UdpSocket {
                 smol::BindError::Unaddressable => ax_err_type!(ConnectionRefused, "unaddressable"),
             })
         })?;
-        if !self.general.reuse_address()
-            && let Err(err) =
-                SOCKET_SET.udp_bind(self.handle, local_endpoint.addr, local_endpoint.port)
-        {
+        if let Err(err) = SOCKET_SET.udp_bind(
+            self.handle,
+            local_endpoint.addr,
+            local_endpoint.port,
+            self.general.reuse_port(),
+        ) {
             self.with_smol_socket(|socket| socket.close());
             return Err(err);
         }

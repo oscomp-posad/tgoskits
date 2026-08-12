@@ -15,12 +15,17 @@ use crate::{
 /// USB 主机控制器
 pub struct USBHost {
     pub(crate) backend: Box<dyn BackendOp>,
+    pub(crate) initialized: bool,
 }
 
 impl USBHost {
     /// 初始化主机控制器
     pub async fn init(&mut self) -> Result<()> {
+        if self.initialized {
+            return Ok(());
+        }
         self.backend.init().await?;
+        self.initialized = true;
         Ok(())
     }
 
@@ -52,6 +57,16 @@ impl USBHost {
         self.backend.disable_irq()
     }
 
+    #[cfg(kmod)]
+    pub fn dwc2_transfer_stats(&self) -> Option<Dwc2TransferStats> {
+        self.backend.dwc2_transfer_stats()
+    }
+
+    #[cfg(kmod)]
+    pub fn reset_dwc2_transfer_stats(&self) {
+        self.backend.reset_dwc2_transfer_stats();
+    }
+
     pub async fn open_device(&mut self, dev: &DeviceInfo) -> Result<Device> {
         let device = self.backend.open_device(dev.inner.as_ref()).await?;
         let mut device: Device = device.into();
@@ -74,16 +89,26 @@ impl EventHandler {
 #[cfg(test)]
 mod tests {
     use alloc::sync::Arc;
-    use core::sync::atomic::{AtomicUsize, Ordering};
+    use core::{
+        future::Future,
+        pin::Pin,
+        ptr,
+        sync::atomic::{AtomicUsize, Ordering},
+        task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
+    };
 
     use futures::{FutureExt, future::LocalBoxFuture};
     use usb_if::err::USBError;
 
     use super::*;
-    use crate::backend::{BackendOp, ty::DeviceOp};
+    use crate::backend::{
+        BackendOp,
+        ty::{DeviceOp, ProbedDeviceInfoOp},
+    };
 
     #[derive(Default)]
     struct IrqCalls {
+        init: AtomicUsize,
         enable: AtomicUsize,
         disable: AtomicUsize,
     }
@@ -94,7 +119,15 @@ mod tests {
 
     impl BackendOp for TestBackend {
         fn init<'a>(&'a mut self) -> futures::future::BoxFuture<'a, crate::err::Result> {
+            self.calls.init.fetch_add(1, Ordering::Relaxed);
             async { Ok(()) }.boxed()
+        }
+
+        #[cfg(any(kmod, umod))]
+        fn device_list<'a>(
+            &'a mut self,
+        ) -> futures::future::BoxFuture<'a, crate::err::Result<Vec<ProbedDeviceInfoOp>>> {
+            async { Ok(Vec::new()) }.boxed()
         }
 
         fn open_device<'a>(
@@ -102,6 +135,11 @@ mod tests {
             _dev: &'a dyn crate::backend::ty::DeviceInfoOp,
         ) -> LocalBoxFuture<'a, crate::err::Result<Box<dyn DeviceOp>>> {
             async { Err(USBError::NotSupported) }.boxed_local()
+        }
+
+        #[cfg(kmod)]
+        fn create_event_handler(&mut self) -> Box<dyn crate::backend::ty::EventHandlerOp> {
+            Box::new(TestEventHandler)
         }
 
         fn enable_irq(&mut self) -> crate::err::Result {
@@ -115,6 +153,38 @@ mod tests {
         }
     }
 
+    #[cfg(kmod)]
+    struct TestEventHandler;
+
+    #[cfg(kmod)]
+    impl crate::backend::ty::EventHandlerOp for TestEventHandler {
+        fn handle_event(&self) -> crate::backend::ty::Event {
+            crate::backend::ty::Event::Nothing
+        }
+    }
+
+    fn block_on_ready<F: Future>(mut future: F) -> F::Output {
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+        match unsafe { Pin::new_unchecked(&mut future) }.poll(&mut context) {
+            Poll::Ready(output) => output,
+            Poll::Pending => panic!("test future unexpectedly pending"),
+        }
+    }
+
+    fn noop_waker() -> Waker {
+        unsafe fn clone(_: *const ()) -> RawWaker {
+            RawWaker::new(ptr::null(), &VTABLE)
+        }
+        unsafe fn wake(_: *const ()) {}
+        unsafe fn wake_by_ref(_: *const ()) {}
+        unsafe fn drop(_: *const ()) {}
+
+        static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, wake, wake_by_ref, drop);
+
+        unsafe { Waker::from_raw(RawWaker::new(ptr::null(), &VTABLE)) }
+    }
+
     #[test]
     fn host_irq_control_forwards_to_backend() {
         let calls = Arc::new(IrqCalls::default());
@@ -122,6 +192,7 @@ mod tests {
             backend: Box::new(TestBackend {
                 calls: calls.clone(),
             }),
+            initialized: false,
         };
 
         host.enable_irq().unwrap();
@@ -129,5 +200,21 @@ mod tests {
 
         assert_eq!(calls.enable.load(Ordering::Relaxed), 1);
         assert_eq!(calls.disable.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn host_init_is_idempotent() {
+        let calls = Arc::new(IrqCalls::default());
+        let mut host = USBHost {
+            backend: Box::new(TestBackend {
+                calls: calls.clone(),
+            }),
+            initialized: false,
+        };
+
+        block_on_ready(host.init()).unwrap();
+        block_on_ready(host.init()).unwrap();
+
+        assert_eq!(calls.init.load(Ordering::Relaxed), 1);
     }
 }

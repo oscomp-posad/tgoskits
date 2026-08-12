@@ -4,7 +4,7 @@
 
 ## 应用简介
 
-本应用是一个 StarryOS 板级网球捡球演示 + 基准测试程序，将 RK3588 网球捡球机器人工作流从参考仓库移植过来。电机和机械臂可以分别选择虚拟后端或兼容 `aka-rk3588` 接口的真实后端；默认使用虚拟后端，因此无需实体小车也可运行。
+本应用是一个 StarryOS 板级网球捡球演示 + 基准测试程序，将 RK3588 网球捡球机器人工作流从参考仓库移植过来。它使用**虚拟（VIRTUAL）电机/机械臂后端**，因此现在即可在 OrangePi-5-Plus（RK3588）+ UVC 摄像头上运行，**无需实体小车**。
 
 整个项目被定位为一次**端到端延迟（END-TO-END LATENCY）优化**：竞赛目标是最小化从摄像头取帧到电机/机械臂指令、再到完成捡球的时间。强制交付物是 `TENNIS_BENCH_RESULT` 基准测试输出行。
 
@@ -19,13 +19,13 @@
 - RKNN YOLOv8 网球检测
 - 完整状态机
 - HSV 红色桶检测
-- 可独立选择的虚拟/真实差速电机和夹爪机械臂后端
-- RK3588 PWM sysfs + DRV8833 电机后端
-- ESP32-C3 UART 电机后端与 ZP10S UART 舵机后端
+- 虚拟差速电机 + 夹爪机械臂指令
 - `TENNIS_BENCH_RESULT` 基准测试
-- 可选的轮式里程计辅助返回桶区域（Linux live 配置已完成标定并启用）
 
-后续：
+后续（需要实体小车 / 受硬件限制 / 默认禁用）：
+
+- 真实 UART 差速电机后端（ESP32-C3，`0xAA 0x55` 帧协议 @115200）
+- 真实 UART 夹爪机械臂后端（ZP10D 总线舵机，ASCII `#IDPpulseTtime!` @115200）
 - 将预处理切换到 RGA（待 `/dev/rga` 可用）
 - 拆分独立控制线程 + 多个 `rknn_dup_context` NPU worker，实现真正的三核并行（多核多上下文 NPU）
 - 增加 Linux 与 Starry 的基准对比
@@ -71,30 +71,16 @@ tennis_app --mode test-uvc --device 0
 tennis_app --mode test-yolo --model model/tennis.rknn --device 0
 tennis_app --mode test-bucket --device 0
 tennis_app --mode dry-run --duration-sec 10 --virtual-actuators
-
-# aka00v4-rk3588：ESP32-C3 UART 底盘 + ZP10S UART 机械臂
-tennis_app --mode live --motor-backend uart --motor-device /dev/ttyS6 \
-  --arm-backend uart --arm-device /dev/ttyS3
 ```
 
-## 执行器选择
+## 仍依赖实体小车的部分
 
-电机支持 `virtual`、`pwm` 和 `uart`，机械臂支持 `virtual` 和 `uart`，两者可独立组合。`--virtual-actuators` 保留为同时选择两个虚拟后端的兼容参数。真实 UART 机械臂按标定动作同步等待舵机到位，因此其动作耗时会计入 LIVE 模式延迟；真实后端初始化失败时程序直接报错退出，不会静默切换为虚拟后端。
+以下两个真实后端是「为之而设计但已禁用」（future、硬件限制 hardware-gated），**不是默认路径**：
 
-LIVE 控制使用单调时钟推进抓取/投放前制动阶段，不依赖相机帧率，也不会用阻塞循环反复写执行器。真实机械臂在启动时归位；相机需在限定时间内产生连续有效帧，运行中停帧超过 watchdog 会停车退出；执行器 I/O 失败以及 `SIGINT`/`SIGTERM` 同样通过正常清理路径停车。`dry-run` 强制使用虚拟执行器，避免合成场景驱动物理硬件。
+- 真实 UART 差速电机后端：ESP32-C3，`0xAA 0x55` 帧协议，波特率 115200。
+- 真实 UART 夹爪机械臂后端：ZP10D 总线舵机，ASCII 协议 `#IDPpulseTtime!`，波特率 115200。
 
-`aka00v4-rk3588` 的已验证接线为：ESP32-C3 底盘使用
-`/dev/ttyS6`，ZP10S 机械臂使用 `/dev/ttyS3`，波特率均为 115200。
-底盘使用 `0x13` 命令一次发送左右轮有符号百分比，只有初始化和配置命令等待
-ACK。启用真实执行器前，必须先在设备树中启用并分别验证这两个 UART 节点及
-pinmux；真实后端初始化失败时不会回退到虚拟后端。
-
-里程计首版实现使用同一底盘 UART 后端串行查询左右轮 RPM，默认每 100 ms
-采样并按差速模型积分。投球完成后重置桶锚点；下一次抓球后若里程数据有效，
-进入 `RETURN_TO_BUCKET` 做粗略转向和接近。期间只要视觉检测到任意桶，就立即
-刹车并交回 `FIND_BUCKET`；RPM 失效、超时、超距或进入安全半径也会回退到视觉
-搜索。Linux live 配置使用已标定的 `0.03 m` 轮径和 `0.18 m` 有效轮距，并以
-`odometry-enabled=true` 启用；完整返桶流程仍需实机验证和调整返回阈值。
+默认且唯一启用的执行器路径是虚拟执行器（`--virtual-actuators`，默认开启）。
 
 ## 产生的指标
 
@@ -105,8 +91,8 @@ pinmux；真实后端初始化失败时不会回退到虚拟后端。
 - `processed` —— 处理（经过感知 + 控制循环）的帧数。
 - `detections` —— 网球检测命中总数。
 - `bucket_detections` —— 桶检测命中总数。
-- `virtual_motor_commands` —— 电机指令次数（字段名为兼容保留，真实后端同样计数）。
-- `virtual_arm_commands` —— 机械臂指令次数（字段名为兼容保留，真实后端同样计数）。
+- `virtual_motor_commands` —— 虚拟电机指令次数。
+- `virtual_arm_commands` —— 虚拟机械臂指令次数。
 - `frame_to_detection_ms_avg` / `frame_to_detection_ms_p50` / `frame_to_detection_ms_p95` —— 取帧到检测的延迟（capture->detection）的平均值 / 中位数 / p95。
 - `frame_to_command_ms_avg` / `frame_to_command_ms_p50` / `frame_to_command_ms_p95` —— 取帧到指令的延迟（capture->command，即竞赛指标）的平均值 / 中位数 / p95。
 - `decode_errors` —— 解码错误次数。

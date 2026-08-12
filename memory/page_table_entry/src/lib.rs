@@ -63,6 +63,23 @@ pub trait GenericPTE: fmt::Debug + Clone + Copy + Sync + Send + Sized {
     /// For non-last level translation, returns whether this entry maps to a
     /// huge frame.
     fn is_huge(&self) -> bool;
+
+    /// Whether this entry (at a non-last level) points to a next-level page
+    /// table, as opposed to a huge block, a leaf, or an unused slot.
+    ///
+    /// The walkers use this to decide whether to descend, and it must NOT hold
+    /// for a *not-present* huge block: on arches where [`is_huge`](Self::is_huge)
+    /// is present-gated (aarch64, riscv), such a block reads `is_huge() == false`,
+    /// so treating "non-huge with a physical address" as a table would misread
+    /// the block's data frame as a page table.
+    ///
+    /// The default — a *present*, non-huge entry — is correct where table
+    /// descriptors set the present bit (aarch64/riscv/x86). Arches whose table
+    /// descriptors are NOT present (loongarch) must override this.
+    fn is_table(&self) -> bool {
+        self.is_present() && !self.is_huge()
+    }
+
     /// Set this entry to zero.
     fn clear(&mut self);
 }

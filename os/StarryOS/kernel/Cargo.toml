@@ -1,6 +1,6 @@
 [package]
 name = "starry-kernel"
-version = "0.6.4"
+version = "0.7.4"
 edition.workspace = true
 description = "A Linux-compatible OS kernel built on ArceOS unikernel"
 authors = [
@@ -16,27 +16,68 @@ license.workspace = true
 [features]
 default = ["dynamic_debug"]
 dev-log = []
-kprobe_test = []
 ext4 = ["ax-fs-ng/ext4"]
-input = ["dep:ax-input", "ax-feat/input"]
-ipi = ["ax-feat/ipi"]
-memtrack = ["ax-feat/backtrace", "ax-alloc/tracking"]
-dma-heap = ["dep:dma-api", "dep:axklib"]
-rknpu = ["ax-driver/rknpu", "dma-heap"]
-rga = ["ax-driver/rga", "dep:rockchip-rga", "dma-heap"]
-jpeg = ["ax-driver/jpeg", "dma-heap"]
-std-compat = []
-k230-kpu = ["ax-feat/xuantie-c9xx", "dep:axklib", "dep:k230-kpu"]
-plat-dyn = [
-    "dep:axplat-dyn",
-    "ax-feat/plat-dyn",
-    "ax-feat/usb",
-    "ax-driver/usb",
+input = ["dep:ax-input", "ax-runtime/input"]
+ipi = ["ax-runtime/ipi"]
+loongarch64-low-va = []
+# Capacity-aware big.LITTLE task placement (initial + wake), placement-only —
+# no continuous migration. See ax-task's `sched-loadbalance`.
+sched-loadbalance = ["ax-task/sched-loadbalance"]
+# Opt-in wake_affine (OFF by default — board-measured to regress hackbench). See ax-task.
+sched-loadbalance-wake-affine = ["ax-task/sched-loadbalance-wake-affine"]
+# Relaxed wake_affine gate (load compare vs prev CPU) — fixes the oversubscription
+# hackbench scaling cliff by keeping sync ping-pong pairs CPU-local under load.
+wake-affine-loaded = ["ax-task/wake-affine-loaded"]
+# CPU-boundness-gated wake spread: a CPU-bound wakee prefers a fully-idle sibling over
+# the wake_affine coalesce (fixes block-synchronized concurrent workers bunching onto
+# one core, e.g. mem_bw2 / sysbench-memory). OFF by default. See ax-task.
+sched-loadbalance-wake-spread = ["ax-task/sched-loadbalance-wake-spread"]
+# Wake-idle-sibling: unconditional select_idle_sibling — any wakee prefers a fully-idle
+# sibling (un-bunches startup-barrier workers, e.g. mem_bw2 2T; needs idle-poll). See ax-task.
+sched-loadbalance-wake-idle-sibling = ["ax-task/sched-loadbalance-wake-idle-sibling"]
+# Opt-in runtime migration on top of placement (Linux newidle + periodic balance),
+# guarded by is-busy source + MIGRATION_COST horizon. See ax-task's features.
+sched-loadbalance-pull = ["ax-task/sched-loadbalance-pull"]
+sched-loadbalance-push = ["ax-task/sched-loadbalance-push"]
+# Wakeup-latency profiling exposed at /proc/wakeprof (diagnostic, off by default).
+wakeprof = ["ax-task/wakeprof"]
+# Poll-idle (spin before WFI) — fixes RK3588 ~1ms cross-core wake floor. See ax-task.
+idle-poll = ["ax-task/idle-poll"]
+# Lock-free user-copy fast path: probe the HW page table (aarch64 `AT S1E0R/W`)
+# for present+permitted before taking the shared Arc<Mutex<AddrSpace>> on the
+# user-copy/pointer-validation hot path; present pages skip the lock entirely
+# (Linux access_ok model), removing the CLONE_VM/-T serialization. Off by
+# default; misses fall to the unchanged locked slow path. The probe itself is
+# always compiled (rides ax-cpu `uspace`); this gate only enables its use.
+user-access-fastpath = []
+# Coarse Linux TICK_CPU_ACCOUNTING via a lock-free timer state: utime/stime
+# advance only on the timer tick (on_tick, every CPU) + context switch, sampling
+# the lock-free Thread::timer_state. The syscall boundary is then just a Relaxed
+# store (no lock, no accounting) unless an interval timer is armed. Takes the SMP
+# time lock off the syscall hot path: board getpid 853 -> 495.7 ns (-42%), while
+# keeping accounting correct (rusage cpu/wall=1.00, split s_frac 0.71 ~ Linux
+# 0.72). Trade-off vs the non-tickacct default: getrusage/times become
+# tick-granular (coarse) like Linux, not exact. Enabled in the ship config. See
+# SYSCALL_PROFILE_2026-08-09.md.
+tickacct = ["ax-task/task-tick-hook"]
+memtrack = ["axbacktrace/alloc", "ax-alloc/tracking"]
+rknpu = ["ax-driver/rknpu", "dep:ax-dma"]
+rockchip-vop2 = ["ax-driver/rockchip-vop2"]
+rockchip-vop2-coldinit = ["ax-driver/rockchip-vop2-coldinit"]
+jpeg = ["ax-driver/jpeg", "dep:ax-dma"]
+rk3588-pwm = [
+    "ax-driver/rk3588-pwm",
+    "dep:rdif-pwm",
 ]
-vsock = ["ax-feat/vsock"]
+k230-kpu = ["ax-hal/xuantie-c9xx", "dep:axklib", "dep:k230-kpu"]
+vsock = ["ax-runtime/vsock"]
 dynamic_debug = ["ipi"]
 sg2002 = [
+    "ax-runtime/irq",
+    "ax-driver/usb",
     "dep:ax-dma",
+    "dep:axklib",
+    "dep:rdif-pwm",
     "dep:sg2002-tpu",
     "dep:some-serial",
     "dep:sg200x-bsp",
@@ -47,35 +88,31 @@ sg2002 = [
 # feature on. No direct chip-crate deps needed here anymore.
 sg2002-wifi = [
     "sg2002",
-    "ax-feat/aic8800-wifi",
+    "ax-runtime/aic8800-wifi",
 ]
-stack-guard-page = ["ax-feat/stack-guard-page"]
-stack-protector = ["ax-feat/stack-protector"]
+sg2002-cvi-usb-camera = [
+    "sg2002",
+    "dep:cvi-vdec-uapi",
+    "dep:dma-api",
+    "dep:sg200x-jpu",
+]
+stack-guard-page = ["ax-runtime/stack-guard-page"]
+stack-protector = ["ax-runtime/stack-protector"]
+axtest = []
+# Transparent 2 MiB huge pages ("THP-lite") for private anonymous memory.
+# Opt-in and OFF by default: with this feature disabled the promotion and
+# huge->4K split code is not compiled, so the page-fault/mmap hot paths are
+# byte-for-byte unchanged. Only meaningful on aarch64 + the buddy-slab
+# allocator (RK3588 board / dynamic platform build).
+thp = []
 
 [dependencies]
-ax-feat = { workspace = true, features = [
-    "fp-simd",
-    "irq",
-    "uspace",
-
-    "multitask",
-    "task-ext",
-    "tracepoint-hooks",
-    "sched-rr",
-
-    "rtc",
-
-    "ext4fs",
-    "net",
-] }
-
 ax-alloc = { workspace = true }
-ax-config.workspace = true
 ax-crate-interface.workspace = true
 ax-display.workspace = true
 ax-fs-ng = { workspace = true, features = ["vfs"] }
 ax-cpu = { workspace = true, features = ["fp-simd"] }
-ax-hal.workspace = true
+ax-hal = { workspace = true, features = ["fp-simd", "uspace"] }
 ax-input = { workspace = true, optional = true }
 ax-lazyinit.workspace = true
 ax-log.workspace = true
@@ -83,13 +120,23 @@ ax-mm.workspace = true
 ax-net = { workspace = true }
 ax-driver = { workspace = true, features = ["serial", "usb"] }
 axklib = { workspace = true, optional = true }
-axplat-dyn = { workspace = true, optional = true }
-ax-runtime.workspace = true
-ax-sync.workspace = true
-ax-task.workspace = true
+axplat-dyn.workspace = true
+ax-runtime = { workspace = true, features = [
+    "irq",
+    "uspace",
+    "multitask",
+    "rtc",
+    "ext4fs",
+    "net",
+] }
+ax-sync = { workspace = true, features = ["multitask"] }
+ax-task = { workspace = true, features = [
+    "multitask",
+    "task-ext",
+    "tracepoint-hooks",
+    "sched-rr",
+] }
 ax-dma = { workspace = true, optional = true }
-dma-api = { workspace = true, optional = true }
-rockchip-rga = { workspace = true, optional = true }
 sg2002-tpu = { workspace = true, optional = true }
 k230-kpu = { workspace = true, optional = true }
 crab-usb.workspace = true
@@ -101,6 +148,8 @@ ax-errno = { workspace = true }
 axnsproxy = { workspace = true }
 axfs-ng-vfs = { workspace = true }
 rdif-block = { workspace = true }
+rdif-pinctrl = { workspace = true, optional = true }
+rdif-pwm = { workspace = true, optional = true }
 ax-io = { workspace = true }
 axpoll = { workspace = true }
 bitflags = "2.10"
@@ -136,7 +185,7 @@ ax-memory-set = { workspace = true }
 num_enum = { version = "0.7", default-features = false }
 ouroboros = { version = "0.18", default-features = false }
 ax-percpu = { workspace = true }
-rand = { version = "0.10", default-features = false, features = ["alloc"] }
+rand = { version = "0.10", default-features = false, features = ["alloc", "chacha"] }
 ringbuf = { version = "0.4.8", default-features = false, features = ["alloc"] }
 scope-local = { workspace = true }
 slab = { version = "0.4.9", default-features = false }
@@ -158,14 +207,28 @@ kmod = { version = "0.3", package = "kmod-tools" }
 kmod-loader = "0.3.1"
 lwprintf-rs = "0.3"
 some-serial = { workspace = true, optional = true }
-sg200x-bsp = { workspace = true, optional = true }
-# 0.9 to match sg200x-bsp's internal tock-registers; cannot use workspace (0.10)
-# because Writeable trait must come from the same version as sg200x-bsp's types.
-tock-registers = { version = "0.9", optional = true }
+sg200x-bsp = { workspace = true, optional = true, features = ["c906", "cv182x-host"] }
+cvi-vdec-uapi = { workspace = true, optional = true }
+dma-api = { workspace = true, optional = true }
+sg200x-jpu = { workspace = true, optional = true }
+# 0.10 to match sg200x-bsp 0.7.x's internal tock-registers; the Writeable trait
+# must come from the same version as sg200x-bsp's ReadWrite types.
+tock-registers = { version = "0.10", optional = true }
 ktracepoint = "0.6"
 ksym = "0.6"
 kbpf-basic = "0.6"
 rbpf = { version = "0.4", default-features = false }
+
+[dev-dependencies]
+axtest.workspace = true
+ax-hal.workspace = true
+ax-std = { workspace = true, features = ["ext-ld", "fs", "multitask", "irq"] }
+
+[[test]]
+name = "axtest_kernel"
+path = "tests/axtest_kernel.rs"
+harness = false
+required-features = ["axtest"]
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 x86 = "0.52"
@@ -175,3 +238,8 @@ riscv.workspace = true
 
 [target.'cfg(not(any(target_arch = "aarch64", target_arch = "loongarch64")))'.dependencies]
 ax-page-table-multiarch = { workspace = true, features = ["copy-from"] }
+
+[lints.rust]
+# `function_tracer` is set only in the opt-in STARRY_FUNCTION_TRACER build
+# (see scripts/axbuild/.../qemu_run.rs); declare it so normal builds don't warn.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(function_tracer)'] }

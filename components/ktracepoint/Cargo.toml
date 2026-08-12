@@ -1,0 +1,30 @@
+# Vendored fork of ktracepoint 0.6.0 (crates.io), applied via the workspace
+# `[patch.crates-io]`. Local change: `TraceEntryParser::parse` no longer panics
+# on an unknown tracepoint id (dynamic kprobe / function-tracer records) — it
+# resolves them through the new `KernelTraceOps::dynamic_event` hook and falls
+# back to a placeholder line. Upstream: https://github.com/Godones/ext_ktrace
+[package]
+edition = "2024"
+name = "ktracepoint"
+version = "0.6.0"
+authors = ["Godones <chenlinfeng25@outlook.com>"]
+description = "A Rust crate for implementing tracepoints in operating systems."
+homepage = "https://github.com/Godones/ext_ktrace"
+repository = "https://github.com/Godones/ext_ktrace"
+license-file = "LICENSE"
+keywords = ["tracepoint", "kernel", "tracing", "no-std"]
+
+# Stand apart from the outer workspace: this is a vendored patch dep, built via
+# the root `[patch.crates-io]`, not a workspace member.
+[workspace]
+
+[lib]
+name = "ktracepoint"
+path = "src/lib.rs"
+
+[dependencies]
+log = "0.4"
+lru = "0.18"
+paste = "1.0"
+static-keys = "0.8"
+tp-lexer = "0.5.5"

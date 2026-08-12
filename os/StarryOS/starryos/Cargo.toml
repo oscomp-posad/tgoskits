@@ -11,49 +11,53 @@ edition.workspace = true
 license.workspace = true
 name = "starryos"
 repository.workspace = true
-version = "0.5.18"
+version = "0.5.25"
 
 [features]
 default = []
-myplat = ["ax-feat/myplat"]
 qemu = [
-  "ax-feat/defplat",
-  "ax-feat/irq",
-  "ax-feat/rtc",
-  "ax-feat/display",
+  "ax-runtime/irq",
+  "ax-runtime/rtc",
+  "ax-runtime/display",
   "starry-kernel/input",
   "starry-kernel/vsock", # auxiliary features
 ]
-smp = ["ax-feat/smp", "axplat-dyn?/smp", "ax-hal/smp", "starry-kernel/ipi"]
+smp = ["ax-runtime/smp", "axplat-dyn/smp", "ax-hal/smp", "starry-kernel/ipi"]
 
-sg2002 = [
-  "ax-hal/riscv64-sg2002",
-  "starry-kernel/sg2002",
-]
-sg2002-wifi = [
-  "ax-hal/riscv64-sg2002",
-  "starry-kernel/sg2002-wifi",
-]
-sg2002-dyn = [
-  "plat-dyn",
-  "axplat-dyn/thead-mae",
-  "starry-kernel/sg2002",
-  "ax-driver/sg2002-placeholder",
-]
 k230 = [
-  "plat-dyn",
   "starry-kernel/k230-kpu",
   "ax-driver/k230-sdhci",
   "ax-driver/serial",
 ]
-plat-dyn = ["dep:axplat-dyn", "starry-kernel/plat-dyn"]
 
-dma-heap = ["starry-kernel/dma-heap"]
 rknpu = ["ax-driver/rknpu", "starry-kernel/rknpu"]
-rga = ["ax-driver/rga", "starry-kernel/rga"]
+# Native RK3588 VOP2 display driver. `ax-runtime/display` compiles in the
+# display runtime path (ax-runtime `init_display`, devices.rs) exactly as the
+# `qemu` feature does; without it the registered display device is never taken up.
+rockchip-vop2 = [
+  "ax-driver/rockchip-vop2",
+  "starry-kernel/rockchip-vop2",
+  "ax-runtime/display",
+]
+# Full HDMI cold-init (own PHY+TX+CRU+GRF, no U-Boot reuse). Opt-in for a watched
+# display bring-up; board-validation pending. Implies the display runtime path.
+rockchip-vop2-coldinit = [
+  "ax-driver/rockchip-vop2-coldinit",
+  "starry-kernel/rockchip-vop2-coldinit",
+  "ax-runtime/display",
+]
 jpeg = ["ax-driver/jpeg", "starry-kernel/jpeg"]
-std-compat = ["starry-kernel/std-compat"]
+rk3588-pwm = ["starry-kernel/rk3588-pwm"]
 stack-protector = ["ax-std/stack-protector", "starry-kernel/stack-protector"]
+# Transparent 2 MiB huge pages for private anon memory. Opt-in, OFF by default
+# (not in `default`); build with `FEATURES=thp`. See starry-kernel/thp.
+thp = ["starry-kernel/thp"]
+# Lock-free user-copy fast path (Linux access_ok model). Opt-in, OFF by default;
+# build with `FEATURES=user-access-fastpath`. See starry-kernel/user-access-fastpath.
+user-access-fastpath = ["starry-kernel/user-access-fastpath"]
+# Tick/switch CPU-time accounting (Linux TICK_CPU_ACCOUNTING) — strips the
+# per-syscall poll(). Opt-in, OFF by default. See starry-kernel/tickacct.
+tickacct = ["starry-kernel/tickacct"]
 
 [[bin]]
 name = "starryos"
@@ -64,11 +68,11 @@ name = "xtask"
 path = "xtask/main.rs"
 
 [dependencies]
-ax-feat = { workspace = true, features = ["ext-ld", "fs-times", "irq"] }
 ax-std = { workspace = true, features = ["ext-ld", "fs", "multitask", "irq"] }
 ax-driver.workspace = true
 ax-hal.workspace = true
-axplat-dyn = { workspace = true, optional = true }
+ax-runtime = { workspace = true, features = ["ext-ld", "irq"] }
+axplat-dyn.workspace = true
 starry-kernel = { workspace = true, features = ["dev-log", "ext4"] }
 
 [target.'cfg(any(windows, all(unix, not(target_env = "musl"))))'.dependencies]

@@ -1,0 +1,59 @@
+WAKEPROF_BEGIN
+
+WP_UNAME Linux 10.0.0 aarch64
+
+=== schbench -m 1 -t 4 (1:1-ish, should be mostly local) ===
+
+	  50.0th: 1054       (190 samples)
+
+	  50.0th: 24352      (193 samples)
+
+	* 50.0th: 119        (1 samples)
+
+average rps: 127.20
+
+--- /proc/wakeprof after schbench_m1t4 ---
+
+wake-to-run latency profile (ns)
+
+local  count=1109 avg_ns=2533869 avg_us=2533 max_ns=52859917 max_us=52859
+
+xcore  count=1647 avg_ns=653888 avg_us=653 max_ns=1914500 max_us=1914
+
+xcore_deferred_count=141
+
+=== schbench -m 2 -t 8 (more threads -> more cross-core) ===
+
+	  50.0th: 24352      (142 samples)
+
+	  50.0th: 97920      (128 samples)
+
+	* 50.0th: 80         (2 samples)
+
+average rps: 89.20
+
+--- /proc/wakeprof after schbench_m2t8 ---
+
+wake-to-run latency profile (ns)
+
+local  count=1017 avg_ns=23121690 avg_us=23121 max_ns=157641167 max_us=157641
+
+xcore  count=637 avg_ns=13558646 avg_us=13558 max_ns=146410833 max_us=146410
+
+xcore_deferred_count=17
+
+=== hackbench -p -g 5 -P (fan-out, heavy cross-core) ===
+
+Time: 0.941
+
+--- /proc/wakeprof after hackbench_g5P ---
+
+wake-to-run latency profile (ns)
+
+local  count=5945 avg_ns=4701501 avg_us=4701 max_ns=116662000 max_us=116662
+
+xcore  count=4118 avg_ns=10259230 avg_us=10259 max_ns=142086583 max_us=142086
+
+xcore_deferred_count=239
+
+WAKEPROF_DONE

@@ -20,6 +20,21 @@ bool Camera::start(int device, int width, int height, int fps) {
     return started_;
 }
 
+bool Camera::open_and_negotiate(int device, int width, int height, int fps) {
+    opts_ = UvcCaptureOptions{};
+    opts_.device = device;
+    opts_.width = width;
+    opts_.height = height;
+    opts_.fps = fps;
+    opts_.log_prefix = "tennis-uvc";
+    // A successful open leaves the device handle open, so mark started_ now: stop()
+    // must close it even if begin_streaming() is never reached or fails.
+    started_ = uvc_open_and_negotiate(&session_, &opts_);
+    return started_;
+}
+
+bool Camera::begin_streaming() { return uvc_begin_streaming(&session_, &opts_); }
+
 void Camera::stop() {
     if (started_) {
         stop_uvc_capture(&session_);
@@ -38,27 +53,6 @@ bool Camera::poll(LatestFrame &frame, int64_t &capture_ts_ns) {
     last_id_ = frame.id;
     capture_ts_ns = monotonic_ns();
     return true;
-}
-
-bool Camera::warm_up(int valid_frames, int timeout_ms) {
-    if (valid_frames <= 0) return true;
-    const int64_t deadline = monotonic_ns() +
-                             static_cast<int64_t>(timeout_ms) * 1000000;
-    int consecutive = 0;
-    while (monotonic_ns() < deadline) {
-        LatestFrame frame;
-        int64_t capture_ts_ns = 0;
-        if (!poll(frame, capture_ts_ns)) {
-            sleep_ns(1000000);
-            continue;
-        }
-        if (frame.width > 0 && frame.height > 0 && !frame.data.empty()) {
-            if (++consecutive >= valid_frames) return true;
-        } else {
-            consecutive = 0;
-        }
-    }
-    return false;
 }
 
 UvcCaptureCounters Camera::counters() {

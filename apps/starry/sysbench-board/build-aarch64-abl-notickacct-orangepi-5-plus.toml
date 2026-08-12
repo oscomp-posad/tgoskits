@@ -1,0 +1,17 @@
+target = "aarch64-unknown-none-softfloat"
+features = [
+  "ax-driver/rockchip-soc",
+  "ax-driver/rockchip-sdhci",
+  "ax-driver/rockchip-dwmmc",
+  "ax-driver/rk3588-cpufreq",
+  "ax-driver/rk3588-ddr-dvfs",
+  "starry-kernel/thp",
+  "starry-kernel/sched-loadbalance",
+  "starry-kernel/sched-loadbalance-wake-affine",
+  "starry-kernel/user-access-fastpath",
+  "starry-kernel/sched-loadbalance-wake-spread",
+  "starry-kernel/idle-poll",
+  "starry-kernel/sched-loadbalance-wake-idle-sibling",
+]
+log = "Info"
+max_cpu_num = 8

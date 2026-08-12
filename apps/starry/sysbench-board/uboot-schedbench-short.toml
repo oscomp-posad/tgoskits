@@ -1,0 +1,8 @@
+serial = "/dev/cu.usbserial-AQ03MLX2"
+baud_rate = "1500000"
+dtb_file = "os/StarryOS/configs/board/orangepi-5-plus.dtb"
+shell_prefix = "root@starry:/root #"
+shell_init_cmd = "sh /home/orangepi/run-schedbench.sh"
+success_regex = ["(?m)^FULL_RUN_DONE\\s*$"]
+fail_regex = ["panicked at", "(?i)error while loading shared libraries"]
+timeout = 1800

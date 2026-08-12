@@ -139,6 +139,9 @@ jobs:
         with:
           fetch-depth: 2
 
+      - name: Validate CI source paths
+        run: python3 scripts/test/check_ci_paths.py
+
       - name: Detect CI-relevant changes
         id: filter
         if: github.event_name != 'workflow_dispatch'
@@ -155,15 +158,18 @@ jobs:
               - "Cargo.toml"
               - "Cargo.lock"
               - "rust-toolchain.toml"
-              - "bootloader/axloader/**"
+              - "apps/**"
+              - "bootloader/**"
               - "components/**"
               - "drivers/**"
+              - "memory/**"
+              - "net/**"
               - "os/**"
               - "platforms/**"
-              - "virtualization/**"
-              - "memory/**"
               - "scripts/**"
               - "test-suit/**"
+              - "tools/**"
+              - "virtualization/**"
               - "xtask/**"
             base_container_publish:
               - "container/Dockerfile"
@@ -306,6 +312,13 @@ jobs:
             container_image: base
             fetch_depth: full
             upload_xtask_bin_artifact: true
+          - name: Run spin-lint
+            use_container: true
+            runs_on: '["ubuntu-latest"]'
+            command: cargo xtask spin-lint
+            cache_key: ""
+            container_image: base
+            fetch_depth: "1"
     uses: ./.github/workflows/reusable-command.yml
     with:
       runs_on: >-
@@ -363,6 +376,7 @@ jobs:
             cache_key: ""
             container_image: base
             fetch_depth: full
+            download_xtask_bin_artifact: true
             limit_to_owner: ""
             main_pr_only: false
           - name: Test with std
@@ -414,7 +428,13 @@ jobs:
           - name: Test starry aarch64 qemu
             use_container: true
             runs_on: '["ubuntu-latest"]'
-            command: target/debug/tg-xtask starry test qemu --arch aarch64
+            # Build the on-target `perf` from source (reproducible, in-container)
+            # before the tests, so perf-tool-smoke runs against a freshly-built
+            # binary and starry/rootfs.rs ships it in the base aarch64 image
+            # (both no-op / silently skip when the binary is absent).
+            command: |
+              bash test-suit/starryos/qemu/system/perf-tool-smoke/build-perf-ci.sh
+              target/debug/tg-xtask starry test qemu --arch aarch64
             cache_key: test-starry-aarch64
             container_image: base
             apk_region: us
@@ -689,6 +709,22 @@ jobs:
             container_image: ""
             limit_to_owner: rcore-os
             main_pr_only: false
+          - name: Test axvisor self-hosted board asus-nuc15crh-linux
+            use_container: false
+            runs_on: '["self-hosted","linux","board"]'
+            timeout_minutes: 20
+            command: |
+              mkdir -p tmp
+              cargo xtask image pull qemu-x86_64 --output-dir tmp
+              cargo xtask image pull initramfs-x86_64-busybox.cpio.gz --output-dir tmp
+              gzip -dc \
+                tmp/initramfs-x86_64-busybox.cpio.gz/initramfs-x86_64-busybox.cpio.gz \
+                > tmp/initramfs-x86_64-busybox.cpio
+              cargo xtask axvisor test board --board asus-nuc15crh-linux
+            cache_key: ""
+            container_image: ""
+            limit_to_owner: rcore-os
+            main_pr_only: false
           - name: Test starry self-hosted board orangepi-5-plus
             use_container: false
             runs_on: '["self-hosted","linux","board"]'
@@ -697,10 +733,10 @@ jobs:
             container_image: ""
             limit_to_owner: rcore-os
             main_pr_only: false
-          - name: Test starry self-hosted board licheerv-nano-sg2002
+          - name: Test starry self-hosted board aka-00-sg2002
             use_container: false
             runs_on: '["self-hosted","linux","board"]'
-            command: cargo xtask starry test board --board licheerv-nano-sg2002
+            command: cargo xtask starry test board --board aka-00-sg2002
             cache_key: ""
             container_image: ""
             limit_to_owner: rcore-os

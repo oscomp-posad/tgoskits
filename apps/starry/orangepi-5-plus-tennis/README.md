@@ -1,21 +1,18 @@
 # orangepi-5-plus-tennis
 
-A StarryOS board demo and benchmark app that ports the RK3588 tennis-ball pickup robot workflow to an OrangePi-5-Plus (RK3588) + UVC camera. Motor and arm backends are selected independently, with virtual backends for reproducible benchmarks and real backends compatible with `aka-rk3588` hardware.
+A StarryOS board demo and benchmark app that ports the RK3588 tennis-ball pickup robot workflow to an OrangePi-5-Plus (RK3588) + UVC camera, using **virtual** motor and arm backends so it runs today with no physical car.
 
 ## What this demonstrates
 
-This app drives the full tennis pickup workflow — chase a tennis ball, grab it, find a red bucket, approach it, and deposit — and frames it as an **end-to-end latency benchmark**. The competition goal is minimizing the time from a camera frame to the motor/arm command that acts on it (frame-to-command latency), and the mandatory deliverable is the `TENNIS_BENCH_RESULT` line. Perception (YOLOv8 ball detection + HSV bucket detection) and control (a differential-drive state machine) run on the board's NPU and CPU. Virtual actuators keep the benchmark reproducible; real actuators execute the same control commands on the robot.
+This app drives the full tennis pickup workflow — chase a tennis ball, grab it, find a red bucket, approach it, and deposit — and frames it as an **end-to-end latency benchmark**. The competition goal is minimizing the time from a camera frame to the motor/arm command that acts on it (frame-to-command latency), and the mandatory deliverable is the `TENNIS_BENCH_RESULT` line. Perception (YOLOv8 ball detection + HSV bucket detection) and control (a differential-drive state machine) run on the board's NPU and CPU; the actuators are virtual command traces, so the measured latency is the pure perception+control compute path on StarryOS.
 
-## Actuator backends
+## Why virtual actuators
 
-The default virtual motor/arm backends give a clean, **non-blocking** seam between the control loop and the hardware:
+The virtual motor/arm backends give a clean, **non-blocking** seam between the control loop and the hardware:
 
 - It **runs with no physical car** — only the OrangePi-5-Plus board and a UVC camera (for live modes) are required.
 - Because the virtual actuator backend never blocks, **frame-to-command latency stays pure compute** — there is no UART round-trip or servo settle time inflating the benchmark.
-- The motor can instead use four RK3588 PWM sysfs channels driving a DRV8833, or the ESP32-C3 UART controller used by `aka-rk3588`.
-- The arm can instead use the ZP10S UART bus-servo controller and the calibrated `aka00v4-rk3588` action sequence.
-- Motor and arm selection is independent, so mixed configurations such as a PWM chassis with a virtual arm are supported. Real backend initialization errors are fatal and never silently fall back to virtual output.
-- `dry-run` always requires both virtual backends, so a synthetic scene cannot accidentally move physical hardware.
+- The **real UART backends are future, hardware-gated work**: a differential-motor backend (ESP32-C3) and a gripper-arm backend (ZP10D bus servo) are designed for but disabled until the car arrives. They are not the default.
 
 ## Architecture
 
@@ -23,15 +20,12 @@ The pipeline is built for low frame-to-command latency:
 
 - **Capture thread (drop-old):** `libuvc` runs its own capture thread and latches only the **newest** frame into a sequenced latest-frame slot (frame id + capture timestamp). Old frames are dropped rather than queued.
 - **Latest-frame slot:** the perception/control loop reads the most recent frame from this slot, so it never works on stale backlog.
-- **Perception + control loop:** reads the latest frame, runs YOLOv8 **or** HSV per the current state (never both — no redundant decode), runs the state machine, and calls the selected actuator backends. Virtual backends are non-blocking; UART initialization ACK waits and calibrated servo movement delays are included in live latency when real UART hardware is selected.
-- **Timed motion phases:** grab/deposit braking uses monotonic deadlines rather than blocking loops or frame counts. A 1 ms control tick advances these deadlines even without a new frame, while command de-duplication avoids repeated UART/sysfs writes.
-- **Fail-safe lifecycle:** a real arm is homed before control starts, startup waits for consecutive valid camera frames, a no-frame watchdog stops the run, actuator I/O failures are fatal, and `SIGINT`/`SIGTERM` return through normal motor shutdown.
+- **Perception + control loop:** reads the latest frame, runs YOLOv8 **or** HSV per the current state (never both — no redundant decode), runs the state machine, and calls the **non-blocking** virtual actuator backend. Because the actuator never blocks, frame-to-command latency = pure compute.
 - **Multi-core NPU:** inference runs across all three RK3588 NPU cores via `rknn_set_core_mask` (`RKNN_NPU_CORE_0_1_2`). The stock image/stream binaries do not set this.
-- **Optional odometry return:** the UART chassis can query wheel RPM through the
-  same serialized backend and guide the post-grab return toward the last bucket
-  anchor. Bucket vision takes over immediately whenever a bucket is detected.
 - **Single-class postprocess:** the YOLOv8 head is decoded for a single tennis-ball class. No per-frame heap allocation in the steady state.
 - **HSV bucket detection:** the bucket is found with an HSV red-bucket detector rather than a second NPU pass.
+
+**PR1 fuses perception + control on one thread.** This is safe precisely because the virtual actuator is non-blocking — there is nothing to wait on. A separate control thread plus multiple `rknn_dup_context` NPU workers is a deferred optimization that only matters once a blocking real-UART backend lands.
 
 ## Reuse (no duplication)
 
@@ -41,7 +35,7 @@ The board build **reuses** the vendored, Apache-2.0 (Rockchip) RKNN/UVC code fro
 - its `utils/` (`image_utils`, `image_drawing`, `file_utils`),
 - and its `cpp/` modules (`uvc_capture`, `rknpu2/yolov8`, `postprocess`).
 
-The multi-MB libraries and the model are **not** copied. The tennis-specific code — state machine, `tennis_detector` wrapper, HSV `bucket_detector`, actuator backends, metrics, `main`, and the live pipeline — is new and lives under `tennis-app/cpp`.
+The multi-MB libraries and the model are **not** copied. The tennis-specific code — state machine, `tennis_detector` wrapper, HSV `bucket_detector`, virtual backends, metrics, `main`, and the live pipeline — is new and lives under `tennis-app/cpp`.
 
 ## Build
 
@@ -81,27 +75,6 @@ tennis-app/install/rk3588_linux_aarch64/tennis_app/
 containing the `tennis_app` binary + `lib/librknnrt.so` + `model/` + `validation/`. `libstdc++`/`libgcc` are statically linked so the binary does not depend on the board's C++ runtime version; glibc stays dynamic (the board's glibc must be ≥ the toolchain's — use the container toolchain if you hit a `GLIBC_…` runtime error). The binary's only bundled runtime dependency is `librknnrt.so` (via `RPATH=$ORIGIN/lib`); `libuvc` is `dlopen`'d at runtime for live modes only.
 
 ## Run on the board
-
-Runtime options can be loaded from a `key=value` file. Keys match the long CLI
-options without the leading `--`; blank lines and lines beginning with `#` or
-`;` are ignored. Command-line options override the file, regardless of where
-`--config` appears:
-
-```bash
-./tennis_app --config configs/orangepi5plus-live.conf
-./tennis_app --config configs/orangepi5plus-live.conf --duration-sec 60
-```
-
-The supplied configuration selects `/dev/ttyS6` for the chassis and
-`/dev/ttyS3` for the arm. It runs for 600 seconds so `Ctrl-C` can still stop the
-program through its normal motor-shutdown path.
-
-On the Orange Pi, build the self-contained board binary with the vendored
-RKNN/RGA/MPP libraries:
-
-```bash
-./build-native.sh
-```
 
 Run through xtask:
 
@@ -159,21 +132,14 @@ tennis_app --mode test-uvc --device 0
 tennis_app --mode test-yolo --model model/tennis.rknn --device 0
 tennis_app --mode test-bucket --device 0
 tennis_app --mode dry-run --duration-sec 10 --virtual-actuators
-
-# aka00v4-rk3588: ESP32-C3 UART chassis + ZP10S UART arm
-tennis_app --mode live --motor-backend uart --motor-device /dev/ttyS6 \
-  --arm-backend uart --arm-device /dev/ttyS3
 ```
 
 `dry-run` needs no camera/model/board and emits `TENNIS_BENCH_RESULT`. The test modes additionally print `TENNIS_TEST_UVC ...` + `TENNIS_TEST_UVC_DONE`, `TENNIS_TEST_YOLO ...` + `TENNIS_TEST_YOLO_DONE`, and `TENNIS_TEST_BUCKET ...` + `TENNIS_TEST_BUCKET_DONE`.
-
-For output compatibility, the historical `virtual_motor_commands` and `virtual_arm_commands` result fields count commands sent through the selected backends, including real backends.
 
 ## CLI flags
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `--config <path>` | — | Load `key=value` options; CLI options override the file |
 | `--mode <live\|test-uvc\|test-yolo\|test-bucket\|dry-run>` | — | Run mode |
 | `--model <path>` | `model/tennis.rknn` | RKNN model path |
 | `--label <path>` | `model/labels.txt` | Labels file |
@@ -181,28 +147,7 @@ For output compatibility, the historical `virtual_motor_commands` and `virtual_a
 | `--width <n>` / `--height <n>` | `640` / `480` | Capture resolution |
 | `--fps <n>` | `30` | Capture frame rate |
 | `--duration-sec <f>` | `60` | Run duration in seconds |
-| `--motor-backend <virtual\|pwm\|uart>` | `virtual` | Chassis backend |
-| `--motor-device <spec>` | UART: `/dev/ttyS6` | Four PWM chip paths or motor UART path |
-| `--arm-backend <virtual\|uart>` | `virtual` | Arm backend |
-| `--arm-device <path>` | `/dev/ttyS3` | ZP10S UART path |
-| `--motor-min-speed <n>` | `20` | Minimum non-zero real motor command |
-| `--area-stop <f>` | `0.28` | Ball area ratio that stops the approach |
-| `--area-reverse <f>` | `0.50` | Ball area ratio that triggers reverse |
-| `--stop-center-offset <n>` | `90` | Gripper target offset from image center in pixels |
-| `--stop-center-zone <n>` | `20` | Horizontal alignment tolerance in pixels |
-| `--stop-confirm-cnt <n>` | `3` | Consecutive close and aligned frames required before grab |
-| `--chase-forward-speed <n>` | `30` | Fixed ball approach speed |
-| `--chase-pivot-speed <n>` | `30` | Fixed ball alignment rotation speed |
-| `--reverse-speed <n>` | `30` | Fixed too-close reverse speed |
-| `--search-pivot-speed <n>` | `30` | Fixed ball search rotation speed |
-| `--odometry-enabled <bool>` | `false` | Enable RPM odometry return guidance |
-| `--odometry-sample-ms <n>` | `100` | Wheel-RPM sampling interval |
-| `--return-timeout-ms <n>` | `15000` | Maximum blind return duration |
-| `--return-stop-radius <f>` | `0.50` | Stop radius before visual bucket search |
-| `--virtual-actuators` | — | Compatibility shorthand selecting both virtual backends |
-| `--camera-warmup-frames <n>` | `3` | Consecutive valid frames required before live control |
-| `--camera-warmup-timeout-ms <n>` | `3000` | Camera startup deadline |
-| `--camera-watchdog-ms <n>` | `2000` | Stop after this long without a new frame |
+| `--virtual-actuators` | on | The only actuator path (flag) |
 | `--ball-class <n>` | `0` | `0` for a single-class tennis model; `32` = COCO sports ball |
 | `--min-confidence <0-100>` | `50` | Detection confidence threshold |
 | `--log-every <n>` | `1` | Emit per-frame lines every Nth frame |
@@ -259,24 +204,15 @@ Fields on the `TENNIS_BENCH_RESULT` line:
 - UVC capture
 - MJPEG decode
 - RKNN YOLOv8 ball detection
-- Full state machine (`CHASE_BALL`, `GRAB`, `RETURN_TO_BUCKET`, `FIND_BUCKET`, `APPROACH_BUCKET`, `DEPOSIT`)
+- Full state machine (`CHASE_BALL`, `GRAB`, `FIND_BUCKET`, `APPROACH_BUCKET`, `DEPOSIT`)
 - HSV red-bucket detection
-- Selectable virtual/PWM/UART motor and virtual/UART arm backends
+- Virtual differential motor + gripper-arm commands
 - The `TENNIS_BENCH_RESULT` benchmark
 
-**Real actuator support (explicitly selected, not the default):**
+**Requires the physical car later (designed-for but disabled, hardware-gated, not the default):**
 
-- RK3588 PWM sysfs + DRV8833 differential-motor backend
-- ESP32-C3 UART differential-motor backend (`0xAA 0x55` framed protocol @115200)
-- ZP10S UART gripper-arm backend (ASCII `#IDPpulseTtime!` @115200)
-
-The known working `aka00v4-rk3588` wiring is `/dev/ttyS6` for the
-ESP32-C3 chassis and `/dev/ttyS3` for the ZP10S arm, both at 115200 baud.
-The chassis sends paired signed percentage values with command `0x13`; only
-initialization and configuration wait for ACKs. Before selecting real
-actuators, both UART nodes and their pinmux must be enabled in the board device
-tree and verified independently. The application never falls back from a
-failed real backend to a virtual backend.
+- Real UART differential-motor backend (ESP32-C3, `0xAA 0x55` framed protocol @115200)
+- Real UART gripper-arm backend (ZP10D bus servo, ASCII `#IDPpulseTtime!` @115200)
 
 ## Attribution
 
@@ -288,6 +224,8 @@ The reused RKNN/UVC/image-utility code is Apache-2.0 (Rockchip) and is shared fr
 
 ## Next steps
 
-1. Move the calibrated multi-step arm sequence to an asynchronous executor if perception must continue while the chassis is intentionally stopped for grabbing.
-2. Evaluate multiple `rknn_dup_context` NPU workers against the current low-latency latest-frame pipeline.
-3. Add a Linux-vs-Starry benchmark comparison.
+1. Add a real UART motor backend once the car arrives.
+2. Add a real UART arm backend once the car arrives.
+3. Switch preprocessing to RGA once `/dev/rga` works.
+4. Split a dedicated control thread + multiple `rknn_dup_context` NPU workers for true 3-core parallelism.
+5. Add a Linux-vs-Starry benchmark comparison.

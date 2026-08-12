@@ -12,27 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(feature = "rk3588-cpufreq")]
+pub(crate) mod cpufreq;
+
+#[cfg(feature = "rk3588-ddr-dvfs")]
+pub(crate) mod ddr_dvfs;
+
+#[cfg(feature = "rk3588-cpufreq")]
+mod pmic_i2c;
+
+#[cfg(feature = "rk3588-cpufreq")]
+mod pmic_spi;
+
 #[cfg(feature = "rockchip-soc")]
-mod clk;
+pub(crate) mod cru;
 
 #[cfg(feature = "rockchip-pm")]
-mod pm;
+pub(crate) mod pm;
 
 #[cfg(feature = "rockchip-soc")]
 mod pinctrl;
 
 #[cfg(feature = "rockchip-soc")]
-pub use clk::{
-    rk3588_enable_clock, rk3588_reset_assert, rk3588_reset_deassert, rk3588_set_clock_rate,
-};
-#[cfg(feature = "rockchip-soc")]
-pub use pinctrl::RockchipPinCtrl;
-#[cfg(all(feature = "rockchip-soc", feature = "rockchip-pm"))]
-pub use pm::rk3588_enable_power_domain;
-
-#[cfg(all(feature = "rockchip-soc", not(feature = "rockchip-pm")))]
-pub fn rk3588_enable_power_domain(domain: usize) -> Result<(), alloc::string::String> {
-    Err(alloc::format!(
-        "rockchip-pm feature is not enabled for power domain {domain}"
-    ))
-}
+pub use pinctrl::{RockchipFdtPinctrlParser, RockchipPinCtrl};

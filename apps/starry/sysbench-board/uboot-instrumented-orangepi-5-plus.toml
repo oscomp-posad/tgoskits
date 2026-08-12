@@ -1,0 +1,15 @@
+# Runs the instrumented harness (per-CPU residency snapshots around each test) and
+# writes EVERYTHING to /home/orangepi/instrumented-results.txt (ext4, survives the
+# auto-reboot for SSH readback) — no reliance on the lossy serial console.
+serial = "/dev/cu.usbserial-AQ03MLX2"
+baud_rate = "1500000"
+dtb_file = "os/StarryOS/configs/board/orangepi-5-plus.dtb"
+shell_prefix = "root@starry:/root #"
+shell_init_cmd = "test -x /home/orangepi/instrumented-matrix.sh || { echo MATRIX_MISSING; exit 1; }; sh /home/orangepi/instrumented-matrix.sh 2>&1 | tee /home/orangepi/instrumented-results.txt; chmod 666 /home/orangepi/instrumented-results.txt; sync; sync; echo FULL_RUN_DONE; sleep 3; sync; reboot"
+success_regex = ["(?m)^FULL_RUN_DONE\\s*$"]
+fail_regex = [
+  "panicked at",
+  '(?m)^MATRIX_MISSING\s*$',
+  "(?i)error while loading shared libraries",
+]
+timeout = 1800

@@ -2,7 +2,7 @@
 
 use alloc::collections::BTreeMap;
 use core::{
-    sync::atomic::{AtomicI32, Ordering},
+    sync::atomic::{AtomicI32, AtomicUsize, Ordering},
     time::Duration,
 };
 
@@ -12,12 +12,16 @@ use ax_runtime::hal::time::{NANOS_PER_SEC, monotonic_time_nanos, wall_time};
 use linux_raw_sys::general::{
     CLOCK_BOOTTIME, CLOCK_MONOTONIC, CLOCK_MONOTONIC_COARSE, CLOCK_MONOTONIC_RAW,
     CLOCK_PROCESS_CPUTIME_ID, CLOCK_REALTIME, CLOCK_REALTIME_COARSE, CLOCK_THREAD_CPUTIME_ID,
-    SIGEV_NONE, SIGEV_SIGNAL,
+    SIGEV_NONE, SIGEV_SIGNAL, TIMER_ABSTIME,
 };
 use starry_process::Pid;
 use starry_signal::{SignalInfo, Signo};
 
 use super::timer::{AlarmTarget, register_alarm_for};
+
+/// Maximum valid signal number. Linux `_NSIG` is 64 (the signal crate's highest
+/// `Signo` is `SIGRT32 == 64`); a `sigev_signo` must fall in `1..=MAX_SIGNO`.
+const MAX_SIGNO: i32 = 64;
 
 /// Kernel-side representation of a POSIX timer.
 struct PosixTimer {
@@ -46,6 +50,13 @@ pub struct TimerSpec {
 pub struct PosixTimerTable {
     next_id: AtomicI32,
     timers: Mutex<BTreeMap<i32, PosixTimer>>,
+    /// Lock-free count of live timers in `timers`, so the per-syscall
+    /// `poll_process_timer` fast path can skip the global process lookup + the
+    /// `timers` lock entirely when a process has no POSIX timers (the common
+    /// case). Relaxed: a stale 0 only defers a redundant poll to the next
+    /// syscall boundary — the alarm task fires timers at their real deadline
+    /// regardless.
+    count: AtomicUsize,
 }
 
 impl Default for PosixTimerTable {
@@ -53,6 +64,7 @@ impl Default for PosixTimerTable {
         Self {
             next_id: AtomicI32::new(0),
             timers: Mutex::new(BTreeMap::new()),
+            count: AtomicUsize::new(0),
         }
     }
 }
@@ -108,7 +120,7 @@ impl PosixTimerTable {
         let signo = match sigev_notify {
             SIGEV_NONE => None,
             SIGEV_SIGNAL => {
-                if sigev_signo <= 0 || sigev_signo > 64 {
+                if sigev_signo <= 0 || sigev_signo > MAX_SIGNO {
                     return Err(AxError::InvalidInput);
                 }
                 Signo::from_repr(sigev_signo as u8)
@@ -116,6 +128,10 @@ impl PosixTimerTable {
             _ => return Err(AxError::InvalidInput),
         };
 
+        // Monotonically increasing ids. `fetch_add` could in theory wrap after
+        // 2^31 `timer_create` calls (yielding negative ids), but that count is
+        // unreachable in any realistic run, so the i32 id space is effectively
+        // unbounded here and no reuse/recycling scheme is needed.
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let timer = PosixTimer {
             clock_id,
@@ -124,18 +140,48 @@ impl PosixTimerTable {
             interval_ns: 0,
             deadline_ns: 0,
         };
-        self.timers.lock().insert(id, timer);
+        let mut timers = self.timers.lock();
+        timers.insert(id, timer);
+        self.publish_count(&timers);
         Ok(id)
     }
 
     /// Delete a timer. Returns true if it existed.
     pub fn delete(&self, id: i32) -> bool {
-        self.timers.lock().remove(&id).is_some()
+        let mut timers = self.timers.lock();
+        let removed = timers.remove(&id).is_some();
+        self.publish_count(&timers);
+        removed
     }
 
     /// Clear all timers. Used on execve.
     pub fn clear(&self) {
-        self.timers.lock().clear();
+        let mut timers = self.timers.lock();
+        timers.clear();
+        self.publish_count(&timers);
+    }
+
+    /// Republish the lock-free `count` hint as the exact map length.
+    ///
+    /// Called under the `timers` lock by every mutator (create/delete/clear) so
+    /// `count` can never drift or underflow: previously the fetch_add/fetch_sub
+    /// ran *outside* the lock, so an `execve` clear racing a concurrent
+    /// create/delete could over-count or wrap to `usize::MAX`. Deriving it from
+    /// `len()` under the lock makes it exact. Relaxed is sufficient — readers use
+    /// it only as a "might have timers" hint and the alarm task fires every armed
+    /// timer at its deadline regardless of this value.
+    fn publish_count(&self, timers: &BTreeMap<i32, PosixTimer>) {
+        self.count.store(timers.len(), Ordering::Relaxed);
+    }
+
+    /// Lock-free hint: could this process have any POSIX timer to poll?
+    ///
+    /// Used by the per-syscall `poll_process_timer` fast path to avoid the
+    /// global process-table lookup and the `timers` lock when a process has no
+    /// timers (almost always). Conservative: returns `true` whenever any timer
+    /// exists, armed or not.
+    pub fn maybe_has_timers(&self) -> bool {
+        self.count.load(Ordering::Relaxed) != 0
     }
 
     /// Set (arm/disarm) a timer. Returns the old (interval, remaining) in nanos.
@@ -189,7 +235,7 @@ impl PosixTimerTable {
             timer.deadline_ns = 0;
         } else {
             let now = clock_now_ns(timer.clock_id);
-            let abs_flag = flags & 1; // TIMER_ABSTIME = 1
+            let abs_flag = flags & TIMER_ABSTIME as i32;
             if abs_flag != 0 {
                 // Absolute time: use the requested time directly.
                 // If it's already in the past, poll_expired will fire
@@ -199,18 +245,18 @@ impl PosixTimerTable {
                 // Relative time
                 timer.deadline_ns = now + new_value_ns;
             }
-            // Register with the alarm system so poll_timer fires
-            if timer.deadline_ns > 0 {
-                let remaining = timer
-                    .deadline_ns
-                    .saturating_sub(clock_now_ns(timer.clock_id));
-                // Register alarm even if remaining == 0 (already expired)
-                // so that poll_expired runs on the next tick.
-                register_alarm_for(
-                    wall_time() + Duration::from_nanos(remaining),
-                    AlarmTarget::Process(pid),
-                );
-            }
+            // Register with the alarm system so poll_timer fires. Both branches
+            // above assign a strictly-positive deadline (this is the
+            // `new_value_ns != 0` arm), so no `deadline_ns > 0` guard is needed.
+            // Compute `remaining` against the `now` already read above (the same
+            // reading both branches used) rather than a second clock read.
+            let remaining = timer.deadline_ns.saturating_sub(now);
+            // Register alarm even if remaining == 0 (already expired)
+            // so that poll_expired runs on the next tick.
+            register_alarm_for(
+                wall_time() + Duration::from_nanos(remaining),
+                AlarmTarget::Process(pid),
+            );
         }
 
         Ok((old_interval, old_remaining))
@@ -231,10 +277,11 @@ impl PosixTimerTable {
         Ok((timer.interval_ns, remaining))
     }
 
-    /// Check all timers for expiry and return signals to deliver.
-    /// Called from the alarm_task via poll_timer.
-    /// `task` is the user task that owns these timers (needed to
-    /// re-register alarms for periodic timers).
+    /// Check all timers for expiry, invoking `emitter` once per expired timer
+    /// (there is no return value).
+    ///
+    /// Called from the alarm task via `poll_process_timer`. `pid` identifies the
+    /// owning process and is used to re-register the alarm for periodic timers.
     pub fn poll_expired(&self, pid: Pid, mut emitter: impl FnMut(SignalInfo)) {
         let mut timers = self.timers.lock();
         for timer in timers.values_mut() {

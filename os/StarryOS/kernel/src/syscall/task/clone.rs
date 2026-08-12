@@ -143,6 +143,9 @@ impl CloneArgs {
         if flags.contains(CloneFlags::PIDFD | CloneFlags::DETACHED) {
             return Err(AxError::InvalidInput);
         }
+        if flags.contains(CloneFlags::NEWNS | CloneFlags::FS) {
+            return Err(AxError::InvalidInput);
+        }
 
         // CLONE_NEWCGROUP is not yet implemented.
         if flags.contains(CloneFlags::NEWCGROUP) {
@@ -211,6 +214,12 @@ impl CloneArgs {
         let old_proc_data = &curr_thread.proc_data;
 
         let mut new_task = new_user_task(&curr.name(), new_uctx, set_child_tid);
+        // Inherit the parent's CPU affinity (Linux: a child inherits `p->cpus_ptr`
+        // across both fork and thread-clone). New ax_task tasks otherwise default to
+        // a full mask, which would let the worker threads a `taskset`-pinned process
+        // spawns escape the pin onto disallowed cores — e.g. a `taskset -c 0`
+        // sysbench whose workers ran on other clusters entirely.
+        new_task.set_cpumask(curr.cpumask());
         #[cfg(target_arch = "riscv64")]
         {
             let mut fp_state = ax_cpu::FpState::default();
@@ -300,6 +309,7 @@ impl CloneArgs {
             if flags.contains(CloneFlags::NEWPID) {
                 new_nsproxy.unshare_pid();
                 new_nsproxy.pid_ns.lock().alloc_local_pid(tid as u64);
+                new_nsproxy.pid_ns.lock().set_init_global_tid(tid as u64);
             }
             if flags.contains(CloneFlags::NEWNET) {
                 new_nsproxy.unshare_net();
@@ -315,7 +325,11 @@ impl CloneArgs {
                 let mut parent_ns = old_proc_data.nsproxy.lock();
                 if let Some(child_pid_ns) = parent_ns.child_pid_ns.take() {
                     new_nsproxy.pid_ns = child_pid_ns;
-                    new_nsproxy.pid_ns.lock().alloc_local_pid(tid as u64);
+                    {
+                        let mut pid_ns = new_nsproxy.pid_ns.lock();
+                        pid_ns.alloc_local_pid(tid as u64);
+                        pid_ns.set_init_global_tid(tid as u64);
+                    }
                 }
             }
 
@@ -339,7 +353,10 @@ impl CloneArgs {
                 if flags.contains(CloneFlags::FS) {
                     FS_CONTEXT.scope_mut(&mut scope).clone_from(&FS_CONTEXT);
                 } else {
-                    let fs_context = FS_CONTEXT.lock().clone();
+                    let mut fs_context = FS_CONTEXT.lock().clone();
+                    if flags.contains(CloneFlags::NEWNS) {
+                        fs_context.unshare_mount_namespace()?;
+                    }
                     *FS_CONTEXT.scope_mut(&mut scope).lock() = fs_context;
                 }
             }
@@ -375,6 +392,11 @@ impl CloneArgs {
                 return Err(err.into());
             }
         }
+        // perf: clone any `attr.inherit` event from the parent onto the child so
+        // `perf record` follows it. Done before the child is scheduled (it is not
+        // yet spawned) so the counter is present the first time the child runs.
+        #[cfg(target_arch = "aarch64")]
+        crate::perf::task::on_clone_inherit(curr_thread, &thr);
         *new_task.task_ext_mut() = Some(AxTaskExt::from_impl(thr));
 
         // vfork(2) and clone(CLONE_VFORK) must sleep the parent until the child
@@ -423,6 +445,16 @@ impl CloneArgs {
         // Fire before any potential vfork-wait so observers see the fork edge
         // even when the parent blocks below.
         trace_sched_process_fork(curr.id().as_u64(), tid as u64);
+
+        // perf side-band: tell any `attr.task` event watching the parent that it
+        // forked a child (PERF_RECORD_FORK), so `perf record` can account it.
+        // Emitted before any vfork-wait below, in the parent's context.
+        #[cfg(target_arch = "aarch64")]
+        crate::perf::task::on_clone_sideband(
+            curr.as_thread(),
+            new_proc_data.proc.pid(),
+            tid as u32,
+        );
 
         // Block the parent until the child exec's or exits.
         if needs_vfork_block {

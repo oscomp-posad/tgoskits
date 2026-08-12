@@ -141,8 +141,10 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable32<M, PTE, H
             return Err(PagingError::NotMapped);
         }
 
-        // Check if it's a 1MB Section
-        if entry.is_huge() {
+        // A 1 MiB Section — or any non-table occupied slot — is a leaf at this
+        // level. Descend only into a genuine L2 table (`is_table()`), so a
+        // non-present-but-nonzero entry is not misread as a table pointer.
+        if !entry.is_table() {
             return Ok((entry, PageSize::Size1M));
         }
 
@@ -162,7 +164,7 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable32<M, PTE, H
             return Err(PagingError::NotMapped);
         }
 
-        if entry.is_huge() {
+        if !entry.is_table() {
             return Ok((entry, PageSize::Size1M));
         }
 
@@ -198,8 +200,9 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable32<M, PTE, H
             }
 
             *entry = GenericPTE::new_table(paddr);
-        } else if entry.is_huge() {
-            // Already mapped as huge page
+        } else if !entry.is_table() {
+            // Occupied by a 1 MiB Section (or a malformed non-table entry): do not
+            // descend into its address as if it were an L2 table.
             return Err(PagingError::AlreadyMapped);
         }
 
@@ -242,7 +245,7 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable32<M, PTE, H
                 if let Some(func) = pre_func {
                     func(level, i, vaddr, entry);
                 }
-                if level == 0 && !entry.is_huge() {
+                if level == 0 && entry.is_table() {
                     let next_table = self.get_table(entry.paddr());
                     self.walk_recursive(next_table, level + 1, vaddr, limit, pre_func, post_func);
                 }
@@ -268,8 +271,9 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> Drop for PageTable32<
             if (self.borrowed_entries[i / 64] & (1 << (i % 64))) != 0 {
                 continue;
             }
-            if !entry.is_unused() && !entry.is_huge() {
-                // This is an L2 page table (4KB)
+            if entry.is_table() {
+                // This is an L2 page table (4KB) — free only a genuine table, not
+                // a Section or a malformed non-present entry.
                 H::dealloc_frame(entry.paddr());
             }
         }
@@ -510,7 +514,7 @@ impl<'a, M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable32Cursor
             let is_borrowed = (self.inner.borrowed_entries[i / 64] & (1 << (i % 64))) != 0;
             if !is_borrowed {
                 self.inner.borrowed_entries[i / 64] |= 1 << (i % 64);
-                if !entry.is_unused() && !entry.is_huge() {
+                if entry.is_table() {
                     H::dealloc_frame(entry.paddr());
                 }
             }

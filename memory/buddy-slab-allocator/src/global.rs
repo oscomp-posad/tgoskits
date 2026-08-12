@@ -8,7 +8,7 @@ use core::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-use spin::Mutex as SpinMutex;
+use ax_kspin::SpinRaw as SpinMutex;
 
 use crate::{
     align_up,
@@ -195,6 +195,12 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
     /// Free pages previously obtained via [`alloc_pages`](Self::alloc_pages).
     pub fn dealloc_pages(&self, addr: usize, count: usize) {
         self.buddy.lock().dealloc_pages(addr, count);
+    }
+
+    /// Explode an allocated block at `addr` into independently-freeable order-0
+    /// pages. See [`BuddyAllocator::split_pages`](crate::buddy::BuddyAllocator::split_pages).
+    pub fn split_pages(&self, addr: usize) {
+        self.buddy.lock().split_pages(addr);
     }
 
     /// Allocate pages with physical address below 4 GiB.

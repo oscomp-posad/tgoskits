@@ -1,5 +1,5 @@
 #![no_std]
-#![no_main]
+#![cfg_attr(not(test), no_main)]
 #![allow(unused_features)]
 #![feature(used_with_arg)]
 
@@ -10,10 +10,12 @@ extern crate alloc;
 extern crate log;
 
 mod boot_console;
+pub mod cache;
 pub(crate) mod common;
 pub mod cpu;
 mod driver;
 pub mod irq;
+mod irq_routing;
 pub mod platform;
 pub mod rtc;
 pub mod setup;
@@ -23,7 +25,7 @@ pub use page_table_generic::{PagingError, PagingResult};
 pub use platform::platform_name;
 pub use setup::KernelOp;
 pub use someboot::{
-    console, entry, fdt_addr, fdt_addr_phys, mem, power, rsdp_addr_phys, smp, timer,
+    bootargs, console, entry, fdt_addr, fdt_addr_phys, mem, power, rsdp_addr_phys, smp, timer,
 };
 pub use somehal_macros::somehal_secondary_entry as secondary_entry;
 
@@ -75,8 +77,7 @@ pub fn __somehal_secondary_default() -> ! {
 fn secondary_entry() -> ! {
     someboot::set_kernel_page_table_paddr(meta.primary_table_paddr);
     arch::Plat::secondary_init();
-    arch::Plat::secondary_init_intc(meta.cpu_idx);
-    arch::Plat::secondary_init_systick();
+    irq::init_secondary_boot_irqs(meta.cpu_idx);
 
     unsafe extern "Rust" {
         fn __somehal_secondary(meta: &crate::smp::PerCpuMeta);

@@ -1,0 +1,228 @@
+# Scheduler benchmarks on RK3588 silicon — optimized StarryOS vs Linux (2026-08-06)
+
+Board: OrangePi-5-Plus (RK3588, 8-core big.LITTLE A55×4 + A76×4, 16 GB LPDDR4X @ 2112 MHz).
+Same static aarch64-musl `hackbench`/`schbench` binaries on both OSes. Linux = stock
+6.1.43-rockchip-rk3588. StarryOS = `combined-perf` with the EFAULT fix (`b27762fad`) +
+Tier-1 IPC optimizations L1–L4 (futex `is_empty` O(1), 64-shard futex table, `sys_write`
+validation drop, seccomp lock-free fast-path), adversarially reviewed clean (0 findings).
+
+Two StarryOS configs were measured to isolate THP:
+- **placement/THP**: `thp` + `sched-loadbalance` + rockchip drivers
+- **LB/no-THP**: `sched-loadbalance` + rockchip drivers (THP off)
+
+They are within noise of each other — THP is a no-op for these IPC/scheduler benchmarks
+(expected; neither is page-fault-bandwidth bound). Numbers below are the THP config; the
+no-THP column is in `schedbench-baselines/starry-lb-nothp-board-2026-08-06.txt`.
+
+## hackbench — messaging throughput (`-p` pipe; Time in s, LOWER = better)
+
+| config | StarryOS THP | StarryOS no-THP | Linux | gap (THP/Linux) |
+|---|---|---|---|---|
+| -P g2 (80 tasks)  | 0.436 | 0.564 | 0.029 | 15× |
+| -P g5 (200 tasks) | 1.905 | 1.594 | 0.040 | 48× |
+| -P g10 (400 tasks)| ~~EFAULT~~ → **2.529** (COW fix) | ~~same EFAULT~~ | 0.071 | 36× |
+| -T g2 (80 tasks)  | 2.394 | 2.318 | 0.024 | 100× |
+| -T g5 (200 tasks) | 6.749 | 7.139 | 0.044 | 153× |
+| -T g10 (400 tasks)| 27.254 | 27.270 | 0.080 | 340× |
+
+> **`-P g10` was re-run after the COW-refcount fix (`5c18e46ab`) and now completes at
+> 2.529 s** (was `fork() Bad address → 240 s timeout`) — board-validated. Full post-fix run:
+> `schedbench-baselines/starry-thp-cowfix-board-2026-08-06.txt`. Note process mode now scales
+> cleanly (g10 -P 2.5 s) while thread mode does not (g10 -T 27 s) — the `-T` slowness is the
+> futex/wake path, the same family as Gap 1.
+
+## schbench — wakeup/request latency + RPS (5 s runs)
+
+| metric | StarryOS THP | Linux | gap |
+|---|---|---|---|
+| m1t4 wakeup p50 | 1042 µs | 6 µs | **174×** |
+| m1t4 wakeup p99 | 25504 µs | 7 µs | — |
+| m1t4 request p50 | 24672 µs | 20000 µs | 1.23× |
+| m1t4 RPS | 128.0 | 199.6 | 0.64× |
+| m2t8 wakeup p50 | 24416 µs | 4152 µs | 5.9× |
+| m2t8 RPS | 92.2 | 129.8 | 0.71× |
+
+## Reading the results
+
+- **hackbench improved massively vs history** (was 50–260× before the IPC-alloc-lock fix
+  and L1–L4) but a **15–340× gap remains** — StarryOS is not yet at parity on raw
+  message throughput. Threaded mode (`-T`) is *worse* than process mode (`-P`) on StarryOS,
+  the opposite of Linux — points at futex/clone-path contention that L1/L2 reduced but did
+  not close.
+- **The schbench story is latency, not work.** Request p50 is only 1.23× Linux (the 20 ms
+  of per-request work dominates and StarryOS does it at near-parity), but **wakeup p50 is
+  174× worse (1042 µs ≈ one 1 ms scheduler tick)**. This single number caps RPS at 0.64×.
+
+## Two structural gaps (root causes)
+
+### Gap 1 — wakeup latency 1042 µs vs Linux 6 µs  →  **ROOT-CAUSED; wake_affine reaches parity**
+The obvious hypotheses were ruled out first: it is **not** a missing wake IPI (the cross-core
+wake already fires a targeted GIC SGI via `notify_one`→`unblock_task`→`kick_remote_cpu`→
+`send_ipi`) and **not** tick granularity (tick is **100 Hz / 10 ms**, not 1 ms). The real cause:
+the default occ-spread wake places the woken worker on a **different idle core**, so every wake
+pays the **cross-core IPI + `on_cpu` handshake** (~1 ms). Enabling `wake_affine` turns a 1:1
+dispatcher→worker hand-off into a **local enqueue on the waker's core (no IPI)**.
+
+Clean board A/B (2026-08-06, same THP+COW-fix kernel, only `sched-loadbalance-wake-affine`
+differing — the earlier "wake_affine regresses" data was corrupted by the fork EFAULT):
+
+| metric | wake_affine OFF | wake_affine ON | Linux |
+|---|---|---|---|
+| schbench m1t4 wakeup p50 | 1023 µs | **9 µs** | 6 µs |
+| schbench m2t8 wakeup p50 | 25120 µs | **5672 µs** | 4152 µs |
+| hackbench -P g2 / g5 | 0.98 / 1.86 s | **0.74 / 1.08** | 0.029 / 0.040 |
+| hackbench -P g10 | **2.53 s** | 3.17 s | 0.071 |
+| schbench m1t4 RPS | **130** | 122 | 199.6 |
+| schbench m2t8 RPS | 85 | **92** | 129.8 |
+
+**wake_affine is a large net win** — near Linux parity on m1t4 wakeup latency (9 vs 6 µs), and
+better on most hackbench too. **Enabled by default in the placement board config**
+(`build-aarch64-placement-orangepi-5-plus.toml`).
+
+#### Attempted "proper" Linux-faithful placement — and why it was reverted
+I then tried to make the policy *more* Linux-faithful: `wake_affine_idle` (prefer an idle
+`prev_cpu` to keep the waker free) + `select_idle_sibling` (steer onto an idle sibling), so the
+`-P g10` / m1t4-RPS trade-offs would go away. A clean board A/B **disproved it**:
+
+| metric | OFF | crude wake_affine | "proper" Linux-faithful | Linux |
+|---|---|---|---|---|
+| schbench m1t4 wakeup p50 | 1023 | **9** | 9 | 6 |
+| schbench m2t8 wakeup p50 | 25120 | **5672** | 25120 ✗ | 4152 |
+| hackbench -P g5 | 1.86 | **1.08** | 3.12 ✗ | 0.040 |
+| hackbench -P g10 | 2.53 | 3.17 | 7.71 ✗ | 0.071 |
+
+The Linux-faithful version **regressed** (lost the m2t8 win, hurt hackbench badly). Root reason:
+Linux prefers spreading (idle prev / idle sibling) because its cross-core wake is ~µs; **here a
+cross-core wake is ~1 ms**, so every `prev_idle → prev` / `select_idle_sibling` decision pays
+~1 ms. Copying Linux faithfully is *counterproductive* on this SoC. Reverted (`run_queue.rs`
+back to the simple `occ<=1 → local hand-off`, which is empirically best).
+
+**The real remaining lever is the ~1 ms cross-core wake cost itself** (GIC SGI + `on_cpu`
+switch-out handshake). Fix that — via on-board profiling of the notify→enqueue→IPI→pick hops —
+and Linux-style placement (and full schbench/hackbench parity) becomes reachable. Until then,
+the aggressive local hand-off is the right policy. _(task #44 closed with this finding; a new
+"profile + fix cross-core wake latency" follow-up is the next lever.)_
+
+#### wakeprof: the ~1 ms cross-core cost is the idle-wake MECHANISM (measured, `wakeprof` feature)
+I added `/proc/wakeprof` (feature `wakeprof`): wake-to-run latency split by category, read by
+`wakeprof-run.sh`. Board result (schbench m1t4, wake_affine OFF so wakes spread cross-core):
+
+| category | count | p50 | p90 | max |
+|---|---|---|---|---|
+| local (waker's CPU) | 1336 | **2 µs** | 8 ms | 54 ms |
+| **cross-core → IDLE target** | 1469 | **~1 ms** | 2 ms | 1.6 ms |
+| cross-core → busy target | 295 | ~1 ms | 1 ms | 1.5 ms |
+
+Findings, in order of how they overturned each hypothesis:
+1. **Not queueing.** A cross-core wake onto a genuinely *idle* CPU still takes ~1 ms — identical
+   to the busy-target case. If it were run-queue queueing, idle-target wakes would be fast.
+2. **Not the tick.** The timer is 100 Hz (10 ms); ~1 ms is tick-independent and far tighter.
+3. **Not deferral.** Only ~12 % took the `on_cpu` deferred path; the ~1 ms is uniform.
+4. **Local is 2 µs** (p50) — when the waker yields (schbench dispatcher), the wakee runs at once;
+   the 8–54 ms local *tail* is the waker NOT yielding (hackbench), a separate preemption issue.
+
+**Conclusion: the ~1 ms is the cross-core-wake-to-idle-CPU IPI mechanism itself** (an idle CPU
+takes ~1 ms to pick up a task after the reschedule SGI), not placement/queueing/tick.
+
+#### Hop-level breakdown (2026-08-07) — the ~1 ms is IPI *delivery*, and it's the SGI-not-waking-WFI
+I extended `wakeprof` to stamp the kick-time per CPU (`request_remote_reschedule`) and read it in
+the IPI handler (`request_current_reschedule`), splitting the cross-core wake into **IPI-delivery**
+(SGI send → handler runs) and **pick-after-handler** (handler → task switched in). Board result
+(schbench m1t4): `ipi_deliver` p50 **~1 ms** (p90 2 ms, max 2.4 ms) vs `pick_after_h` p50 **2 µs**.
+So the *entire* ~1 ms is between sending the reschedule SGI and the target's IPI handler firing;
+once it fires, `force_resched_from_irq` reschedules inline in 2 µs. `ipi_deliver` max ≈ 2.4 ms
+(never the 10 ms tick) ⇒ the idle CPU wakes on the ~1–2 ms *oneshot timer*, not the SGI.
+
+**Attempted fix `idle-wake-recheck` (reverted, `54549a805`) — NO effect.** I closed the idle-loop
+wake window: before WFI, re-check the run queue with IRQs disabled and skip WFI if a task is
+ready; WFI runs IRQs-masked so it should wake on a pending SGI. Board A/B: `xcore_idle` p50 stayed
+1048 µs, `ipi_deliver` unchanged. This is itself decisive — **WFI-under-IRQs-masked did not wake on
+the SGI either**, proving the reschedule SGI never becomes a pending wake event at the idle CPU;
+the CPU only advances when the timer fires.
+
+**Root cause (definitive):** the reschedule SGI does not wake an idle (WFI) CPU on RK3588 — it is
+processed only when the CPU next wakes for a timer (~1–2 ms). This is a **GIC SGI-delivery-to-idle-CPU issue**. wake_affine (local hand-off) remains the right
+mitigation until it's fixed. Artifacts: `schedbench-baselines/wakeprof-hopbreakdown-board-2026-08-07.txt`,
+`wakeprof-idlefix-NOEFFECT-board-2026-08-07.txt`.
+
+#### Read-only GIC inspection (2026-08-07) — no obvious static defect; needs on-board register check
+I traced the reschedule-SGI enable path end to end (`arm-gic-driver` + `irq-framework`, both in-tree):
+- `gicr::init_sgi_ppi` **disables** all SGIs/PPIs (`ICENABLER0 = u32::MAX`) and only sets groups
+  (Group1) + priorities. Enables come later, individually.
+- `request_percpu_irq(ipi_irq(), all_cpus)` runs **only on the BSP**; for not-yet-online secondaries
+  the enable is queued as *pending*.
+- Each secondary, in `rust_main_secondary`, runs GIC per-CPU init (`init_later_secondary`, which
+  disables all) **first**, then `init_percpu_irq` → `cpu_online(N)` → `Registry::cpu_online` →
+  `apply_line_state` enables the pending per-CPU IRQs (timer **and** IPI SGI) on CPU N's redistributor.
+
+So the IPI SGI is enabled on secondaries through the **same mechanism, in the same order, as the
+timer PPI that demonstrably works** — no obvious enable/disable/ordering bug in the source. The
+remaining suspects can't be resolved by reading code and must be checked **on-board** (one small
+diagnostic run, not a blind change):
+1. Read `GICR_ISENABLER0` on a secondary at runtime to confirm the IPI SGI bit is actually set.
+2. **Affinity routing** — a timer PPI is CPU-local and works regardless of routing, but an SGI is
+   routed by `ICC_SGI1R` affinity (`cpu_idx_to_id` → `affinity_from_mpidr`); a wrong logical→MPIDR
+   map would misroute the SGI while the timer keeps working — exactly this symptom.
+3. A "target-was-in-WFI-when-SGI-sent" counter to confirm the target is genuinely halted.
+
+**Conclusion: the fix is not an obvious source change — it needs the on-board GIC register check
+above to distinguish runtime-enable vs affinity-routing before touching the GIC.**
+
+#### Deeper GIC read (2026-08-07 cont.) — routing REFUTED; GIC path verified correct for RK3588
+Reading the actual mapping settles it: `current_cpu_idx()` = `cpu_id_to_idx(MPIDR & MASK)` and
+`cpu_idx_to_id()` = `__cpu_id_list().nth(idx)` are **exact FDT inverses**, so the SGI targets logical
+CPU N's real MPIDR by construction; the MASK covers all four affinity levels (Aff0–3); and
+`TargetList` builds the ICC_SGI1R within-cluster bitmap as `1<<aff0`. For RK3588 each core is its own
+Aff1 (0–7) with Aff0=0, so the SGI correctly targets exactly core N. **The IPI-SGI enable, routing,
+and target-list are all verified correct — the ~1 ms is not a GIC config bug.** The remaining
+distinction (a genuine hardware SGI-doesn't-wake-WFI issue vs the "idle" target actually being
+awake/transitioning = placement/queueing) is being measured with a per-CPU in-WFI counter; if the
+target is not truly halted, wake_affine (local hand-off) is already the correct fix and there is no
+separate GIC defect to chase.
+
+#### FIXED (2026-08-07) — `idle-poll`, root cause confirmed = SGI-doesn't-wake-WFI, latency 1048→4 µs
+The in-WFI counter settled it: **87 % of reschedule SGIs target a genuinely WFI-halted CPU
+(`sgi_to_wfi=1205` vs `sgi_to_awake=187`) yet IPI delivery is still ~1 ms** — the RK3588 SGI does
+not promptly wake a WFI CPU (GIC enable/routing/target-list all verified correct). Fix = **poll-idle**
+(Linux `poll_idle`, feature `idle-poll`): before deep WFI, spin-check the run queue for a bounded
+window so a cross-core-enqueued task is picked up directly, without depending on the SGI to wake WFI.
+
+Board A/B (schbench m1t4 cross-core-to-idle wake p50):
+
+| | pre-fix | idle-poll 200 µs | idle-poll 50 µs |
+|---|---|---|---|
+| xcore_idle wake p50 | **1048 µs** | 2 µs | **4 µs** |
+| schbench m2t8 idle p50 | 1048 µs | 2 µs | 1 µs |
+| hackbench g5 Time | ~1.14 s | 2.43 s | **1.38 s** |
+
+**The ~1 ms cross-core wake floor is beaten — ~250× at the median (1048→4 µs).** The 50 µs window
+keeps the latency win while limiting the spin-under-load throughput cost to ~20 % (vs 2× at 200 µs).
+`idle-poll` is feature-gated **off by default** (spinning burns power/throughput); it's the opt-in
+lever for latency-sensitive *spread* workloads, while wake_affine (default-on) already covers the
+latency-critical 1:1 case by avoiding the cross-core wake entirely. Remaining polish (adaptive
+window à la Linux `haltpoll`, and whether to default it on for the board) is a follow-up.
+Artifacts: `schedbench-baselines/wakeprof-idlepoll-{200us,50us}-board-2026-08-07.txt`.
+
+**Adaptive window attempted + reverted (negative result).** A `haltpoll`-style per-CPU adaptive
+window (grow when a task appears during WFI, shrink on spurious wake) did **not** beat fixed 50 µs:
+schbench m1t4 xcore_idle p50 regressed back to 1048 µs (the window collapses during schbench's idle
+gaps before its active wakes) while hackbench recovered to 1.31 s. The tension is fundamental on
+this SoC — the standard `haltpoll` signal (halt duration) is confounded by the SGI-doesn't-wake-WFI
+quirk (halt is always ~1–2 ms via the timer). Fixed 50 µs remains the validated-best; a proper
+adaptive would need a busy-fraction signal, not halt duration (deferred). Artifact:
+`wakeprof-adaptive-NOWIN-board-2026-08-07.txt`.
+
+### Gap 2 — fork() EFAULT at ~250 concurrent processes  →  **FIXED** (`5c18e46ab`)
+hackbench `-P g10` (400 processes) failed: `fork()` returned **EFAULT** after ~250 address
+spaces (thread mode `-T g10` handled all 400). Root cause: the per-frame COW reference count
+was a **`u8`** (`cow.rs` `FrameRefCnt`); a read-only libc/text/rodata frame shared by the
+parent plus ~254 forked children **overflowed the `u8`**, and `clone_map` returned
+`BadAddress` → EFAULT. Not THP (reproduced with THP off) and not ASID (StarryOS uses ASID 0).
+**Fix:** widened the counter to `u32` (Linux uses a 32-bit refcount; 4 B sharers ≈ unbounded)
+and made the now-unreachable overflow return `NoMemory` (ENOMEM) instead of EFAULT. Both build
+configs compile clean; board re-validation of `-P g10` pending.
+
+## Artifacts
+- `schedbench-baselines/linux-schedbench-board-2026-08-06.txt`
+- `schedbench-baselines/starry-placement-thp-board-2026-08-06.txt`
+- `schedbench-baselines/starry-lb-nothp-board-2026-08-06.txt`

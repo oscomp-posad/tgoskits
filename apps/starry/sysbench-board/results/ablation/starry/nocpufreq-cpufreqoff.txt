@@ -1,0 +1,17 @@
+### ABL profile=cpufreqoff tag=run reps=3 Linux 10.0.0
+A55_1T r1     events per second:   156.02
+A55_1T r2     events per second:   156.60
+A55_1T r3     events per second:   156.60
+A76_1T r1     events per second:   347.00
+A76_1T r2     events per second:   346.91
+A76_1T r3     events per second:   346.73
+ALL_8T r1     events per second:  2005.97
+ALL_8T r2     events per second:  1999.79
+ALL_8T r3     events per second:  2005.88
+FREQ_A55 r1 CPUPROBE freq_est=816 MHz (cycles=6400000000 sec=7.8477 sink=6400000001)
+FREQ_A55 r2 CPUPROBE freq_est=815 MHz (cycles=6400000000 sec=7.8507 sink=6400000001)
+FREQ_A55 r3 CPUPROBE freq_est=816 MHz (cycles=6400000000 sec=7.8477 sink=6400000001)
+FREQ_A76 r1 CPUPROBE freq_est=815 MHz (cycles=6400000000 sec=7.8488 sink=6400000001)
+FREQ_A76 r2 CPUPROBE freq_est=816 MHz (cycles=6400000000 sec=7.8457 sink=6400000001)
+FREQ_A76 r3 CPUPROBE freq_est=816 MHz (cycles=6400000000 sec=7.8456 sink=6400000001)
+### ABL_DONE profile=cpufreqoff tag=run >>>ABLDONE<<<

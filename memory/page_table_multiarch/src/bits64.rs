@@ -10,6 +10,11 @@ use crate::{
 
 const ENTRY_COUNT: usize = 512;
 
+/// How many freed table frames `reclaim_empty_tables` buffers before draining
+/// them behind one TLB completion barrier. Bounds the transient held-but-freed
+/// frames and the on-stack buffer (`RECLAIM_TLB_BATCH * size_of::<PhysAddr>()`).
+const RECLAIM_TLB_BATCH: usize = 32;
+
 const fn p4_index(vaddr: usize) -> usize {
     (vaddr >> (12 + 27)) & (ENTRY_COUNT - 1)
 }
@@ -129,6 +134,27 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64<M, PTE, H
     pub fn cursor(&mut self) -> PageTable64Cursor<'_, M, PTE, H> {
         PageTable64Cursor::new(self)
     }
+
+    /// Allocates a fresh, zeroed intermediate (non-leaf) page-table frame for a
+    /// caller that will later splice it in with
+    /// [`PageTable64Cursor::split_huge_page_with`].
+    ///
+    /// Reserving the table up front lets a huge-page split be *committed* with no
+    /// allocation — i.e. atomically against out-of-memory: if this reservation
+    /// fails the caller can abort before mutating any mapping, and once it
+    /// succeeds the commit cannot fail for lack of memory partway through. A
+    /// reserved frame that ends up unused must be returned with
+    /// [`dealloc_intermediate_table`](Self::dealloc_intermediate_table).
+    pub fn alloc_intermediate_table(&self) -> PagingResult<PhysAddr> {
+        Self::alloc_table()
+    }
+
+    /// Frees a frame obtained from
+    /// [`alloc_intermediate_table`](Self::alloc_intermediate_table) that was not
+    /// consumed by a split (rollback path).
+    pub fn dealloc_intermediate_table(&self, paddr: PhysAddr) {
+        H::dealloc_frame(paddr);
+    }
 }
 
 // Private implements.
@@ -167,23 +193,34 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64<M, PTE, H
     }
 
     fn next_table<'a>(&self, entry: &PTE) -> PagingResult<&'a [PTE]> {
-        if entry.paddr().as_usize() == 0 {
-            Err(PagingError::NotMapped)
-        } else if entry.is_huge() {
-            Err(PagingError::MappedToHugePage)
-        } else {
+        // Descend only into a genuine table. Using `is_table()` (not `!is_huge()`)
+        // is essential: on aarch64/riscv a *not-present* huge block reads
+        // `is_huge() == false`, so the old check walked into its data frame as a
+        // page table (mis-reads, and a wrongful free in `dealloc_tree`).
+        if entry.is_table() {
             Ok(self.table_of(entry.paddr()))
+        } else if entry.paddr().as_usize() == 0 {
+            Err(PagingError::NotMapped)
+        } else {
+            Err(PagingError::MappedToHugePage)
         }
     }
 
     fn next_table_mut<'a>(&mut self, entry: &PTE) -> PagingResult<&'a mut [PTE]> {
-        if entry.paddr().as_usize() == 0 {
-            Err(PagingError::NotMapped)
-        } else if entry.is_huge() {
-            Err(PagingError::MappedToHugePage)
-        } else {
+        if entry.is_table() {
             Ok(self.table_of_mut(entry.paddr()))
+        } else if entry.paddr().as_usize() == 0 {
+            Err(PagingError::NotMapped)
+        } else {
+            Err(PagingError::MappedToHugePage)
         }
+    }
+
+    /// Whether every entry of the table at `table_paddr` is unused (all leaves
+    /// unmapped). Used to detect an intermediate table left empty by a prior
+    /// huge-page split so a later huge `map` can reclaim it.
+    fn table_all_unused(&self, table_paddr: PhysAddr) -> bool {
+        self.table_of(table_paddr).iter().all(|e| e.is_unused())
     }
 
     fn next_table_mut_or_create<'a>(&mut self, entry: &mut PTE) -> PagingResult<&'a mut [PTE]> {
@@ -248,6 +285,136 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64<M, PTE, H
         let p1 = self.next_table_mut(p2e)?;
         let p1e = &mut p1[p1_index(vaddr)];
         Ok((p1e, PageSize::Size4K))
+    }
+
+    /// Finds the *not-present huge block* PTE covering `vaddr` — a block
+    /// descriptor (`!is_unused() && !is_table()`) whose present bit is clear but
+    /// that still owns a frame, as produced by `mprotect(PROT_NONE)` over a THP
+    /// area — returning a mutable reference to it and its page size, or `None`.
+    ///
+    /// Such a block is not reachable through [`get_entry_mut`](Self::get_entry_mut):
+    /// on aarch64/riscv it reads `is_huge() == false`, so the walker cannot return
+    /// it as a huge mapping and instead yields
+    /// [`MappedToHugePage`](PagingError::MappedToHugePage).
+    fn find_not_present_huge_block_mut<'a>(
+        &mut self,
+        vaddr: usize,
+    ) -> Option<(&'a mut PTE, PageSize)> {
+        let p3 = if M::LEVELS == 3 {
+            self.table_of_mut(self.root_paddr())
+        } else if M::LEVELS == 4 {
+            let p4 = self.table_of_mut(self.root_paddr());
+            let p4e = &p4[p4_index(vaddr)];
+            if !p4e.is_table() {
+                return None;
+            }
+            self.table_of_mut(p4e.paddr())
+        } else {
+            unreachable!()
+        };
+        let p3e = &mut p3[p3_index(vaddr)];
+        if !p3e.is_unused() && !p3e.is_table() {
+            return Some((p3e, PageSize::Size1G));
+        }
+        if !p3e.is_table() {
+            return None;
+        }
+        let p2 = self.table_of_mut(p3e.paddr());
+        let p2e = &mut p2[p2_index(vaddr)];
+        if !p2e.is_unused() && !p2e.is_table() {
+            return Some((p2e, PageSize::Size2M));
+        }
+        None
+    }
+
+    /// Immutable [`find_not_present_huge_block_mut`](Self::find_not_present_huge_block_mut).
+    fn find_not_present_huge_block<'a>(&self, vaddr: usize) -> Option<(&'a PTE, PageSize)> {
+        let p3 = if M::LEVELS == 3 {
+            self.table_of(self.root_paddr())
+        } else if M::LEVELS == 4 {
+            let p4 = self.table_of(self.root_paddr());
+            let p4e = &p4[p4_index(vaddr)];
+            if !p4e.is_table() {
+                return None;
+            }
+            self.table_of(p4e.paddr())
+        } else {
+            unreachable!()
+        };
+        let p3e = &p3[p3_index(vaddr)];
+        if !p3e.is_unused() && !p3e.is_table() {
+            return Some((p3e, PageSize::Size1G));
+        }
+        if !p3e.is_table() {
+            return None;
+        }
+        let p2e = &self.table_of(p3e.paddr())[p2_index(vaddr)];
+        if !p2e.is_unused() && !p2e.is_table() {
+            return Some((p2e, PageSize::Size2M));
+        }
+        None
+    }
+
+    /// Clears the not-present huge block covering `vaddr` and returns its frame so
+    /// the caller can free it (else it leaks on unmap — `unmap` never sees a paddr
+    /// to hand back). Returns [`NotMapped`](PagingError::NotMapped) if none.
+    fn take_not_present_huge_block(
+        &mut self,
+        vaddr: M::VirtAddr,
+    ) -> PagingResult<(PhysAddr, MappingFlags, PageSize)> {
+        let vaddr: usize = vaddr.into();
+        match self.find_not_present_huge_block_mut(vaddr) {
+            Some((entry, size)) => {
+                let ret = (entry.paddr(), entry.flags(), size);
+                entry.clear();
+                Ok(ret)
+            }
+            None => Err(PagingError::NotMapped),
+        }
+    }
+
+    /// Break-before-make split of a *not-present huge block* at `vaddr`, pointing
+    /// its descriptor at the caller-provided (pre-zeroed) table — the analogue of
+    /// [`PageTable64Cursor::split_huge_page_with`] for a block `get_entry_mut`
+    /// cannot return. The block carries no live translation (present bit clear),
+    /// but the clear + broadcast TLBI + install is kept identical to the present
+    /// path for safety. Returns [`NotMapped`](PagingError::NotMapped) if `vaddr`
+    /// is not covered by a not-present huge block.
+    fn split_not_present_huge_block(
+        &mut self,
+        vaddr: M::VirtAddr,
+        table_paddr: PhysAddr,
+    ) -> PagingResult {
+        let va: usize = vaddr.into();
+        match self.find_not_present_huge_block_mut(va) {
+            Some((entry, _size)) => {
+                entry.clear();
+                M::flush_tlb(Some(vaddr));
+                *entry = GenericPTE::new_table(table_paddr);
+                Ok(())
+            }
+            None => Err(PagingError::NotMapped),
+        }
+    }
+
+    /// Returns the frame, flags, and size of a huge *block* covering `vaddr`
+    /// without mutating it — for callers (e.g. a huge-page split) that need the
+    /// block's backing frame before committing. `None` if `vaddr` is not covered
+    /// by a huge block.
+    ///
+    /// Intended for the not-present (`mprotect(PROT_NONE)`) case that
+    /// [`query`](Self::query) reports as
+    /// [`MappedToHugePage`](PagingError::MappedToHugePage), so call it only after
+    /// `query` returns that error. It will also match a *present* huge block (the
+    /// caller should have taken it via `query`), and — unlike `query` — it does
+    /// NOT apply the intra-block offset, so `vaddr` must be block-aligned.
+    pub fn peek_not_present_huge_block(
+        &self,
+        vaddr: M::VirtAddr,
+    ) -> Option<(PhysAddr, MappingFlags, PageSize)> {
+        let vaddr: usize = vaddr.into();
+        self.find_not_present_huge_block(vaddr)
+            .map(|(entry, size)| (entry.paddr(), entry.flags(), size))
     }
 
     fn get_entry_mut_or_create(
@@ -330,6 +497,108 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64<M, PTE, H
         }
         H::dealloc_frame(table_paddr);
     }
+
+    /// Reclaims intermediate tables that an unmap of `[vaddr, vaddr + size)`
+    /// leaves entirely empty — e.g. an L2->L3 table stranded when a huge-page
+    /// split's leaves are unmapped. Each such table's frame is freed and its
+    /// parent entry cleared (break-before-make), instead of the table lingering
+    /// until the whole page table is dropped. The root table is never freed.
+    /// Safe to call after any range unmap; a no-op when nothing became empty.
+    pub fn reclaim_empty_tables(&mut self, vaddr: M::VirtAddr, size: usize) {
+        if size == 0 {
+            return;
+        }
+        let lo: usize = vaddr.into();
+        let hi = lo.saturating_add(size);
+        let root = self.root_paddr();
+        // Freed table frames are buffered and released in chunks so a whole
+        // recursion pays one completion barrier per chunk instead of one per
+        // freed table (a 1 GiB unmap frees ~512 tables). The barrier MUST precede
+        // the frees (see `reclaim_empty_in_range`).
+        let mut batch: ArrayVec<PhysAddr, RECLAIM_TLB_BATCH> = ArrayVec::new();
+        // The root table is never freed; ignore its emptiness.
+        let _ = self.reclaim_empty_in_range(root, 0, 0, lo, hi, &mut batch);
+        if !batch.is_empty() {
+            M::flush_tlb_sync();
+            for pa in batch.drain(..) {
+                H::dealloc_frame(pa);
+            }
+        }
+    }
+
+    /// Recursively frees the empty descendant tables of `table_paddr` (which
+    /// covers `[base, ..)` at `level`) that lie within `[lo, hi)`, clearing each
+    /// freed child's parent entry. Returns whether `table_paddr` is now fully
+    /// unused. Follows the crate's `table_of_mut` fabricated-lifetime convention;
+    /// recursion only ever touches disjoint child tables.
+    fn reclaim_empty_in_range(
+        &mut self,
+        table_paddr: PhysAddr,
+        level: usize,
+        base: usize,
+        lo: usize,
+        hi: usize,
+        batch: &mut ArrayVec<PhysAddr, RECLAIM_TLB_BATCH>,
+    ) -> bool {
+        // A last-level (leaf) table holds pages, not sub-tables: report only
+        // whether it is empty so the parent can decide to free it.
+        if level >= M::LEVELS - 1 {
+            return self.table_all_unused(table_paddr);
+        }
+        let entry_span = 1usize << (12 + (M::LEVELS - 1 - level) * 9);
+        let table = self.table_of_mut(table_paddr);
+        let mut all_children_freed = true;
+        for (i, entry) in table.iter_mut().enumerate() {
+            let entry_base = base + i * entry_span;
+            if entry_base >= hi || entry_base.saturating_add(entry_span) <= lo {
+                continue; // this entry's span is entirely outside the unmapped range
+            }
+            // A root subtree shared from another page table via `copy_from` is not
+            // ours to free (mirrors `Drop`).
+            #[cfg(feature = "copy-from")]
+            if level == 0 && self.borrowed_entries.get(i) {
+                all_children_freed = false;
+                continue;
+            }
+            // Descend only into a genuine sub-table. `is_table()` excludes an
+            // unused slot, a huge block, and — crucially — a *not-present* huge
+            // block (whose `is_huge()` reads false on aarch64/riscv), whose data
+            // frame must never be misread as a page table and freed.
+            if !entry.is_table() {
+                continue;
+            }
+            let child_paddr = entry.paddr();
+            if self.reclaim_empty_in_range(child_paddr, level + 1, entry_base, lo, hi, batch) {
+                // Break-before-make: clear the parent entry and issue the
+                // (broadcast) TLBI that invalidates the cached walk of this table.
+                // The completion barrier and the frame free are DEFERRED: the
+                // child frame must not be returned to the allocator until a
+                // `flush_tlb_sync` has completed its TLBI, else another core could
+                // reallocate and write the frame while a stale walk still reads it
+                // as page-table entries. Buffer the frame; free it only after the
+                // batched sync (on drain-when-full below, or the tail drain in
+                // `reclaim_empty_tables`).
+                entry.clear();
+                M::flush_tlb_nosync(entry_base.into());
+                if batch.try_push(child_paddr).is_err() {
+                    // Buffer full: complete the batched invalidations, then free
+                    // the whole chunk. Only paddrs whose TLBI was issued before
+                    // this sync are freed, so completion provably precedes reuse.
+                    M::flush_tlb_sync();
+                    for pa in batch.drain(..) {
+                        H::dealloc_frame(pa);
+                    }
+                    // The buffer is now empty, so this push cannot fail.
+                    let _ = batch.try_push(child_paddr);
+                }
+            } else {
+                all_children_freed = false;
+            }
+        }
+        // Only a table whose every in-range sub-table was freed can have become
+        // empty; scan to confirm no out-of-range entries survive.
+        all_children_freed && self.table_all_unused(table_paddr)
+    }
 }
 
 impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> Drop for PageTable64<M, PTE, H> {
@@ -411,12 +680,60 @@ impl<'a, M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64Cursor
     ) -> PagingResult {
         // `vaddr` does not need to be page-aligned here; `get_entry_mut_or_create`
         // internally maps `vaddr` to its corresponding page table entry (PTE).
-        let entry = self.inner.get_entry_mut_or_create(vaddr, page_size)?;
-        if !entry.is_unused() {
+        {
+            let entry = self.inner.get_entry_mut_or_create(vaddr, page_size)?;
+            if !entry.is_unused() {
+                // Occupied. Installing a huge page over a leftover *intermediate
+                // table* (a prior split whose leaves are now all unmapped) is the
+                // one recoverable case: reclaim the empty table below. `is_table()`
+                // excludes a live mapping, a (present or not-present) huge block —
+                // whose data frame must not be misread as a table — and any other
+                // non-table entry; a table that still holds finer mappings is
+                // rejected by `table_all_unused` further down.
+                if !(page_size.is_huge() && entry.is_table()) {
+                    return Err(PagingError::AlreadyMapped);
+                }
+            } else {
+                *entry =
+                    GenericPTE::new_page(target.align_down(page_size), flags, page_size.is_huge());
+                // Fresh not-present → present (the `is_unused` check guarantees it).
+                // Architectures that never cache not-present translations need no
+                // TLB maintenance here; skipping it removes a broadcast TLBI per
+                // faulted page. See `PagingMetaData::NEED_FLUSH_ON_MAP`.
+                // `remap`/`protect`/`unmap` touch *valid* entries and still flush.
+                if M::NEED_FLUSH_ON_MAP {
+                    self.push(vaddr);
+                }
+                return Ok(());
+            }
+        }
+
+        // Huge map over a leftover intermediate table. Reclaim it iff it is empty
+        // (an emptied split table); otherwise it holds live finer mappings and the
+        // huge block cannot replace them.
+        //
+        // Assumes the intermediate table is exclusively owned by this page table
+        // (true for a table produced by a huge-page split, and for private user
+        // mappings). `copy_from` shares subtrees only at the root level and only
+        // fully-populated ones, which are never `table_all_unused`, so a borrowed
+        // subtree is never freed here.
+        let table_paddr = self.inner.get_entry_mut_or_create(vaddr, page_size)?.paddr();
+        if !self.inner.table_all_unused(table_paddr) {
             return Err(PagingError::AlreadyMapped);
         }
+        // Break-before-make: clear the table descriptor and complete the TLBI
+        // (invalidating any cached walk of this table) before freeing the table
+        // frame, then install the huge block into the now-unused slot.
+        self.inner.get_entry_mut_or_create(vaddr, page_size)?.clear();
+        M::flush_tlb(Some(vaddr));
+        H::dealloc_frame(table_paddr);
+
+        let entry = self.inner.get_entry_mut_or_create(vaddr, page_size)?;
+        debug_assert!(entry.is_unused(), "reclaimed slot must be free");
         *entry = GenericPTE::new_page(target.align_down(page_size), flags, page_size.is_huge());
-        self.push(vaddr);
+        if M::NEED_FLUSH_ON_MAP {
+            self.push(vaddr);
+        }
         Ok(())
     }
 
@@ -464,8 +781,32 @@ impl<'a, M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64Cursor
         &mut self,
         vaddr: M::VirtAddr,
     ) -> PagingResult<(PhysAddr, MappingFlags, PageSize)> {
-        let (entry, size) = self.inner.get_entry_mut(vaddr)?;
-        if !entry.is_present() {
+        let (entry, size) = match self.inner.get_entry_mut(vaddr) {
+            Ok(entry) => entry,
+            // A *not-present huge block* (`mprotect(PROT_NONE)` over a THP area)
+            // is not reachable through `get_entry_mut` — it yields
+            // `MappedToHugePage`. It still owns its frame, so hand that back to
+            // the caller to free rather than leak it.
+            Err(PagingError::MappedToHugePage) => {
+                let ret = self.inner.take_not_present_huge_block(vaddr)?;
+                self.push(vaddr);
+                return Ok(ret);
+            }
+            Err(e) => return Err(e),
+        };
+        // Nothing to free when there is no real frame: an unused slot, or a
+        // not-present entry that carries only attribute bits with a zero physical
+        // address — e.g. an on-demand lazy page mapped as `paddr 0, empty` by the
+        // ArceOS/Axvisor alloc backend, which is not `is_unused()` on aarch64/riscv
+        // (empty flags set present-independent bits). Physical frame 0 is never
+        // allocatable, so `paddr == 0` reliably means "no frame". Tear the slot
+        // down (as before) and report it unmapped.
+        //
+        // Otherwise a *present* mapping, or a not-present leaf that still owns a
+        // real frame (the 4 KiB analogue of the not-present huge block above, e.g.
+        // `mprotect(PROT_NONE)` on a 4 KiB anon page), both own a frame that must
+        // be handed back to the caller to free — dropping the paddr here leaks it.
+        if entry.is_unused() || entry.paddr().as_usize() == 0 {
             entry.clear();
             return Err(PagingError::NotMapped);
         }
@@ -474,6 +815,61 @@ impl<'a, M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64Cursor
         entry.clear();
         self.push(vaddr);
         Ok((paddr, flags, size))
+    }
+
+    /// Splits the huge-page mapping at `vaddr` by pointing its block descriptor
+    /// at the caller-provided, pre-zeroed intermediate table `table_paddr`
+    /// (obtained from [`PageTable64::alloc_intermediate_table`]).
+    ///
+    /// The region is then mapped by the (empty) next-level table; the caller
+    /// installs the finer leaf entries with [`map`](Self::map), which cannot
+    /// allocate because the table already exists. Because *this* call performs no
+    /// allocation, a split whose table was reserved ahead of time commits without
+    /// ever failing for lack of memory partway through and leaving a half-torn
+    /// mapping (the failure mode of unmapping the block and then allocating the
+    /// leaf table on the first re-`map`).
+    ///
+    /// Break-before-make: replacing a valid *block* descriptor with a valid
+    /// *table* descriptor of a finer granule for the same VA is architecturally
+    /// unsafe (a sibling core may cache both translations and take a TLB conflict
+    /// abort). This invalidates the block and completes the broadcast TLBI
+    /// *before* installing the table, so only one translation for the VA is ever
+    /// live. Installing the table over the now-invalid slot is a not-present ->
+    /// present transition needing no further flush; the caller maps the leaves
+    /// (also not-present -> present) afterwards. The region is transiently
+    /// unmapped across these steps — callers hold the address-space lock, so a
+    /// concurrent fault blocks and re-resolves rather than seeing a conflict.
+    ///
+    /// Returns [`Err(PagingError::NotMapped)`](PagingError::NotMapped) if `vaddr`
+    /// is not mapped by a present huge page, leaving the mapping unchanged and
+    /// `table_paddr` for the caller to free.
+    pub fn split_huge_page_with(
+        &mut self,
+        vaddr: M::VirtAddr,
+        table_paddr: PhysAddr,
+    ) -> PagingResult {
+        let (entry, size) = match self.inner.get_entry_mut(vaddr) {
+            Ok(entry) => entry,
+            // A *not-present huge block* (`mprotect(PROT_NONE)` over a THP block)
+            // is not reachable through `get_entry_mut`. It still needs splitting so
+            // a partial op can cut through it; splice the table onto it directly.
+            Err(PagingError::MappedToHugePage) => {
+                return self
+                    .inner
+                    .split_not_present_huge_block(vaddr, table_paddr);
+            }
+            Err(e) => return Err(e),
+        };
+        if !size.is_huge() || !entry.is_present() {
+            return Err(PagingError::NotMapped);
+        }
+        // Break: invalidate the block and complete the broadcast TLBI
+        // (`flush_tlb` ends with `dsb sy; isb`) so no core still caches the huge
+        // entry. Make: install the pre-reserved table over the invalid slot.
+        entry.clear();
+        M::flush_tlb(Some(vaddr));
+        *entry = GenericPTE::new_table(table_paddr);
+        Ok(())
     }
 
     /// Maps a contiguous virtual memory region to a contiguous physical memory
@@ -598,6 +994,22 @@ impl<'a, M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64Cursor
                         PageSize::Size4K
                     } // ignore if unused
                 }
+                // A not-present huge block (`mprotect(PROT_NONE)` over a THP
+                // block) is not reachable via `get_entry_mut`, but it still owns
+                // its frame — re-enable it in place with the new flags, exactly as
+                // a present block or a not-present 4 KiB leaf is handled above.
+                // This keeps the block huge (matching Linux, which does not split
+                // a THP region on `mprotect`).
+                Err(PagingError::MappedToHugePage) => {
+                    match self.inner.find_not_present_huge_block_mut(vaddr_usize) {
+                        Some((entry, page_size)) => {
+                            entry.set_flags(flags, page_size.is_huge());
+                            self.push(vaddr);
+                            page_size
+                        }
+                        None => PageSize::Size4K,
+                    }
+                }
                 Err(PagingError::NotMapped) => PageSize::Size4K,
                 Err(e) => {
                     error!("failed to protect page: {vaddr_usize:#x?}, {e:?}");
@@ -650,9 +1062,13 @@ impl<'a, M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64Cursor
         match &self.flusher {
             TlbFlusher::None => {}
             TlbFlusher::Array(addrs) => {
+                // Batch the by-VA invalidations behind one completion barrier
+                // instead of one per address. No frame is freed here (the cursor
+                // only records VAs), so deferring the barrier to the end is sound.
                 for vaddr in addrs.iter() {
-                    M::flush_tlb(Some(*vaddr));
+                    M::flush_tlb_nosync(*vaddr);
                 }
+                M::flush_tlb_sync();
             }
             TlbFlusher::Full => {
                 M::flush_tlb(None);

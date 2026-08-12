@@ -1,0 +1,8 @@
+### ABL profile=freq tag=run reps=3 Linux 10.0.0
+FREQ_A55 r1 CPUPROBE freq_est=1854 MHz (cycles=6400000000 sec=3.4524 sink=6400000001)
+FREQ_A55 r2 CPUPROBE freq_est=1857 MHz (cycles=6400000000 sec=3.4459 sink=6400000001)
+FREQ_A55 r3 CPUPROBE freq_est=1873 MHz (cycles=6400000000 sec=3.4161 sink=6400000001)
+FREQ_A76 r1 CPUPROBE freq_est=2107 MHz (cycles=6400000000 sec=3.0372 sink=6400000001)
+FREQ_A76 r2 CPUPROBE freq_est=2108 MHz (cycles=6400000000 sec=3.0362 sink=6400000001)
+FREQ_A76 r3 CPUPROBE freq_est=2110 MHz (cycles=6400000000 sec=3.0333 sink=6400000001)
+### ABL_DONE profile=freq tag=run >>>ABLDONE<<<

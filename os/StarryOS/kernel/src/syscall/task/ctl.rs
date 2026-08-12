@@ -20,6 +20,7 @@ use crate::{
 const CAPABILITY_VERSION_3: u32 = 0x20080522;
 const CAP_U32S_3: usize = 2;
 const PERSONALITY_GET: u32 = 0xffff_ffff;
+const PR_THP_DISABLE: usize = 1;
 const PR_THP_DISABLE_EXCEPT_ADVISED: usize = 1 << 1;
 const MPOL_DEFAULT: i32 = 0;
 const MPOL_PREFERRED: i32 = 1;
@@ -517,15 +518,18 @@ pub fn sys_prctl(
             if arg4 != 0 || arg5 != 0 {
                 return Err(AxError::InvalidInput);
             }
-            // StarryOS does not implement transparent huge pages, but userspace
-            // may use this prctl as a compatibility hint and query it later.
+            // With the `thp` feature this prctl gates real 2 MiB huge-page
+            // promotion (see `thp_eligible`); without the feature the value is
+            // only stored and queried for userspace compatibility.
             // Linux returns 0, 1, or 3 from PR_GET_THP_DISABLE:
             //   0: enabled, 1: disabled, 3: disabled except advised mappings.
             let thp_disable = match (arg2, arg3) {
                 (0, 0) => 0,
                 (0, _) => return Err(AxError::InvalidInput),
-                (_, 0) => 1,
-                (_, PR_THP_DISABLE_EXCEPT_ADVISED) => 1 | PR_THP_DISABLE_EXCEPT_ADVISED,
+                (_, 0) => PR_THP_DISABLE,
+                (_, PR_THP_DISABLE_EXCEPT_ADVISED) => {
+                    PR_THP_DISABLE | PR_THP_DISABLE_EXCEPT_ADVISED
+                }
                 _ => return Err(AxError::InvalidInput),
             };
             current()

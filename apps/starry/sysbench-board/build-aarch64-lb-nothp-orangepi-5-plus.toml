@@ -1,0 +1,16 @@
+# PLACEMENT / occ-scheduler STRETCH config (sched-loadbalance ON). Used to board-test
+# the single-atom occupancy scheduler with the per-tick self-heal + saturating dec +
+# the occ-diag logging. NOT the validated ship config — the round-robin default in
+# build-aarch64-unknown-none-softfloat.toml is (t=4=3810=0.98x, run #1). This one is
+# for cracking the multi-thread-spread unification once the board is available.
+target = "aarch64-unknown-none-softfloat"
+features = [
+  "ax-driver/rockchip-soc",
+  "ax-driver/rockchip-sdhci",
+  "ax-driver/rockchip-dwmmc",
+  "ax-driver/rk3588-cpufreq",
+  "ax-driver/rk3588-ddr-dvfs",
+  "starry-kernel/sched-loadbalance",
+]
+log = "Info"
+max_cpu_num = 8

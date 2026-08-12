@@ -1,8 +1,8 @@
 use alloc::{collections::BTreeMap, sync::Arc, vec, vec::Vec};
 
+use ax_kspin::SpinRaw as Mutex;
 use dma_api::DmaDirection;
 use mbarrier::mb;
-use spin::Mutex;
 use usb_if::{
     descriptor::{self, EndpointDescriptor},
     endpoint::{RequestId, TransferCompletion, TransferRequest},
@@ -30,22 +30,6 @@ use crate::{
     err::ConvertXhciError,
     osal::Kernel,
 };
-
-/// Self-limiting budget for the short-ISO-transfer diagnostic so a persistently
-/// truncating stream cannot flood the log. One line per short transfer until the
-/// budget is spent, enough to characterise the truncation mechanism on a board run.
-static SHORT_ISO_LOG_BUDGET: core::sync::atomic::AtomicUsize =
-    core::sync::atomic::AtomicUsize::new(256);
-
-fn take_short_iso_log_budget() -> bool {
-    SHORT_ISO_LOG_BUDGET
-        .fetch_update(
-            core::sync::atomic::Ordering::AcqRel,
-            core::sync::atomic::Ordering::Acquire,
-            |left| left.checked_sub(1),
-        )
-        .is_ok()
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct EndpointRequestId(u64);
@@ -293,67 +277,17 @@ impl Endpoint {
             }
 
             let mut actual_lengths = Vec::with_capacity(packets.len());
-            // Count packets that resolved to zero because no completion event was
-            // ever observed for them (the `None` arm), as opposed to packets the
-            // controller genuinely returned short/zero. This separates an
-            // event-delivery loss (missing_event > 0) from a controller-side rate
-            // or FIFO truncation (missing_event == 0 but actual < requested),
-            // which is the key question when diagnosing a truncated ISO IN stream.
-            let mut missing_event = 0usize;
             for (index, packet) in packets.iter().copied().enumerate() {
                 let requested = packet_lengths[index];
                 let actual = match packet.actual {
                     Some(actual) => actual,
                     None if packet.trb == event_trb => iso_packet_actual_length(requested, event)?,
-                    None => {
-                        missing_event += 1;
-                        0
-                    }
+                    None => 0,
                 };
                 actual_lengths.push(actual);
             }
 
-            let transfer_len: usize = actual_lengths.iter().sum();
-            let requested_len: usize = packet_lengths.iter().sum();
-            // Only characterise URBs that carried real image data (skip the
-            // all-header zero-payload URBs the camera emits between frames /
-            // during stream startup, which are legitimately short). Classify the
-            // per-packet loss shape so a steady-state board run reveals whether
-            // the residual shortfall is uniform short reads or whole packets
-            // dropped (the signature of an iso scheduling gap).
-            const SHORT_ISO_DATA_THRESHOLD: usize = 4096;
-            if matches!(transfer.direction, Direction::In)
-                && transfer_len < requested_len
-                && transfer_len >= SHORT_ISO_DATA_THRESHOLD
-                && take_short_iso_log_budget()
-            {
-                let mut full = 0usize;
-                let mut short = 0usize;
-                let mut zero = 0usize;
-                for (actual, requested) in actual_lengths.iter().zip(packet_lengths.iter()) {
-                    if *actual == 0 {
-                        zero += 1;
-                    } else if *actual >= *requested {
-                        full += 1;
-                    } else {
-                        short += 1;
-                    }
-                }
-                warn!(
-                    "xhci: short ISO IN dci={} packets={} actual_bytes={} requested_bytes={} \
-                     full_packets={} short_packets={} zero_packets={} missing_event_packets={} \
-                     last_code={:?}",
-                    self.dci.raw(),
-                    packets.len(),
-                    transfer_len,
-                    requested_len,
-                    full,
-                    short,
-                    zero,
-                    missing_event,
-                    event.completion_code()
-                );
-            }
+            let transfer_len = actual_lengths.iter().sum();
             transfer.iso_packet_actual_lengths = actual_lengths;
             if transfer_len > 0 && matches!(transfer.direction, Direction::In) {
                 transfer.complete_for_cpu_all();

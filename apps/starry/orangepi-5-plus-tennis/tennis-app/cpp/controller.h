@@ -10,7 +10,6 @@
 #include "actuator/arm_backend.h"
 #include "actuator/motor_backend.h"
 #include "bench/metrics.h"
-#include "odometry_worker.h"
 #include "state_machine.h"
 #include "types.h"
 
@@ -24,16 +23,12 @@ public:
     PerceptionMode perception_mode() const { return sm_.perception_mode(); }
     GameState state() const { return sm_.state(); }
 
-    bool process(const Detection &det);
-    bool tick(int64_t now_ns);
+    void process(const Detection &det);
 
 private:
-    bool apply_motor(const ControlOutput &out);
-    bool dispatch(const ControlOutput &out);
-    void refresh_odometry(int64_t now_ns);
+    void apply_motor(const ControlOutput &out);
 
     StateMachine sm_;
-    OdometryWorker odometry_;
     MotorBackend &motor_;
     ArmBackend &arm_;
     Metrics &metrics_;

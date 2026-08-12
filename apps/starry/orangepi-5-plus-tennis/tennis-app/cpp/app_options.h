@@ -19,13 +19,7 @@ struct Options {
     int height = 480;
     int fps = 30;
     double duration_sec = 60.0;
-    std::string motor_backend = "virtual"; // virtual | pwm | uart
-    std::string motor_device; // backend default when empty
-    std::string arm_backend = "virtual"; // virtual | uart
-    std::string arm_device; // /dev/ttyS3 when empty
-    int camera_warmup_frames = 3;
-    int camera_warmup_timeout_ms = 3000;
-    int camera_watchdog_ms = 2000;
+    bool virtual_actuators = true; // the only supported actuator path for now
     int log_every = 1;             // emit per-frame lines every Nth frame (1 = all)
     std::string core_mask = "all"; // NPU core mask for live mode
     // --- Deep profiling (mirrors the sibling uvc-rknn bench) ---

@@ -9,7 +9,7 @@
 //!
 //! The wire ABI + register assembly live in `rockchip-jpeg`'s `mpp` module
 //! (host-tested); this node only does `copy_from_user`/`copy_to_user`, dma-buf-fd
-//! → physical-address resolution (via the shared `/dev/dma_heap`), and the
+//! → physical-address resolution (via the /dev/dma_heap DmaBufFile), and the
 //! hardware run.
 
 use core::{any::Any, ffi::c_int, mem::size_of};
@@ -19,7 +19,7 @@ use ax_runtime::hal::cpu::asm::user_copy;
 use ax_sync::Mutex;
 use axfs_ng_vfs::{DeviceId, VfsError, VfsResult};
 
-use crate::pseudofs::{DeviceOps, dev::dma_heap};
+use crate::{file::dmabuf::resolve_contiguous_dmabuf, pseudofs::DeviceOps};
 
 fn copy_from_user(dst: *mut u8, src: *const u8, size: usize) -> VfsResult<()> {
     if unsafe { user_copy(dst, src, size) } != 0 {
@@ -85,7 +85,9 @@ impl DeviceOps for MppService {
     }
 
     fn ioctl(&self, cmd: u32, arg: usize) -> VfsResult<usize> {
-        if cmd != mpp::MPP_IOC_CFG_V1 && cmd != mpp::MPP_IOC_CFG_V2 {
+        // Only the V1 request layout is implemented; V2 uses a different record
+        // and must not be parsed as V1.
+        if cmd != mpp::MPP_IOC_CFG_V1 {
             return Err(VfsError::NotATty);
         }
         if arg == 0 {
@@ -131,6 +133,12 @@ fn handle_request(state: &mut TaskState, req: &mpp::MppRequest) -> VfsResult<()>
         }
         mpp::cmd::QUERY_HW_ID => {
             write_u32_to_user(data, jpeg::read_id().unwrap_or(0))?;
+        }
+        mpp::cmd::QUERY_CMD_SUPPORT => {
+            // No command-support table is offered; write back 0 (rather than
+            // leaving the user buffer untouched) so MPP's capability probe reads a
+            // defined value and falls back to the old-kernel command path.
+            write_u32_to_user(data, 0)?;
         }
         mpp::cmd::INIT_CLIENT_TYPE => {
             let mut client: u32 = 0;
@@ -204,17 +212,17 @@ fn run_decode(state: &mut TaskState) -> VfsResult<()> {
 }
 
 /// Resolve a dma-buf fd (as MPP places it in an address register) to the
-/// physical base of its contiguous buffer. The buffer is shared with the RGA
-/// and NPU paths via `/dev/dma_heap` ([`dma_heap::DmaBufObject`]), which is
-/// 32-bit contiguous, so the JPU output flows zero-copy into the RGA/NPU stages.
+/// physical base of its contiguous buffer. MPP allocates these from our
+/// `/dev/dma_heap` ([`DmaBufFile`]).
 fn resolve_fd(fd: u32) -> Option<u32> {
-    let Ok(obj) = dma_heap::resolve_dmabuf_fd(fd as c_int) else {
+    let Some(buf) = resolve_contiguous_dmabuf(fd as c_int) else {
         warn!("mpp_service: register fd {fd} is not a resolvable dma-buf");
         return None;
     };
-    // The decoder is 32-bit; reject buffers above 4 GiB rather than silently
-    // truncating the address. /dev/dma_heap buffers are allocated below 4 GiB.
-    let phys = obj.phys_addr();
+    // The decoder is 32-bit (device_with_mask(u32::MAX)); reject buffers above
+    // 4 GiB rather than silently truncating the address. /dev/dma_heap buffers
+    // are allocated below 4 GiB (dma32), so this should not trigger.
+    let phys = buf.phys_base();
     match u32::try_from(phys) {
         Ok(addr) => Some(addr),
         Err(_) => {

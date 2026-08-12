@@ -1,0 +1,5 @@
+### ABL profile=sch tag=run reps=3 Linux 10.0.0
+SCH_m1t4 r1 rps=332.10 p50wake=8
+SCH_m1t4 r2 rps= p50wake=
+SCH_m1t4 r3 rps=334.00 p50wake=8
+### ABL_DONE profile=sch tag=run >>>ABLDONE<<<

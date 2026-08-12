@@ -60,11 +60,11 @@ static EVENT_NEW_TIMER: LazyLock<Event> = LazyLock::new(Event::new);
 #[allow(non_camel_case_types)]
 #[derive(Eq, PartialEq, Debug, Clone, Copy, FromRepr)]
 pub enum ITimerType {
-    /// 统计系统实际运行时间
+    /// Real elapsed wall-clock time.
     Real    = 0,
-    /// 统计用户态运行时间
+    /// User-mode CPU time.
     Virtual = 1,
-    /// 统计进程的所有用户态/内核态运行时间
+    /// User + kernel CPU time.
     Prof    = 2,
 }
 
@@ -137,14 +137,31 @@ pub fn register_alarm_for(deadline: Duration, target: AlarmTarget) {
 }
 
 /// Represents the state of the timer.
-#[derive(Debug)]
+///
+/// Stored lock-free in `Thread::timer_state` (as `u8`) so the syscall boundary
+/// can flip User/Kernel without taking the `time` lock; the tick/switch
+/// accounting reads it back via [`TimerState::from_u8`].
+#[repr(u8)]
+#[derive(Debug, Clone, Copy)]
 pub enum TimerState {
     /// Fallback state.
-    None,
+    None   = 0,
     /// The timer is running in user space.
-    User,
+    User   = 1,
     /// The timer is running in kernel space.
-    Kernel,
+    Kernel = 2,
+}
+
+impl TimerState {
+    /// Decodes the discriminant stored in the `Thread::timer_state` atomic.
+    /// Any unknown value maps to `None` (accounts nothing).
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => TimerState::User,
+            2 => TimerState::Kernel,
+            _ => TimerState::None,
+        }
+    }
 }
 
 /// A manager for time-related operations.
@@ -157,7 +174,6 @@ pub struct TimeManager {
     /// Baseline for tick-based CPU time accumulation.
     /// Updated by `tick()` and synced to `last_wall_ns` at the end of `poll()`.
     last_tick_ns: usize,
-    state: TimerState,
     itimers: [ITimer; 3],
 }
 
@@ -174,7 +190,6 @@ impl TimeManager {
             stime_ns: 0,
             last_wall_ns: 0,
             last_tick_ns: 0,
-            state: TimerState::None,
             itimers: Default::default(),
         }
     }
@@ -194,10 +209,19 @@ impl TimeManager {
     /// Uses `last_tick_ns` as the exclusive baseline so that `poll()`'s
     /// itimer accounting (which uses the independent `last_wall_ns`) is not
     /// affected.
-    pub fn tick(&mut self) {
+    ///
+    /// `state` is the User/Kernel mode to attribute the elapsed slice to,
+    /// supplied by the caller from the lock-free `Thread::timer_state` atomic.
+    ///
+    /// `resume_floor_ns` is the thread's last resume instant
+    /// ([`Thread::resume_floor_ns`](crate::task::Thread::resume_floor_ns)); the
+    /// billed baseline is clamped to at least it so a slice that began before the
+    /// thread was descheduled does not charge the descheduled gap to utime/stime.
+    /// Callers without that floor (exact accounting) pass `0`, a no-op.
+    pub fn tick(&mut self, state: TimerState, resume_floor_ns: usize) {
         let now_ns = monotonic_time_nanos() as usize;
-        let delta = now_ns.saturating_sub(self.last_tick_ns);
-        match self.state {
+        let delta = now_ns.saturating_sub(self.last_tick_ns.max(resume_floor_ns));
+        match state {
             TimerState::User => self.utime_ns += delta,
             TimerState::Kernel => self.stime_ns += delta,
             TimerState::None => {}
@@ -207,40 +231,69 @@ impl TimeManager {
         // continues to see the full wall-clock delta for itimer accounting.
     }
 
-    /// Polls the time manager to update the timers and emit signals if
-    /// necessary.
-    pub fn poll(&mut self, emitter: impl Fn(Signo)) {
+    /// Polls the time manager to update CPU time and interval timers, returning
+    /// the interval-timer signals that fired (at most 3, in slot order
+    /// Virtual/Prof/Real).
+    ///
+    /// The caller MUST emit the returned signals AFTER releasing the `time`
+    /// lock: signal delivery takes other locks, and the `time` lock is
+    /// IRQ-disabling — running the emitter under it would extend the IRQs-off
+    /// window and risk a lock-ordering deadlock. Returning the signals keeps
+    /// the locked region free of any nested lock.
+    ///
+    /// `resume_floor_ns` clamps the utime/stime baseline exactly as in
+    /// [`tick`](Self::tick) (interval-timer accounting, which tracks wall time,
+    /// is unaffected). Callers without that floor pass `0`, a no-op.
+    #[must_use = "the returned itimer signals must be emitted after unlocking"]
+    pub fn poll(&mut self, state: TimerState, resume_floor_ns: usize) -> [Option<Signo>; 3] {
         let now_ns = monotonic_time_nanos() as usize;
         // itimer_delta: full wall-clock time since the last poll() call.
         // Used for interval-timer accounting so they fire at the right time
         // regardless of whether tick() has been called in between.
         let itimer_delta = now_ns.saturating_sub(self.last_wall_ns);
         // remaining: time since the last tick() that has not yet been counted
-        // in utime_ns / stime_ns.  If tick() was never called, last_tick_ns ==
-        // last_wall_ns and remaining == itimer_delta (identical to original).
-        let remaining = now_ns.saturating_sub(self.last_tick_ns);
-        match self.state {
+        // in utime_ns / stime_ns, floored at the resume instant so a descheduled
+        // gap is not billed. If tick() was never called and the thread was not
+        // descheduled, last_tick_ns == last_wall_ns and remaining == itimer_delta.
+        let remaining = now_ns.saturating_sub(self.last_tick_ns.max(resume_floor_ns));
+        // Fixed slots so no `n` counter is needed: 0=Virtual, 1=Prof, 2=Real.
+        let mut fired = [None; 3];
+        match state {
             TimerState::User => {
                 self.utime_ns += remaining;
-                self.update_itimer(ITimerType::Virtual, itimer_delta, &emitter);
-                self.update_itimer(ITimerType::Prof, itimer_delta, &emitter);
+                if self.itimers[ITimerType::Virtual as usize].update(itimer_delta) {
+                    fired[0] = Some(ITimerType::Virtual.signo());
+                }
+                if self.itimers[ITimerType::Prof as usize].update(itimer_delta) {
+                    fired[1] = Some(ITimerType::Prof.signo());
+                }
             }
             TimerState::Kernel => {
                 self.stime_ns += remaining;
-                self.update_itimer(ITimerType::Prof, itimer_delta, &emitter);
+                if self.itimers[ITimerType::Prof as usize].update(itimer_delta) {
+                    fired[1] = Some(ITimerType::Prof.signo());
+                }
             }
             TimerState::None => {}
         }
-        self.update_itimer(ITimerType::Real, itimer_delta, &emitter);
+        if self.itimers[ITimerType::Real as usize].update(itimer_delta) {
+            fired[2] = Some(ITimerType::Real.signo());
+        }
         self.last_wall_ns = now_ns;
         // Sync tick baseline with poll baseline so the next tick() starts
         // from a clean slate.
         self.last_tick_ns = now_ns;
+        fired
     }
 
-    /// Updates the timer state.
-    pub fn set_state(&mut self, state: TimerState) {
-        self.state = state;
+    /// Returns whether any interval timer is currently armed.
+    ///
+    /// When none is armed, a syscall boundary can skip the full `poll()` (a
+    /// clock read + itimer scan + signal emission) and rely on tick/switch
+    /// accounting for utime/stime — there is no itimer deadline to service.
+    #[cfg(feature = "tickacct")]
+    pub fn has_armed_itimer(&self) -> bool {
+        self.itimers.iter().any(|it| it.remained_ns > 0)
     }
 
     /// Sets the interval timer of the specified type with the given interval
@@ -251,6 +304,24 @@ impl TimeManager {
         interval_ns: usize,
         remained_ns: usize,
     ) -> (TimeValue, TimeValue) {
+        // Re-baseline the itimer clock on the disarmed->armed transition. Under
+        // `tickacct`, `poll()` — the only writer of `last_wall_ns` — is skipped
+        // at syscall boundaries while no itimer is armed, so `last_wall_ns` can
+        // be stale by seconds (or still 0 from `new()`). Without this reset the
+        // first `poll()` after arming would compute `itimer_delta = now -
+        // last_wall_ns` as that whole stale span and fire the freshly-armed
+        // ITIMER_REAL/PROF immediately. Re-baselining makes the first post-arm
+        // delta measure only from the arm point. Guard on `!has_armed_itimer()`
+        // (tested before the replace, i.e. the pre-arm state): while any itimer
+        // was already armed, poll() ran every boundary and kept last_wall_ns
+        // fresh, so re-basing then would drop this syscall's own kernel window
+        // from the already-running timer. No-op semantically without `tickacct`
+        // (poll runs every boundary there), so gated to keep that path
+        // byte-identical.
+        #[cfg(feature = "tickacct")]
+        if remained_ns > 0 && !self.has_armed_itimer() {
+            self.last_wall_ns = monotonic_time_nanos() as usize;
+        }
         let old = mem::replace(
             &mut self.itimers[ty as usize],
             ITimer::new(interval_ns, remained_ns),
@@ -268,12 +339,6 @@ impl TimeManager {
             time_value_from_nanos(itimer.interval_ns),
             time_value_from_nanos(itimer.remained_ns),
         )
-    }
-
-    fn update_itimer(&mut self, ty: ITimerType, delta: usize, emitter: impl Fn(Signo)) {
-        if self.itimers[ty as usize].update(delta) {
-            emitter(ty.signo());
-        }
     }
 }
 
@@ -296,7 +361,12 @@ async fn alarm_task() {
         if entry.deadline <= now {
             let entry_deadline = entry.deadline;
             let target = entry.target.clone();
-            assert!(guard.pop().is_some_and(|it| it.deadline == entry_deadline));
+            // pop() runs unconditionally (it removes the peeked entry); only the
+            // peek-then-pop invariant is asserted, and only in debug — under the
+            // same held lock it is locally provable, so a release build must not
+            // be able to panic the alarm subsystem here.
+            let popped = guard.pop();
+            debug_assert!(popped.is_some_and(|it| it.deadline == entry_deadline));
             drop(guard);
             match target {
                 AlarmTarget::Thread(weak_task) => {
@@ -330,6 +400,6 @@ pub fn spawn_alarm_task() {
     ax_task::spawn_raw(
         || block_on(alarm_task()),
         "alarm_task".to_owned(),
-        ax_config::TASK_STACK_SIZE,
+        ax_task::default_task_stack_size(),
     );
 }

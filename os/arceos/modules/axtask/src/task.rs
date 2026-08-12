@@ -1,6 +1,8 @@
 use alloc::{boxed::Box, string::String, sync::Arc};
 #[cfg(not(feature = "stack-guard-page"))]
 use core::alloc::Layout;
+#[cfg(feature = "smp")]
+use core::sync::atomic::AtomicPtr;
 #[cfg(any(
     feature = "preempt",
     all(feature = "stack-guard-page", feature = "smp", feature = "ipi")
@@ -28,9 +30,9 @@ use futures_util::task::AtomicWaker;
 use crate::lockdep::HeldLockStack;
 use crate::{AxCpuMask, AxTask, AxTaskRef, WaitQueue};
 
-#[cfg(all(feature = "stack-canary", target_pointer_width = "64"))]
+#[cfg(target_pointer_width = "64")]
 const STACK_END_MAGIC: usize = 0x57AC_CE11_57AC_CE11usize;
-#[cfg(all(feature = "stack-canary", target_pointer_width = "32"))]
+#[cfg(target_pointer_width = "32")]
 const STACK_END_MAGIC: usize = 0x57AC_CE11usize;
 
 /// Required alignment for task kernel stacks. x86_64 task context setup relies
@@ -67,6 +69,15 @@ pub trait TaskExt {
     fn on_enter(&self) {}
     /// Called when the task is switched out.
     fn on_leave(&self) {}
+    /// Called once per scheduler tick on the CPU currently running this task
+    /// (gated by the `task-tick-hook` feature at the call site).
+    ///
+    /// Lets the OS layer advance periodic CPU-time accounting (utime/stime) for
+    /// a task that neither makes syscalls nor deschedules, matching Linux's
+    /// `TICK_CPU_ACCOUNTING`. Runs in timer-IRQ context with IRQs disabled:
+    /// implementors must not sleep and should treat a re-entrant borrow of
+    /// their per-task state as "skip this tick".
+    fn on_tick(&self) {}
 }
 
 /// The inner task structure.
@@ -96,12 +107,60 @@ pub struct TaskInner {
     /// Used to indicate whether the task is running on a CPU.
     #[cfg(feature = "smp")]
     on_cpu: AtomicBool,
+    /// One-shot cross-core wake handoff.
+    ///
+    /// When a remote CPU wins the `Blocked -> Ready` transition for this task
+    /// while it is still `on_cpu` (its context not yet fully saved on its owning
+    /// CPU), the waker must NOT enqueue it — and must not spin on `on_cpu`
+    /// either (that is the cross-core mutual-wake deadlock). Instead it records
+    /// the target run-queue in `cpu_id` and stashes an owned reference here; the
+    /// owning CPU drains it in `clear_prev_task_on_cpu()` once `on_cpu` is false,
+    /// then enqueues + kicks the target. Holds a `*const AxTask` produced by
+    /// `Arc::into_raw` (null = empty). See `run_queue::put_task_with_state`.
+    #[cfg(feature = "smp")]
+    wake_handoff: AtomicPtr<AxTask>,
+
+    /// Monotonic time (ns) at which this task was last switched off a CPU — its
+    /// cache-warmth clock for the load balancer. The migration paths refuse to
+    /// move a task whose deschedule was more recent than `MIGRATION_COST_NANOS`,
+    /// so a briefly-blocked task is not stolen off its warm core the instant it
+    /// wakes. `0` = never ran (cold). Only for the runtime migration balancers.
+    #[cfg(all(
+        feature = "smp",
+        any(feature = "sched-loadbalance-pull", feature = "sched-loadbalance-push")
+    ))]
+    last_stop_nanos: AtomicU64,
+
+    /// Wake-spread (CPU-boundness) discriminator. `run_start_ns` is the monotonic-ns
+    /// stamp of this task's most recent switch-IN; at switch-OUT `now - run_start_ns`
+    /// is one run stint folded into `run_ewma_ns` (EWMA, α = 1/8). A high EWMA means
+    /// the task holds a core for long stretches (CPU/memory-bound) → on wakeup it is
+    /// spread to a fully-idle sibling instead of coalesced onto the waker; a low EWMA
+    /// (short ping-pong stints) keeps the cache-local wake_affine hand-off. `0` in
+    /// `run_start_ns` = not currently on a CPU (guards the first fold). See
+    /// `run_queue::select_idle_sibling` and [`Self::is_cpu_bound`].
+    #[cfg(feature = "sched-loadbalance-wake-spread")]
+    run_start_ns: AtomicU64,
+    #[cfg(feature = "sched-loadbalance-wake-spread")]
+    run_ewma_ns: AtomicU64,
 
     /// A ticket ID used to identify the timer event.
     /// Set by `set_timer_ticket()` when creating a timer event in `set_alarm_wakeup()`,
     /// expired by setting it as zero in `timer_ticket_expired()`, which is called by `cancel_events()`.
     #[cfg(feature = "irq")]
     timer_ticket_id: AtomicU64,
+
+    /// Wakeup-latency profiling: monotonic-ns stamp taken when this task was made
+    /// runnable (Blocked→Ready), consumed when it is next switched onto a CPU to
+    /// accumulate wake-to-run latency. `0` = no pending wake. See `wakeprof`.
+    #[cfg(feature = "wakeprof")]
+    wake_ns: AtomicU64,
+    /// Wake category for the pending wake: 0 = local (same CPU as waker), 1 =
+    /// cross-core onto an idle target CPU, 2 = cross-core onto a busy target CPU.
+    /// Splitting cross-core by target idleness isolates the IPI→idle-pick mechanism
+    /// cost from run-queue queueing behind a running task.
+    #[cfg(feature = "wakeprof")]
+    wake_cat: AtomicU8,
 
     #[cfg(feature = "preempt")]
     need_resched: AtomicBool,
@@ -112,6 +171,12 @@ pub struct TaskInner {
 
     interrupted: AtomicBool,
     interrupt_waker: AtomicWaker,
+
+    /// Reusable waker for `block_on`, built lazily on first block and reused
+    /// across calls to avoid a per-`block_on` `Arc` allocation on the hot
+    /// pipe/socket IPC path. Only ever touched by the owning task, so the lock
+    /// is uncontended. See `future::cached_block_waker`.
+    block_waker: SpinNoIrq<Option<Arc<crate::future::AxWaker>>>,
 
     exit_code: AtomicI32,
     wait_for_exit: WaitQueue,
@@ -339,6 +404,19 @@ impl TaskInner {
         self.interrupted.store(true, Ordering::Release);
         self.interrupt_waker.wake();
     }
+
+    /// Returns a clone of the task's cached `block_on` waker, if one has been
+    /// built. See `future::cached_block_waker`.
+    #[inline]
+    pub(crate) fn block_waker(&self) -> Option<Arc<crate::future::AxWaker>> {
+        self.block_waker.lock().clone()
+    }
+
+    /// Caches the task's reusable `block_on` waker for subsequent calls.
+    #[inline]
+    pub(crate) fn set_block_waker(&self, waker: Arc<crate::future::AxWaker>) {
+        *self.block_waker.lock() = Some(waker);
+    }
 }
 
 // private methods
@@ -358,9 +436,24 @@ impl TaskInner {
             in_wait_queue: AtomicBool::new(false),
             #[cfg(feature = "irq")]
             timer_ticket_id: AtomicU64::new(0),
+            #[cfg(feature = "wakeprof")]
+            wake_ns: AtomicU64::new(0),
+            #[cfg(feature = "wakeprof")]
+            wake_cat: AtomicU8::new(0),
             cpu_id: AtomicU32::new(0),
             #[cfg(feature = "smp")]
             on_cpu: AtomicBool::new(false),
+            #[cfg(feature = "smp")]
+            wake_handoff: AtomicPtr::new(core::ptr::null_mut()),
+            #[cfg(all(
+                feature = "smp",
+                any(feature = "sched-loadbalance-pull", feature = "sched-loadbalance-push")
+            ))]
+            last_stop_nanos: AtomicU64::new(0),
+            #[cfg(feature = "sched-loadbalance-wake-spread")]
+            run_start_ns: AtomicU64::new(0),
+            #[cfg(feature = "sched-loadbalance-wake-spread")]
+            run_ewma_ns: AtomicU64::new(0),
             #[cfg(feature = "preempt")]
             need_resched: AtomicBool::new(false),
             #[cfg(feature = "preempt")]
@@ -369,6 +462,7 @@ impl TaskInner {
             preempt_disable_count: AtomicUsize::new(0),
             interrupted: AtomicBool::new(false),
             interrupt_waker: AtomicWaker::new(),
+            block_waker: SpinNoIrq::new(None),
             exit_code: AtomicI32::new(0),
             wait_for_exit: WaitQueue::new(),
             kstack,
@@ -582,7 +676,6 @@ impl TaskInner {
         self.ctx.get()
     }
 
-    #[cfg(feature = "stack-canary")]
     #[inline]
     pub(crate) fn check_stack_canary(&self) {
         if self.kstack.is_canary_intact() {
@@ -611,17 +704,139 @@ impl TaskInner {
     /// while it has not finished its scheduling process.
     /// The `on_cpu field is set to `true` when the task is preparing to run on a CPU,
     /// and it is set to `false` when the task has finished its scheduling process in `clear_prev_task_on_cpu()`.
+    ///
+    /// `SeqCst` because it participates in a store-before-load (Dekker) handshake
+    /// with [`Self::stash_wake`]/[`Self::take_wake`] across two distinct atomics
+    /// (`on_cpu` and `wake_handoff`); Acquire/Release would permit the
+    /// "both sides observe the other's stale value" lost-wakeup execution.
     #[cfg(feature = "smp")]
     #[inline]
     pub(crate) fn on_cpu(&self) -> bool {
-        self.on_cpu.load(Ordering::Acquire)
+        self.on_cpu.load(Ordering::SeqCst)
     }
 
-    /// Sets whether the task is running on a CPU.
+    /// Sets whether the task is running on a CPU. `SeqCst`, see [`Self::on_cpu`].
     #[cfg(feature = "smp")]
     #[inline]
     pub(crate) fn set_on_cpu(&self, on_cpu: bool) {
-        self.on_cpu.store(on_cpu, Ordering::Release)
+        self.on_cpu.store(on_cpu, Ordering::SeqCst)
+    }
+
+    /// Wakeup-latency profiling: stamp this task's wake time (monotonic ns) and its
+    /// wake category (0=local, 1=xcore-idle-target, 2=xcore-busy-target). Consumed
+    /// by [`Self::take_wake_ns`].
+    #[cfg(feature = "wakeprof")]
+    #[inline]
+    pub(crate) fn set_wake_stamp(&self, ns: u64, cat: u8) {
+        self.wake_cat.store(cat, Ordering::Relaxed);
+        self.wake_ns.store(ns, Ordering::Relaxed);
+    }
+
+    /// Wakeup-latency profiling: take (and clear) the pending wake stamp. Returns
+    /// `(wake_ns, cat)`; `wake_ns == 0` means there was no pending wake.
+    #[cfg(feature = "wakeprof")]
+    #[inline]
+    pub(crate) fn take_wake_ns(&self) -> (u64, u8) {
+        let ns = self.wake_ns.swap(0, Ordering::Relaxed);
+        (ns, self.wake_cat.load(Ordering::Relaxed))
+    }
+
+    /// Monotonic time (ns) at which this task was last switched off a CPU (cache-warmth
+    /// clock for the load balancer). See the `last_stop_nanos` field.
+    #[cfg(all(
+        feature = "smp",
+        any(feature = "sched-loadbalance-pull", feature = "sched-loadbalance-push")
+    ))]
+    #[inline]
+    pub(crate) fn last_stop_nanos(&self) -> u64 {
+        self.last_stop_nanos.load(Ordering::Relaxed)
+    }
+
+    /// Records that this task was just switched off a CPU at monotonic time `now`.
+    #[cfg(all(
+        feature = "smp",
+        any(feature = "sched-loadbalance-pull", feature = "sched-loadbalance-push")
+    ))]
+    #[inline]
+    pub(crate) fn set_last_stop_nanos(&self, now: u64) {
+        self.last_stop_nanos.store(now, Ordering::Relaxed)
+    }
+
+    /// Wake-spread: EWMA threshold (ns) at/above which a task is CPU-bound. 500 µs is
+    /// ~20× the ~26 µs hackbench ping-pong stint and ~5 % of one 10 ms tick, so a
+    /// messaging partner never crosses it while a streaming worker sits far above.
+    /// Board-A/B swept over {250 µs, 500 µs, 1 ms}; see SCHED_SPREAD_VERIFIED.
+    #[cfg(feature = "sched-loadbalance-wake-spread")]
+    pub(crate) const CPU_BOUND_STINT_NANOS: u64 = 500_000;
+
+    /// Wake-spread: fold one `stint`-ns run into the previous EWMA (α = 1/8, shift-only,
+    /// no divide). Pure — host-unit-tested.
+    #[cfg(feature = "sched-loadbalance-wake-spread")]
+    #[inline]
+    pub(crate) fn ewma_step(prev: u64, stint: u64) -> u64 {
+        prev - (prev >> 3) + (stint >> 3)
+    }
+
+    /// Wake-spread: monotonic-ns stamp of this task's most recent switch-IN
+    /// (`0` = not currently on a CPU). See the `run_start_ns` field.
+    #[cfg(feature = "sched-loadbalance-wake-spread")]
+    #[inline]
+    pub(crate) fn set_run_start_ns(&self, now: u64) {
+        self.run_start_ns.store(now, Ordering::Relaxed)
+    }
+
+    /// Wake-spread: fold the just-finished run stint (`now - run_start_ns`) into the
+    /// EWMA and clear `run_start_ns` (the swap makes a re-entrant call a no-op, so a
+    /// stint is never double-folded). No-op if the task was not marked on-CPU
+    /// (`run_start_ns == 0`) or `now` does not advance past the stamp (monotonic guard).
+    #[cfg(feature = "sched-loadbalance-wake-spread")]
+    #[inline]
+    pub(crate) fn note_stint_end(&self, now: u64) {
+        let start = self.run_start_ns.swap(0, Ordering::Relaxed);
+        if start == 0 || now <= start {
+            return;
+        }
+        let prev = self.run_ewma_ns.load(Ordering::Relaxed);
+        self.run_ewma_ns
+            .store(Self::ewma_step(prev, now - start), Ordering::Relaxed);
+    }
+
+    /// Wake-spread: is this task's EWMA run-stint at/above the CPU-bound threshold?
+    /// Read on the wake hot path — one `Relaxed` load + integer compare.
+    #[cfg(feature = "sched-loadbalance-wake-spread")]
+    #[inline]
+    pub(crate) fn is_cpu_bound(&self) -> bool {
+        self.run_ewma_ns.load(Ordering::Relaxed) >= Self::CPU_BOUND_STINT_NANOS
+    }
+
+    /// Stash an owned reference for a deferred cross-core wake (see the
+    /// `wake_handoff` field). Transfers ownership of `task` into the slot via
+    /// `Arc::into_raw`. Must be paired with exactly one [`Self::take_wake`].
+    #[cfg(feature = "smp")]
+    #[inline]
+    pub(crate) fn stash_wake(&self, task: AxTaskRef) {
+        let ptr = Arc::into_raw(task) as *mut AxTask;
+        // SeqCst: ordered with the `on_cpu` handshake (see `on_cpu`).
+        self.wake_handoff.store(ptr, Ordering::SeqCst);
+    }
+
+    /// Atomically consume a stashed deferred-wake reference, if any. Returns the
+    /// owned `AxTaskRef` to exactly one caller (the swap is the single arbiter);
+    /// all other callers get `None`.
+    #[cfg(feature = "smp")]
+    #[inline]
+    pub(crate) fn take_wake(&self) -> Option<AxTaskRef> {
+        let ptr = self
+            .wake_handoff
+            .swap(core::ptr::null_mut(), Ordering::SeqCst);
+        if ptr.is_null() {
+            None
+        } else {
+            // Safety: `ptr` came from `Arc::into_raw` in `stash_wake`, and the
+            // swap guarantees a single consumer, so this reconstructs the unique
+            // owning `Arc` exactly once.
+            Some(unsafe { Arc::from_raw(ptr as *const AxTask) })
+        }
     }
 }
 
@@ -683,10 +898,7 @@ impl TaskStack {
             align,
             kind: TaskStackKind::Alloc,
         };
-        #[cfg(feature = "stack-canary")]
-        unsafe {
-            stack.write_canary()
-        };
+        unsafe { stack.write_canary() };
         stack
     }
 
@@ -708,10 +920,7 @@ impl TaskStack {
             kind: TaskStackKind::GuardedAlloc,
         };
         stack.unmap_guard_page();
-        #[cfg(feature = "stack-canary")]
-        unsafe {
-            stack.write_canary()
-        };
+        unsafe { stack.write_canary() };
         stack
     }
 
@@ -728,14 +937,10 @@ impl TaskStack {
             alloc_pages: 0,
             kind: TaskStackKind::Borrowed,
         };
-        #[cfg(feature = "stack-canary")]
-        unsafe {
-            stack.write_canary()
-        };
+        unsafe { stack.write_canary() };
         stack
     }
 
-    #[cfg(feature = "stack-canary")]
     #[inline]
     pub fn bottom(&self) -> VirtAddr {
         VirtAddr::from(self.ptr)
@@ -793,24 +998,21 @@ impl TaskStack {
     }
 
     #[inline]
-    #[cfg(feature = "stack-canary")]
     fn canary_ptr(&self) -> *mut usize {
         self.ptr as *mut usize
     }
 
     #[inline]
-    #[cfg(feature = "stack-canary")]
     unsafe fn write_canary(&self) {
         unsafe { self.canary_ptr().write(STACK_END_MAGIC) };
     }
 
     #[inline]
-    #[cfg(feature = "stack-canary")]
     pub fn is_canary_intact(&self) -> bool {
         unsafe { self.canary_ptr().read() == STACK_END_MAGIC }
     }
 
-    #[cfg(all(test, feature = "stack-canary", not(feature = "stack-guard-page")))]
+    #[cfg(all(test, not(feature = "stack-guard-page")))]
     fn corrupt_canary_for_test(&self) {
         unsafe { self.canary_ptr().write(0) };
     }
@@ -913,7 +1115,7 @@ impl Drop for TaskStack {
 mod stack_tests {
     use super::{TASK_STACK_ALIGN, TaskStack};
 
-    #[cfg(all(feature = "stack-canary", not(feature = "stack-guard-page")))]
+    #[cfg(not(feature = "stack-guard-page"))]
     #[test]
     fn task_stack_canary_detects_corruption() {
         let stack = TaskStack::alloc(0x1000);
@@ -924,7 +1126,7 @@ mod stack_tests {
         assert!(!stack.is_canary_intact());
     }
 
-    #[cfg(all(feature = "stack-canary", not(feature = "stack-guard-page")))]
+    #[cfg(not(feature = "stack-guard-page"))]
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn task_stack_top_stays_16_byte_aligned() {

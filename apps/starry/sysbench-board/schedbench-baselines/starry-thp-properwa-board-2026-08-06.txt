@@ -1,0 +1,38 @@
+SCHEDBENCH_BEGIN
+### hackbench -p -g 2 -P
+Time: 0.893
+### hackbench -p -g 5 -P
+Time: 3.116
+### hackbench -p -g 10 -P
+Time: 7.714
+### hackbench -p -g 2 -T
+Time: 2.538
+### hackbench -p -g 5 -T
+Time: 6.675
+### hackbench -p -g 10 -T
+Time: 27.714
+### schbench -m 1 -t 4 -r 5
+Wakeup Latencies percentiles (usec) runtime 5 (s) (580 total samples)
+	  50.0th: 9          (0 samples)
+	  90.0th: 3956       (224 samples)
+	* 99.0th: 26400      (53 samples)
+Request Latencies percentiles (usec) runtime 5 (s) (580 total samples)
+	  50.0th: 24608      (135 samples)
+	  90.0th: 50240      (228 samples)
+	* 99.0th: 95104      (52 samples)
+	* 50.0th: 109        (1 samples)
+	  90.0th: 125        (3 samples)
+average rps: 116.00
+### schbench -m 2 -t 8 -r 5
+Wakeup Latencies percentiles (usec) runtime 5 (s) (468 total samples)
+	  50.0th: 25120      (141 samples)
+	  90.0th: 75648      (188 samples)
+	* 99.0th: 129152     (41 samples)
+Request Latencies percentiles (usec) runtime 5 (s) (468 total samples)
+	  50.0th: 99456      (140 samples)
+	  90.0th: 214272     (188 samples)
+	* 99.0th: 348672     (42 samples)
+	* 50.0th: 84         (2 samples)
+	  90.0th: 92         (2 samples)
+average rps: 93.60
+SCHEDBENCH_DONE

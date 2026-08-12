@@ -13,12 +13,18 @@ mod user;
 
 use alloc::{boxed::Box, collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 use core::{
-    cell::RefCell,
-    ops::Deref,
+    future::poll_fn,
     sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicUsize, Ordering},
+    task::Poll,
 };
+#[cfg(feature = "tickacct")]
+use core::sync::atomic::AtomicU64;
 
 use ax_errno::AxResult;
+use ax_kernel_guard::NoPreemptIrqSave;
+use ax_kspin::SpinRwLock as RwLock;
+#[cfg(feature = "tickacct")]
+use ax_runtime::hal::time::monotonic_time_nanos;
 use ax_runtime::hal::{cpu::uspace::UserContext, time::TimeValue};
 use ax_sync::{Mutex, spin::SpinNoIrq};
 use ax_task::{TaskExt, TaskInner};
@@ -26,7 +32,6 @@ use axpoll::{IoEvents, PollSet};
 use extern_trait::extern_trait;
 use kernel_elf_parser::AuxEntry;
 use scope_local::{ActiveScope, Scope};
-use spin::RwLock;
 use starry_process::{Pid, Process};
 use starry_signal::{
     SignalInfo, SignalSet, Signo,
@@ -61,29 +66,6 @@ struct PtracePendingEvent {
     msg: usize,
 }
 use crate::mm::AddrSpace;
-
-/// Size of the syscall instruction for the current architecture.
-/// Used by SA_RESTART to back up the program counter.
-#[cfg(target_arch = "x86_64")]
-pub const SYSCALL_INSN_LEN: usize = 2;
-/// Size of the syscall instruction for the current architecture.
-/// Used by SA_RESTART to back up the program counter.
-#[cfg(not(target_arch = "x86_64"))]
-pub const SYSCALL_INSN_LEN: usize = 4;
-
-///  A wrapper type that assumes the inner type is `Sync`.
-#[repr(transparent)]
-pub struct AssumeSync<T>(pub T);
-
-unsafe impl<T> Sync for AssumeSync<T> {}
-
-impl<T> Deref for AssumeSync<T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
 
 /// A one-shot flag that suppresses exactly one signal check.
 struct NextSignalCheckBlock(AtomicBool);
@@ -133,17 +115,61 @@ pub struct Thread {
     /// The thread-level signal manager
     pub signal: Arc<ThreadSignalManager>,
 
-    /// Time manager
+    /// Time manager.
     ///
-    /// This is assumed to be `Sync` because it's only borrowed mutably during
-    /// context switches, which is exclusive to the current thread.
-    pub time: AssumeSync<RefCell<TimeManager>>,
+    /// An IRQ-disabling spinlock (not a `RefCell`): CPU-time accounting borrows
+    /// this from the timer IRQ / context switch on the thread's own CPU, while
+    /// the alarm task and cross-CPU readers (`getrusage`, `/proc`) borrow it
+    /// from other CPUs. The lock is only ever held for a handful of field
+    /// updates with no nested lock (interval-timer signals are returned from
+    /// `poll()` and emitted after unlocking), so critical sections are short
+    /// and cannot deadlock. IRQ paths use `try_lock` and skip on contention.
+    pub time: SpinNoIrq<TimeManager>,
+
+    /// Lock-free User/Kernel accounting state (a [`TimerState`] discriminant).
+    ///
+    /// Held outside the `time` lock so a syscall boundary can flip it with a
+    /// single Relaxed store — no lock, no accounting. The tick/switch accounting
+    /// (`on_tick`/`on_leave`/`tick_cpu_time`) and the itimer poll read it back to
+    /// attribute the elapsed slice (Linux `TICK_CPU_ACCOUNTING`). Relaxed is
+    /// sufficient: it is only a per-CPU sampling hint for the accounting, which
+    /// is itself serialized by the `time` lock.
+    pub timer_state: AtomicU8,
+
+    /// Lock-free hint: does this thread have any interval timer armed?
+    ///
+    /// Lets `set_timer_state` (tickacct) decide between the lock-free common
+    /// path and the itimer-servicing poll without taking the `time` lock. Kept
+    /// exact by `sys_setitimer` under the lock, and self-corrected by
+    /// `set_timer_state` at the next syscall boundary that runs `poll()` (it
+    /// resyncs the hint from the same locked snapshot), so a fired one-shot
+    /// itimer clears the hint there rather than lagging until the next
+    /// `setitimer`.
+    #[cfg(feature = "tickacct")]
+    pub itimer_armed: AtomicBool,
+
+    /// Lock-free monotonic timestamp (ns) of the last time this thread was
+    /// switched onto a CPU (`on_enter`).
+    ///
+    /// It floors the billing baseline in `tick()`/`poll()` (via
+    /// [`resume_floor_ns`](Thread::resume_floor_ns)) so the interval a thread
+    /// spent descheduled is never charged to its utime/stime. Unlike a lock
+    /// (which `on_enter` can only `try_lock` inside the context switch, and thus
+    /// may drop on cross-CPU contention), a Relaxed store can never be dropped —
+    /// so a long deschedule cannot leak into CPU time even if the resume races a
+    /// cross-CPU reader/alarm holding the `time` lock.
+    #[cfg(feature = "tickacct")]
+    pub resume_ns: AtomicU64,
 
     /// The OOM score adjustment value.
     oom_score_adj: AtomicI32,
 
     /// Ready to exit
     pub exit: Arc<AtomicBool>,
+
+    /// Woken when a signal arrives at this thread, so signalfd/epoll pollers
+    /// can observe newly-pending signals even when the signal is blocked.
+    pub signalfd_waker: PollSet,
 
     /// Indicates whether the thread is currently accessing user memory.
     accessing_user_memory: AtomicBool,
@@ -175,6 +201,13 @@ pub struct Thread {
     /// seccomp syscall filtering state.
     seccomp: SpinNoIrq<SeccompState>,
 
+    /// Lock-free mirror of `seccomp.is_active()`. Read on every syscall to skip the
+    /// `seccomp` lock + `SeccompState` clone + evaluate when no filter is installed
+    /// (the overwhelmingly common case). seccomp is one-way (disabled -> active, never
+    /// back), so this only ever transitions false -> true and can never bypass an
+    /// installed filter. Mirrors Linux's `TIF_SECCOMP` bit.
+    seccomp_active: AtomicBool,
+
     /// Process credentials (uid, gid, etc.).
     cred: SpinNoIrq<Arc<Cred>>,
 
@@ -199,6 +232,21 @@ pub struct Thread {
 
     /// Whether setgroups has been set to "deny" for this thread's user namespace.
     setgroups_deny: AtomicBool,
+
+    /// Per-task hardware-PMU counters attached to this thread by
+    /// `perf_event_open(pid > 0)`. Driven by the scheduler hooks
+    /// ([`crate::perf::task::perf_sched_in`] / `perf_sched_out`) under this
+    /// `SpinNoIrq` (the hooks run with IRQs disabled). Empty for the common case
+    /// where no per-task perf event targets this thread.
+    #[cfg(target_arch = "aarch64")]
+    pub(crate) perf_counters: SpinNoIrq<Vec<Arc<crate::perf::task::PerTaskCounter>>>,
+
+    /// Per-task software perf counters (`PERF_TYPE_SOFTWARE`) attached by
+    /// `perf_event_open`. Driven by the scheduler + fault hooks
+    /// ([`crate::perf::sw::sched_in`] / `sched_out` / `on_page_fault`). Empty for
+    /// the common case where no software perf event targets this thread. Software
+    /// events are pure accounting (no PMU), so this is arch-independent.
+    pub(crate) perf_sw_counters: SpinNoIrq<Vec<Arc<crate::perf::sw::SwPerTaskCounter>>>,
 }
 
 impl Thread {
@@ -223,7 +271,12 @@ impl Thread {
             proc_data,
             clear_child_tid: AtomicUsize::new(0),
             robust_list_head: AtomicUsize::new(0),
-            time: AssumeSync(RefCell::new(TimeManager::new())),
+            time: SpinNoIrq::new(TimeManager::new()),
+            timer_state: AtomicU8::new(TimerState::None as u8),
+            #[cfg(feature = "tickacct")]
+            itimer_armed: AtomicBool::new(false),
+            #[cfg(feature = "tickacct")]
+            resume_ns: AtomicU64::new(0),
             exit: Arc::new(AtomicBool::new(false)),
             oom_score_adj: AtomicI32::new(200),
             accessing_user_memory: AtomicBool::new(false),
@@ -234,15 +287,21 @@ impl Thread {
             rseq_signature: AtomicU32::new(0),
             pdeathsig: AtomicU32::new(0),
             no_new_privs: AtomicBool::new(false),
+            seccomp_active: AtomicBool::new(false),
             seccomp: SpinNoIrq::new(SeccompState::default()),
             cred: SpinNoIrq::new(cred),
 
+            signalfd_waker: PollSet::new(),
             fault_dump_signo: AtomicU8::new(0),
             kretprobe_stack: SpinNoIrq::new(alloc::vec::Vec::new()),
 
             uid_map_written: AtomicBool::new(false),
             gid_map_written: AtomicBool::new(false),
             setgroups_deny: AtomicBool::new(false),
+
+            #[cfg(target_arch = "aarch64")]
+            perf_counters: SpinNoIrq::new(Vec::new()),
+            perf_sw_counters: SpinNoIrq::new(Vec::new()),
         })
     }
 
@@ -354,6 +413,12 @@ impl Thread {
         self.no_new_privs.store(true, Ordering::Relaxed);
     }
 
+    /// Lock-free check of whether any seccomp mode is installed. When false, the
+    /// syscall dispatch skips the seccomp lock+clone+evaluate entirely.
+    pub fn seccomp_active(&self) -> bool {
+        self.seccomp_active.load(Ordering::Acquire)
+    }
+
     /// Get a snapshot of the current seccomp state.
     pub fn seccomp_state(&self) -> SeccompState {
         self.seccomp.lock().clone()
@@ -361,17 +426,24 @@ impl Thread {
 
     /// Replace seccomp state. Used by clone inheritance.
     pub fn set_seccomp_state(&self, state: SeccompState) {
+        // Publish activeness before/with the state so a concurrent syscall reader
+        // never sees active=false while the filter is installed.
+        self.seccomp_active.store(state.is_active(), Ordering::Release);
         *self.seccomp.lock() = state;
     }
 
     /// Enable strict seccomp mode.
     pub fn install_seccomp_strict(&self) -> AxResult<()> {
-        self.seccomp.lock().install_strict()
+        self.seccomp.lock().install_strict()?;
+        self.seccomp_active.store(true, Ordering::Release);
+        Ok(())
     }
 
     /// Append a seccomp filter. Filters are inherited and evaluated in order.
     pub fn append_seccomp_filter(&self, insns: Vec<SockFilter>) -> AxResult<()> {
-        self.seccomp.lock().append_filter(insns)
+        self.seccomp.lock().append_filter(insns)?;
+        self.seccomp_active.store(true, Ordering::Release);
+        Ok(())
     }
 
     /// Get a snapshot of the current credentials (clones the `Arc`).
@@ -483,19 +555,91 @@ impl Thread {
     pub fn unblock_next_signal_check(&self) -> bool {
         self.block_next_signal_check.unblock()
     }
+
+    /// The lower bound (monotonic ns) for CPU-time billing: the instant this
+    /// thread last resumed onto a CPU. `tick()`/`poll()` clamp their baseline to
+    /// at least this so a descheduled interval is never billed to utime/stime.
+    ///
+    /// Folds to `0` without `tickacct` (exact per-boundary accounting keeps its
+    /// own baseline and needs no floor), making that build byte-identical.
+    #[inline]
+    pub(crate) fn resume_floor_ns(&self) -> usize {
+        #[cfg(feature = "tickacct")]
+        {
+            self.resume_ns.load(Ordering::Relaxed) as usize
+        }
+        #[cfg(not(feature = "tickacct"))]
+        {
+            0
+        }
+    }
 }
 
 #[extern_trait]
 impl TaskExt for Box<Thread> {
     fn on_enter(&self) {
+        // Record the resume instant so the interval this thread spent
+        // descheduled is not billed to it: `tick()`/`poll()` floor their billing
+        // baseline at `resume_ns` (see `resume_floor_ns`). A lock-free Relaxed
+        // store can never be dropped, so — unlike a `try_lock` on the `time` lock
+        // inside the context switch — a resume that races a cross-CPU
+        // reader/alarm still discards the descheduled gap. Never block here.
+        #[cfg(feature = "tickacct")]
+        self.resume_ns
+            .store(monotonic_time_nanos(), Ordering::Relaxed);
         let scope = self.proc_data.scope.read();
         unsafe { ActiveScope::set(&scope) };
         core::mem::forget(scope);
+        // Program any per-task perf counters onto HW for this slice. Runs with
+        // IRQs disabled inside `switch_to`; the hook early-returns cheaply when
+        // no per-task perf event exists anywhere.
+        #[cfg(target_arch = "aarch64")]
+        crate::perf::task::perf_sched_in(self);
+        // Open the software counters' slice (task-clock / cpu-migrations); cheap
+        // no-op when no software perf event exists.
+        crate::perf::sw::sched_in(self);
     }
 
     fn on_leave(&self) {
+        // Account this thread's CPU slice before it leaves the CPU, so a task
+        // that blocks or yields between ticks still records the time it ran.
+        // `tick()` bills [max(last_tick, resume_ns), now] to utime/stime by the
+        // current TimerState and advances last_tick; the `resume_ns` floor (set
+        // in `on_enter`) keeps the descheduled gap out. Skip on lock contention
+        // (never block the context switch); the lost slice is at most one tick.
+        #[cfg(feature = "tickacct")]
+        {
+            let state = TimerState::from_u8(self.timer_state.load(Ordering::Relaxed));
+            let floor = self.resume_floor_ns();
+            if let Some(mut time) = self.time.try_lock() {
+                time.tick(state, floor);
+            }
+        }
+        // Fold this slice's per-task perf counter deltas and stop the counters
+        // before the scope is torn down. Same hot-path constraints as on_enter.
+        #[cfg(target_arch = "aarch64")]
+        crate::perf::task::perf_sched_out(self);
+        // Fold the software counters' slice (task-clock) and count the deschedule
+        // (context-switches); cheap no-op when no software perf event exists.
+        crate::perf::sw::sched_out(self);
         ActiveScope::set_global();
         unsafe { self.proc_data.scope.force_read_decrement() };
+    }
+
+    fn on_tick(&self) {
+        // Periodic per-tick CPU-time accounting (all CPUs). Advances utime/stime
+        // by the elapsed slice, attributed to the current TimerState (User or
+        // Kernel), matching Linux `TICK_CPU_ACCOUNTING`. Runs in timer-IRQ
+        // context: use `try_lock` and skip on contention (a cross-CPU reader or
+        // the thread mid state-transition), matching `tick_cpu_time`.
+        #[cfg(feature = "tickacct")]
+        {
+            let state = TimerState::from_u8(self.timer_state.load(Ordering::Relaxed));
+            let floor = self.resume_floor_ns();
+            if let Some(mut time) = self.time.try_lock() {
+                time.tick(state, floor);
+            }
+        }
     }
 }
 
@@ -538,6 +682,29 @@ impl VforkDone {
     pub fn new(poll: Arc<PollSet>) -> Self {
         Self { done: false, poll }
     }
+}
+
+/// Waits on a [`PollSet`] after a caller-supplied condition reports no
+/// immediate result.
+///
+/// The condition is checked before and after waker registration, so callers
+/// avoid lost wakeups.
+pub async fn wait_on_pollset<T>(poll: &PollSet, mut check: impl FnMut() -> Option<T>) -> T {
+    poll_fn(move |cx| {
+        if let Some(value) = check() {
+            return Poll::Ready(value);
+        }
+
+        // Registration happens from wait task context.
+        unsafe { poll.register(cx.waker(), IoEvents::IN) };
+
+        if let Some(value) = check() {
+            Poll::Ready(value)
+        } else {
+            Poll::Pending
+        }
+    })
+    .await
 }
 
 /// A pending job-control status change awaiting report to the parent's
@@ -673,8 +840,10 @@ pub struct ProcessData {
     dumpable: AtomicI32,
 
     /// PR_GET_THP_DISABLE / PR_SET_THP_DISABLE value.
-    /// StarryOS does not implement transparent huge pages, but userspace may
-    /// set this as a compatibility hint and later query it.
+    /// With the `thp` feature this gates real 2 MiB huge-page promotion (checked
+    /// by `thp_eligible`); without the feature THP is a no-op and this value is
+    /// only stored and queried for userspace compatibility. Inherited across
+    /// `clone`.
     thp_disable: AtomicU32,
 
     /// Accumulated CPU time of waited children (utime + stime).
@@ -916,7 +1085,10 @@ impl ProcessData {
     /// `TaskExt::on_enter` leaves the current task's active scope installed by
     /// holding one read count on [`Self::scope`]. A syscall running in that task
     /// must temporarily release that read count before taking the write side.
+    /// The closure runs with preemption and local IRQs disabled, so it should
+    /// only install already-prepared scope entries.
     pub fn with_current_scope_mut<R>(&self, f: impl FnOnce(&mut Scope) -> R) -> R {
+        let _guard = NoPreemptIrqSave::new();
         ActiveScope::set_global();
         unsafe { self.scope.force_read_decrement() };
         let mut scope = self.scope.write();

@@ -1,0 +1,83 @@
+WAKEPROF_BEGIN
+
+WP_UNAME Linux 10.0.0 aarch64
+
+=== schbench -m 1 -t 4 (1:1-ish, should be mostly local) ===
+
+	  50.0th: 1202       (177 samples)
+
+	  50.0th: 24416      (130 samples)
+
+	* 50.0th: 128        (1 samples)
+
+average rps: 129.40
+
+--- /proc/wakeprof after schbench_m1t4 ---
+
+wake-to-run latency profile (percentiles = bucket upper bound)
+
+local         count=1455 avg_us=1876 p50_us=2 p90_us=8388 p99_us=33554 max_us=66660
+
+xcore_idle    count=1247 avg_us=665 p50_us=1048 p90_us=2097 p99_us=4194 max_us=2650
+
+xcore_busy    count=307 avg_us=743 p50_us=1048 p90_us=1048 p99_us=2097 max_us=21404
+
+cross-core hop breakdown:
+
+ipi_deliver   count=1388 avg_us=1025 p50_us=1048 p90_us=2097 p99_us=4194 max_us=4036
+
+pick_after_h  count=1389 avg_us=1 p50_us=2 p90_us=4 p99_us=4 max_us=12
+
+ipi_sent=1390 ipi_suppressed=68 xcore_deferred=128
+
+=== schbench -m 2 -t 8 (more threads -> more cross-core) ===
+
+	  50.0th: 22176      (128 samples)
+
+	  50.0th: 98432      (127 samples)
+
+	* 50.0th: 74         (2 samples)
+
+average rps: 85.00
+
+--- /proc/wakeprof after schbench_m2t8 ---
+
+wake-to-run latency profile (percentiles = bucket upper bound)
+
+local         count=1036 avg_us=21377 p50_us=1048 p90_us=134217 p99_us=134217 max_us=144397
+
+xcore_idle    count=334 avg_us=537 p50_us=524 p90_us=2097 p99_us=2097 max_us=1440
+
+xcore_busy    count=437 avg_us=20645 p50_us=4194 p90_us=67108 p99_us=134217 max_us=147655
+
+cross-core hop breakdown:
+
+ipi_deliver   count=676 avg_us=1024 p50_us=1048 p90_us=2097 p99_us=2097 max_us=2846
+
+pick_after_h  count=676 avg_us=7 p50_us=2 p90_us=2 p99_us=4 max_us=2057
+
+ipi_sent=679 ipi_suppressed=89 xcore_deferred=32
+
+=== hackbench -p -g 5 -P (fan-out, heavy cross-core) ===
+
+Time: 1.272
+
+--- /proc/wakeprof after hackbench_g5P ---
+
+wake-to-run latency profile (percentiles = bucket upper bound)
+
+local         count=6955 avg_us=4948 p50_us=262 p90_us=16777 p99_us=67108 max_us=113314
+
+xcore_idle    count=888 avg_us=621 p50_us=1048 p90_us=1048 p99_us=2097 max_us=1444
+
+xcore_busy    count=5043 avg_us=9245 p50_us=4194 p90_us=33554 p99_us=67108 max_us=103212
+
+cross-core hop breakdown:
+
+ipi_deliver   count=2375 avg_us=1050 p50_us=1048 p90_us=2097 p99_us=4194 max_us=2798
+
+pick_after_h  count=2376 avg_us=6 p50_us=2 p90_us=2 p99_us=4 max_us=2054
+
+ipi_sent=2398 ipi_suppressed=3668 xcore_deferred=261
+
+WAKEPROF_DONE
