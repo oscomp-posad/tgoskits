@@ -1,0 +1,11 @@
+target = "aarch64-unknown-none-softfloat"
+features = [
+  "ax-driver/rockchip-soc",
+  "ax-driver/rockchip-sdhci",
+  "ax-driver/rockchip-dwmmc",
+  "ax-driver/rk3588-cpufreq",
+  "ax-driver/rk3588-ddr-dvfs",
+  "starry-kernel/thp",
+]
+log = "Info"
+max_cpu_num = 8

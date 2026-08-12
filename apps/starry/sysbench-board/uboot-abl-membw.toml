@@ -1,0 +1,10 @@
+# ABLATION uboot driver: boot StarryOS, run abl-bench.sh membw, gate on ABLDONE.
+# Numbers are read back from /home/orangepi/abl/out/membw.txt over ssh after reboot.
+serial = "/dev/cu.usbserial-AQ03MLX2"
+baud_rate = "1500000"
+dtb_file = "os/StarryOS/configs/board/orangepi-5-plus.dtb"
+shell_prefix = "root@starry:/root #"
+shell_init_cmd = "/home/orangepi/abl/abl-bench.sh membw"
+success_regex = ["ABLDONE"]
+fail_regex = ["panicked at", "Kernel panic", "Unhandled", "Data abort"]
+timeout = 240

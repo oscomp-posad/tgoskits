@@ -1,0 +1,16 @@
+### ABL profile=hbT tag=run reps=7 Linux 10.0.0
+HB -T g5 r1 : Time: 1.647
+HB -T g5 r2 : Time: 4.839
+HB -T g5 r3 : Time: 2.936
+HB -T g5 r4 : Time: 1.066
+HB -T g5 r5 : Time: 3.843
+HB -T g5 r6 : Time: 1.460
+HB -T g5 r7 : Time: 1.758
+HB -T g10 r1 : Time: 1.441
+HB -T g10 r2 : Time: 2.280
+HB -T g10 r3 : Time: 1.260
+HB -T g10 r4 : Time: 1.416
+HB -T g10 r5 : Time: 1.663
+HB -T g10 r6 : Time: 1.623
+HB -T g10 r7 : Time: 4.351
+### ABL_DONE profile=hbT tag=run >>>ABLDONE<<<

@@ -1,0 +1,16 @@
+### ABL profile=membw tag=run reps=3 Linux 10.0.0
+MEMBW2 r1 MEM_BW2 UNPIN threads=1 aggregate=12.4 GB/s
+MEMBW2 r1 MEM_BW2 UNPIN threads=2 aggregate=28.0 GB/s
+MEMBW2 r1 MEM_BW2 UNPIN threads=4 aggregate=64.9 GB/s
+MEMBW2 r1 MEM_BW2 UNPIN threads=8 aggregate=151.4 GB/s
+MEMBW2 r2 MEM_BW2 UNPIN threads=1 aggregate=28.8 GB/s
+MEMBW2 r2 MEM_BW2 UNPIN threads=2 aggregate=22.4 GB/s
+MEMBW2 r2 MEM_BW2 UNPIN threads=4 aggregate=72.2 GB/s
+MEMBW2 r2 MEM_BW2 UNPIN threads=8 aggregate=143.3 GB/s
+MEMBW2 r3 MEM_BW2 UNPIN threads=1 aggregate=29.4 GB/s
+MEMBW2 r3 MEM_BW2 UNPIN threads=2 aggregate=28.4 GB/s
+MEMBW2 r3 MEM_BW2 UNPIN threads=4 aggregate=72.8 GB/s
+MEMBW2 r3 MEM_BW2 UNPIN threads=8 aggregate=149.8 GB/s
+BAR2 BAR2 T0 cpu 4 4
+BAR2 BAR2 T1 cpu 4 4
+### ABL_DONE profile=membw tag=run >>>ABLDONE<<<

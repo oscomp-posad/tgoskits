@@ -1,0 +1,113 @@
+### ABL profile=all tag=linux Linux 6.1.43-rockchip-rk3588 date=Mon Dec 23 09:43:48 PM CST 2024
+-- sysbench cpu A55(cpu0) 1T --
+A55_1T     events per second:   344.63
+A55_1T     total number of events:              3447
+-- sysbench cpu A76(cpu4) 1T --
+A76_1T     events per second:   964.13
+A76_1T     total number of events:              9643
+-- sysbench cpu 8T --
+ALL_8T     events per second:  5227.33
+ALL_8T     total number of events:              52289
+-- sysbench mutex 8T --
+MUTEX8     total time:                          0.4832s
+MUTEX8     total number of events:              8
+-- sysbench threads 8T --
+THREADS8     total time:                          10.0029s
+THREADS8     total number of events:              60760
+-- sysbench memory 8T --
+MEM8 20480.00 MiB transferred (56235.93 MiB/sec)
+MEM8     total time:                          0.3621s
+HB -P g2 : Time: 0.044
+HB -P g5 : Time: 0.081
+HB -P g10 : Time: 0.150
+HB -T g2 : Time: 0.038
+HB -T g5 : Time: 0.091
+HB -T g10 : Time: 0.163
+-- schbench m1 t4 (wakeup + RPS) --
+SCH_m1t4 Wakeup Latencies percentiles (usec) runtime 10 (s) (1988 total samples)
+SCH_m1t4 Request Latencies percentiles (usec) runtime 10 (s) (1984 total samples)
+SCH_m1t4 RPS percentiles (requests) runtime 10 (s) (11 total samples)
+SCH_m1t4 current rps: 197.98
+SCH_m1t4 Wakeup Latencies percentiles (usec) runtime 10 (s) (1988 total samples)
+SCH_m1t4 Request Latencies percentiles (usec) runtime 10 (s) (1988 total samples)
+SCH_m1t4 RPS percentiles (requests) runtime 10 (s) (11 total samples)
+SCH_m1t4 average rps: 198.80
+-- syscost (getpid ns) --
+SYSCOST SYSCOST getpid  175.1 ns/syscall
+SYSCOST SYSCOST pipe_wr  589.4 ns/(write+read)
+-- thp_narrow (first-touch) --
+THP THP_NARROW begin ncpu=8
+THP   iter=0 madvise rc=-1 errno=22
+THP   iter=1 madvise rc=-1 errno=22
+THP   iter=2 madvise rc=-1 errno=22
+THP   iter=3 madvise rc=-1 errno=22
+THP   iter=4 madvise rc=-1 errno=22
+THP   iter=5 madvise rc=-1 errno=22
+THP   iter=6 madvise rc=-1 errno=22
+THP   iter=7 madvise rc=-1 errno=22
+THP PHASE single_2M      bytes=2097152 readers=0 split=1 iters=8 ok=0 corrupt=0 rej=8
+THP   iter=0 madvise rc=-1 errno=22
+THP   iter=1 madvise rc=-1 errno=22
+THP   iter=2 madvise rc=-1 errno=22
+THP   iter=3 madvise rc=-1 errno=22
+THP   iter=4 madvise rc=-1 errno=22
+THP   iter=5 madvise rc=-1 errno=22
+THP   iter=6 madvise rc=-1 errno=22
+THP   iter=7 madvise rc=-1 errno=22
+THP   iter=8 madvise rc=-1 errno=22
+THP   iter=9 madvise rc=-1 errno=22
+THP   iter=10 madvise rc=-1 errno=22
+THP   iter=11 madvise rc=-1 errno=22
+THP   iter=12 madvise rc=-1 errno=22
+THP   iter=13 madvise rc=-1 errno=22
+THP   iter=14 madvise rc=-1 errno=22
+THP   iter=15 madvise rc=-1 errno=22
+THP PHASE smp_2M         bytes=2097152 readers=7 split=1 iters=16 ok=0 corrupt=0 rej=16
+THP   iter=0 base=0x7f979f4000
+THP   iter=1 base=0x7f979f4000
+THP   iter=2 base=0x7f979f4000
+THP   iter=3 base=0x7f979f4000
+THP   iter=4 base=0x7f979f4000
+THP   iter=5 base=0x7f979f4000
+THP PHASE nosplit_32M    bytes=33554432 readers=0 split=0 iters=6 ok=6 corrupt=0 rej=0
+THP   iter=0 base=0x7f979f4000
+THP   iter=0 madvise rc=-1 errno=22
+THP   iter=1 base=0x7f979f4000
+THP   iter=1 madvise rc=-1 errno=22
+THP   iter=2 base=0x7f979f4000
+THP   iter=2 madvise rc=-1 errno=22
+THP   iter=3 base=0x7f979f4000
+THP   iter=3 madvise rc=-1 errno=22
+THP   iter=4 base=0x7f979f4000
+THP   iter=4 madvise rc=-1 errno=22
+THP   iter=5 base=0x7f979f4000
+THP   iter=5 madvise rc=-1 errno=22
+THP PHASE split_32M      bytes=33554432 readers=0 split=1 iters=6 ok=0 corrupt=0 rej=6
+THP THP_NARROW_DONE
+-- mem_bw2 2T --
+MEMBW2 MEM_BW2_BEGIN mode=UNPIN ncpu=8 buf=256KiB window=1200ms
+MEMBW2 MEM_BW2 UNPIN threads=1 aggregate=34.1 GB/s
+MEMBW2   T0 cpu-residency: 2 5 5  (34.1 GB/s)
+MEMBW2 MEM_BW2 UNPIN threads=2 aggregate=67.9 GB/s
+MEMBW2   T0 cpu-residency: 2 4 4  (34.0 GB/s)
+MEMBW2   T1 cpu-residency: 3 6 6  (33.9 GB/s)
+MEMBW2 MEM_BW2 UNPIN threads=4 aggregate=139.2 GB/s
+MEMBW2   T0 cpu-residency: 4 4 4  (34.9 GB/s)
+MEMBW2   T1 cpu-residency: 3 6 6  (34.4 GB/s)
+MEMBW2   T2 cpu-residency: 5 5 5  (34.9 GB/s)
+MEMBW2   T3 cpu-residency: 7 7 7  (35.0 GB/s)
+MEMBW2 MEM_BW2 UNPIN threads=8 aggregate=189.0 GB/s
+MEMBW2   T0 cpu-residency: 3 3 3  (12.5 GB/s)
+MEMBW2   T1 cpu-residency: 2 2 2  (12.5 GB/s)
+MEMBW2   T2 cpu-residency: 0 0 0  (12.5 GB/s)
+MEMBW2   T3 cpu-residency: 1 1 1  (12.5 GB/s)
+MEMBW2   T4 cpu-residency: 4 4 4  (34.7 GB/s)
+MEMBW2   T5 cpu-residency: 5 5 5  (34.8 GB/s)
+MEMBW2   T6 cpu-residency: 6 6 6  (34.7 GB/s)
+MEMBW2   T7 cpu-residency: 7 7 7  (34.8 GB/s)
+MEMBW2 MEM_BW2_DONE mode=UNPIN
+-- bar2 (barrier spread) --
+BAR2 BAR2 T1 cpu 6 6
+BAR2 BAR2 T0 cpu 5 5
+BAR2 BAR2_DONE
+### ABL_DONE profile=all tag=linux >>>ABLDONE<<<

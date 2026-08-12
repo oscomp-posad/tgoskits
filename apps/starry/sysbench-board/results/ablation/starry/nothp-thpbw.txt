@@ -1,0 +1,5 @@
+### ABL profile=thpbw tag=run reps=3 Linux 10.0.0
+THPBW r0 MiB=256 firsttouch=0.92 GB/s seqwrite=6.37 GB/s randpage=28.0 ns/acc (sink=578721382704611328)
+THPBW r1 MiB=256 firsttouch=0.99 GB/s seqwrite=6.37 GB/s randpage=28.1 ns/acc (sink=578721382704611328)
+THPBW r2 MiB=256 firsttouch=0.98 GB/s seqwrite=6.36 GB/s randpage=28.2 ns/acc (sink=578721382704611328)
+### ABL_DONE profile=thpbw tag=run >>>ABLDONE<<<

@@ -1,0 +1,22 @@
+# ABLATION row 9: ship placement config MINUS rk3588-ddr-dvfs. Sole difference vs the
+# ship config is the DDR/DMC freq-ramp feature. Expected result: FLAT (ON == OFF),
+# because the Rockchip SIP DRAM interface GET_VERSION returns -1 on this board's BL31
+# (firmware-blocked). Measured as a ceiling row, not omitted. See ABLATION.md §5.
+target = "aarch64-unknown-none-softfloat"
+features = [
+  "ax-driver/rockchip-soc",
+  "ax-driver/rockchip-sdhci",
+  "ax-driver/rockchip-dwmmc",
+  "ax-driver/rk3588-cpufreq",
+  # rk3588-ddr-dvfs intentionally OMITTED (the ablation lever)
+  "starry-kernel/thp",
+  "starry-kernel/sched-loadbalance",
+  "starry-kernel/sched-loadbalance-wake-affine",
+  "starry-kernel/user-access-fastpath",
+  "starry-kernel/tickacct",
+  "starry-kernel/sched-loadbalance-wake-spread",
+  "starry-kernel/idle-poll",
+  "starry-kernel/sched-loadbalance-wake-idle-sibling",
+]
+log = "Info"
+max_cpu_num = 8

@@ -1,0 +1,23 @@
+# ABLATION row 7: ship placement config + wake-affine-loaded (relaxed wake_affine gate,
+# occ<=1 -> load-compare vs prev CPU). Sole difference vs ship. Measures whether keeping
+# sync ping-pong pairs CPU-local under oversubscription helps the hackbench scaling cliff.
+target = "aarch64-unknown-none-softfloat"
+features = [
+  "ax-driver/rockchip-soc",
+  "ax-driver/rockchip-sdhci",
+  "ax-driver/rockchip-dwmmc",
+  "ax-driver/rk3588-cpufreq",
+  "ax-driver/rk3588-ddr-dvfs",
+  "starry-kernel/thp",
+  "starry-kernel/sched-loadbalance",
+  "starry-kernel/sched-loadbalance-wake-affine",
+  "starry-kernel/user-access-fastpath",
+  "starry-kernel/tickacct",
+  "starry-kernel/sched-loadbalance-wake-spread",
+  "starry-kernel/idle-poll",
+  "starry-kernel/sched-loadbalance-wake-idle-sibling",
+  # The ablation lever (row added vs ship):
+  "starry-kernel/wake-affine-loaded",
+]
+log = "Info"
+max_cpu_num = 8

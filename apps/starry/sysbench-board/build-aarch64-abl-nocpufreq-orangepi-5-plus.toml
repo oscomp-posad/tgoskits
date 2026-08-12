@@ -1,0 +1,64 @@
+# PLACEMENT / occ-scheduler STRETCH config (sched-loadbalance ON). Used to board-test
+# the single-atom occupancy scheduler with the per-tick self-heal + saturating dec +
+# the occ-diag logging. NOT the validated ship config — the round-robin default in
+# build-aarch64-unknown-none-softfloat.toml is (t=4=3810=0.98x, run #1). This one is
+# for cracking the multi-thread-spread unification once the board is available.
+target = "aarch64-unknown-none-softfloat"
+features = [
+  "ax-driver/rockchip-soc",
+  "ax-driver/rockchip-sdhci",
+  "ax-driver/rockchip-dwmmc",
+  "ax-driver/rk3588-ddr-dvfs",
+  "starry-kernel/thp",
+  "starry-kernel/sched-loadbalance",
+  # wake_affine (occ<=1 -> local hand-off): board-validated best wake policy on
+  # RK3588 (schbench m1t4 wakeup p50 1023us->9us, near Linux 6us; hackbench -P
+  # g2/g5 also better). The Linux-faithful variant (prefer-idle-prev +
+  # select_idle_sibling) was tried and REGRESSED (see
+  # SCHEDBENCH_BOARD_RESULTS_2026-08-06.md) because this SoC's cross-core wake is
+  # ~1ms, inverting Linux's cost model. Kept feature-gated for rollback.
+  "starry-kernel/sched-loadbalance-wake-affine",
+  # Lock-free user-copy fast path (Linux access_ok model, aarch64 AT S1E0R/W
+  # probe): present pages skip the shared Arc<Mutex<AddrSpace>> entirely,
+  # removing the CLONE_VM (-T) user-copy serialization. Board A/B 2026-08-09
+  # (same HEAD, only this feature differing): hackbench -T g10 28.54s->2.78s
+  # (10.2x), -T g5 6.54s->1.05s (6.2x), -T/-P ratio 3.6-4.2x -> ~1 (Linux-like);
+  # -P also 1.5-2x better. Security-reviewed (5-lens + adversarial verify, no
+  # bypass). See ACCESS_FASTPATH_DESIGN_2026-08-08.md.
+  "starry-kernel/user-access-fastpath",
+  # Coarse tick CPU-time accounting (Linux TICK_CPU_ACCOUNTING) via a lock-free
+  # timer state, taking the SMP time lock off the syscall boundary. Board A/B
+  # 2026-08-10 (same HEAD, only this feature): getpid 853 -> 495.7 ns (-42%, ~at
+  # the uctx.run trap floor), pipe_wr 5841 -> 5112 ns; accounting stays correct
+  # (rusage_acct cpu/wall=1.00, syscall s_frac 0.71 vs Linux 0.72). Trade-off:
+  # getrusage/times become tick-granular like Linux (vs the exact path's precise
+  # split). 7-agent adversarial review = 0 bugs. See SYSCALL_PROFILE_2026-08-09.md.
+  "starry-kernel/tickacct",
+  # CPU-boundness-gated wake spread + idle-poll, PROMOTED 2026-08-12 after a
+  # same-session board A/B: a CPU-bound wakee (looping worker) prefers a fully-idle
+  # sibling over the wake_affine coalesce, and idle-poll makes that idle sibling pick
+  # it up immediately instead of paying the ~1ms SGI-to-WFI wake. Result: schbench
+  # m1t4 RPS 231->326 (+41%, beats Linux 199.6) with wakeup p50 preserved (3->8us)
+  # and no hackbench regression; sysbench mutex8 1.69->0.98s. Single-startup-barrier
+  # workloads (mem_bw2) are untouched (the EWMA never fires). CAVEAT: a rare userspace
+  # SIGSEGV was seen once under extreme wake-storm load (sysbench threads --thread-
+  # yields=1000) — investigated as NOT wake-spread-attributable (2/50 vs placement
+  # 0/48, Fisher p~0.24; idle-poll pick + on_cpu handshake code review clean) =
+  # pre-existing #59 extreme-oversub instability. To fully certify crash-free at scale:
+  # a crash-backtrace session or 100+ stress runs. Revert = delete these two lines.
+  "starry-kernel/sched-loadbalance-wake-spread",
+  "starry-kernel/idle-poll",
+  # Wake-idle-sibling (task #75), PROMOTED 2026-08-12 after wake-trace root-cause + a
+  # full-matrix reconfirm. Makes select_idle_sibling unconditional (any wakee prefers a
+  # fully-idle sibling, not just a CPU-bound one), so the racing workers of a startup
+  # pthread_barrier (mem_bw2 / sysbench-memory) each grab a DISTINCT idle core instead
+  # of the barrier's multi-step wake re-collapsing them onto the releaser. Board:
+  # mem_bw2 2T ~24 (bunched, 0.34x Linux) -> ~50 GB/s (2 distinct A76, 0.73x); bar2
+  # barrier 1/8 -> 8/8 spread; schbench m1t4 RPS/wakeup held (327-347 / 8us); hackbench
+  # + sysbench cpu/mutex/memory no regression (in noise); threads-stress 0 segfaults.
+  # Self-limiting: oversubscribed -> no idle core -> select_idle_sibling None ->
+  # wake_affine coalesces (messaging untouched). Revert = delete this line.
+  "starry-kernel/sched-loadbalance-wake-idle-sibling",
+]
+log = "Info"
+max_cpu_num = 8

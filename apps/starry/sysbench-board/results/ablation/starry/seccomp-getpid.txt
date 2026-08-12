@@ -1,0 +1,5 @@
+### ABL profile=getpid tag=run reps=3 Linux 10.0.0
+SYSCOST r1 SYSCOST getpid  455.2 ns/syscall
+SYSCOST r2 SYSCOST getpid  539.8 ns/syscall
+SYSCOST r3 SYSCOST getpid  507.9 ns/syscall
+### ABL_DONE profile=getpid tag=run >>>ABLDONE<<<

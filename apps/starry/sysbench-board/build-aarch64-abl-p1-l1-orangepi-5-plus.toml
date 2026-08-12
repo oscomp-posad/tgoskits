@@ -1,0 +1,21 @@
+# ABLATION Table-1 cumulative ladder rung. Holds mm/syscall levers at SHIP level
+# (thp + user-access-fastpath + tickacct ON) + frequency-held; ONLY the scheduler
+# feature stack varies across rungs, so each rung isolates one sched lever's
+# contribution to sysbench-cpu scaling. See ABLATION.md Table 1.
+# Rung +L1: sched-loadbalance OFF -> L1 round-robin spawn/wake distribution
+# (ungated a7d186019) is the only placement. This is the "+L1" rung; the FLOOR
+# (no L1) is this same feature set built on branch abl/p1floor (L1 patched to
+# prefer-current-CPU).
+target = "aarch64-unknown-none-softfloat"
+features = [
+  "ax-driver/rockchip-soc",
+  "ax-driver/rockchip-sdhci",
+  "ax-driver/rockchip-dwmmc",
+  "ax-driver/rk3588-cpufreq",
+  "ax-driver/rk3588-ddr-dvfs",
+  "starry-kernel/thp",
+  "starry-kernel/user-access-fastpath",
+  "starry-kernel/tickacct",
+]
+log = "Info"
+max_cpu_num = 8
