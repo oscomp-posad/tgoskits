@@ -53,6 +53,9 @@
 #include <time.h>
 #include <sched.h>
 #include <sys/resource.h>
+#include <sys/mman.h>
+#include <sys/ioctl.h>
+#include <linux/fb.h>
 #ifndef F_SETPIPE_SZ
 #define F_SETPIPE_SZ 1031
 #endif
@@ -749,13 +752,14 @@ static void applyIsolation(const QString &cpulist, bool isolate) {
 }
 
 int main(int argc, char **argv) {
-    QString shot, telemetry, cpulist = "0-3"; bool demo = false, isolate = true; int sw = 1920, sh = 1080, fps = 8;
+    QString shot, telemetry, cpulist = "0-3"; bool demo = false, isolate = true, directfb = false; int sw = 1920, sh = 1080, fps = 8;
     for (int i = 1; i < argc; i++) {
         if (!std::strcmp(argv[i], "--shot") && i + 1 < argc) { shot = argv[++i]; demo = true; }
         else if (!std::strcmp(argv[i], "--size") && i + 1 < argc) { std::sscanf(argv[++i], "%dx%d", &sw, &sh); }  // responsive test: --size 1280x720
         else if (!std::strcmp(argv[i], "--telemetry") && i + 1 < argc) { telemetry = argv[++i]; }  // tail a file instead of stdin
         else if (!std::strcmp(argv[i], "--cpu") && i + 1 < argc) { cpulist = argv[++i]; }           // affinity list, default A55 0-3
         else if (!std::strcmp(argv[i], "--fps") && i + 1 < argc) { fps = std::atoi(argv[++i]); }    // repaint cap, default 8
+        else if (!std::strcmp(argv[i], "--directfb")) { directfb = true; }                          // present via /dev/fb0 mmap (StarryOS)
         else if (!std::strcmp(argv[i], "--no-isolate")) { isolate = false; }
         else if (!std::strcmp(argv[i], "--demo")) demo = true;
     }
@@ -777,6 +781,46 @@ int main(int argc, char **argv) {
         pm.save(shot);
         std::printf("DASHBOARD_SHOT %s %dx%d\n", shot.toUtf8().constData(), sw, sh);
         return 0;
+    }
+    if (directfb) {
+        // Standard fbdev presentation. Render the widget OFFSCREEN through the
+        // raster engine (QWidget::grab — the exact path --shot uses on the host),
+        // then blit it to the Linux framebuffer via the canonical /dev/fb0 mmap.
+        // This deliberately bypasses Qt's linuxfb window-compositor flush, which
+        // on StarryOS only pushed the background rectangle to the scanout.
+        int fbfd = ::open("/dev/fb0", O_RDWR);
+        if (fbfd < 0) { std::fprintf(stderr, "directfb: open /dev/fb0 failed\n"); return 1; }
+        struct fb_var_screeninfo vi; struct fb_fix_screeninfo fi;
+        ::ioctl(fbfd, FBIOGET_VSCREENINFO, &vi); ::ioctl(fbfd, FBIOGET_FSCREENINFO, &fi);
+        int fbw = vi.xres ? int(vi.xres) : sw, fbh = vi.yres ? int(vi.yres) : sh;
+        int bpp = vi.bits_per_pixel ? int(vi.bits_per_pixel) / 8 : 4;
+        long stride = fi.line_length ? long(fi.line_length) : long(fbw) * bpp;
+        applyIsolation(cpulist, isolate);
+        auto *d = new Dashboard(demo, telemetry, fps);
+        d->resize(fbw, fbh);
+        QString dumpPath = ::getenv("STARRY_GRAB_DUMP") ? QString(::getenv("STARRY_GRAB_DUMP")) : QString();
+        auto *dumped = new bool(false);
+        auto present = [=]() {
+            QImage img = d->grab().toImage().convertToFormat(QImage::Format_ARGB32);  // little-endian bytes = B,G,R,A = fb order
+            // Present via the kernel write() path (write_at), NOT an mmap memcpy:
+            // on StarryOS a userspace fb-mmap write is not coherent with the kernel
+            // read/scanout, whereas write() is (proven by the 0xA5 round-trip probe).
+            for (int y = 0; y < fbh && y < img.height(); y++) {
+                long n = std::min<long>(stride, long(img.bytesPerLine()));
+                ::pwrite(fbfd, img.constScanLine(y), size_t(n), off_t(y) * stride);
+            }
+            if (!dumpPath.isEmpty() && !*dumped) {  // one-shot: proves the offscreen render has content, independent of the fb
+                FILE *f = ::fopen(dumpPath.toUtf8().constData(), "wb");
+                if (f) { for (int y = 0; y < img.height(); y++) std::fwrite(img.constScanLine(y), 1, img.bytesPerLine(), f); std::fclose(f); }
+                *dumped = true;
+            }
+        };
+        auto *t = new QTimer();
+        QObject::connect(t, &QTimer::timeout, present);
+        t->start(std::max(30, 1000 / std::max(1, fps)));
+        present();  // first frame immediately
+        std::printf("DASHBOARD_DIRECTFB %dx%d bpp=%d stride=%ld\n", fbw, fbh, bpp, stride); std::fflush(stdout);
+        return app.exec();
     }
     applyIsolation(cpulist, isolate);
     Dashboard d(demo, telemetry, fps);

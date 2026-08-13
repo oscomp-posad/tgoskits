@@ -44,7 +44,7 @@ g++ -std=c++17 -fPIC -O2 /work/dashboard.cpp \
   -I$QTINC -I$QTINC/QtWidgets -I$QTINC/QtGui -I$QTINC/QtCore \
   -lQt6Widgets -lQt6Gui -lQt6Core -o /work/out/dashboard
 mkdir -p /work/out/lib /work/out/plugins/platforms /work/out/fonts
-for pl in libqlinuxfb.so libqoffscreen.so; do
+for pl in libqlinuxfb.so libqoffscreen.so libqminimal.so; do
   f=$(find /usr/lib -name "$pl" | head -1); [ -n "$f" ] && cp -L "$f" /work/out/plugins/platforms/; done
 cp /usr/share/fonts/truetype/firacode/FiraCode-Regular.ttf /usr/share/fonts/truetype/firacode/FiraCode-Bold.ttf /work/out/fonts/ 2>/dev/null || true
 cp /usr/share/fonts/truetype/hud/Oswald.ttf /work/out/fonts/ 2>/dev/null || true
