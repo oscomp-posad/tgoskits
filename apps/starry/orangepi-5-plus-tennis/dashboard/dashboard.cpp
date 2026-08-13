@@ -46,6 +46,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdint>
+#include <cstdlib>
 #include <string>
 #include <fcntl.h>
 #include <unistd.h>
@@ -257,6 +258,12 @@ class Dashboard : public QWidget {
 public:
     explicit Dashboard(bool demo = false, const QString &telePath = QString(), int renderFps = 8)
         : renderFps_(renderFps) {
+        paintDbg_ = (::getenv("STARRY_PAINT_DEBUG") != nullptr);
+        // Our paintEvent fills every pixel (background() first), so claim opaque
+        // painting: Qt skips its pre-paint erase and flushes the whole widget — on
+        // StarryOS linuxfb the erase-then-partial-flush left only the background.
+        setAttribute(Qt::WA_OpaquePaintEvent, true);
+        setAttribute(Qt::WA_NoSystemBackground, true);
         sys.sampleCpu(); sys.sampleRest();
         phase.start();
         if (demo) injectDemo();
@@ -284,14 +291,13 @@ public:
                 connect(sn, &QSocketNotifier::activated, this, [this] { drain(); });
             }
         }
-        // Render throttle: cap repaints at renderFps_ (default 8) no matter how
-        // fast telemetry arrives, forcing one at least every 500 ms for the clock.
-        // Keeps the dashboard's CPU + framebuffer-bandwidth footprint minimal.
+        // Repaint at a fixed low rate (renderFps_, default 8) — unconditional, like
+        // the v1 board-validated build. Dirty-gating the repaint confused the
+        // StarryOS linuxfb flush (only the background reached /dev/fb0), and a fixed
+        // 8 fps is already low enough for the non-interference budget.
+        (void)dirty_; (void)lastPaint_;
         auto *rt = new QTimer(this);
-        connect(rt, &QTimer::timeout, this, [this] {
-            qint64 now = phase.elapsed();
-            if (dirty_ || now - lastPaint_ >= 500) { dirty_ = false; lastPaint_ = now; update(); }
-        });
+        connect(rt, &QTimer::timeout, this, [this] { update(); });
         rt->start(std::max(30, 1000 / std::max(1, renderFps_)));
     }
     void injectDemo() {
@@ -315,26 +321,31 @@ public:
     }
 
 protected:
+    void dbg(const char *s) const { if (dbgActive_) { std::fprintf(stderr, "DBG %s\n", s); std::fflush(stderr); } }
     void paintEvent(QPaintEvent *) override {
+        dbgActive_ = paintDbg_ && paintN_++ < 2;
+        dbg("start");
         QPainter p(this); p.setRenderHint(QPainter::Antialiasing);
         const int W = width(), H = height();
-        background(p, W, H);
+        background(p, W, H); dbg("bg");
         int m = std::max(14, W / 100);
         int hh = std::max(52, H / 16);
-        topbar(p, m, m, W - 2 * m, hh);
+        topbar(p, m, m, W - 2 * m, hh); dbg("topbar");
         int top = m + hh + m, gap = m, bh = H - top - m;
         // three columns: 系统 (system) | 机器人视角 (vision) | 场地雷达 (nav)
         int avail = W - 2 * m - 2 * gap;
         int wA = int(avail * 0.30), wB = int(avail * 0.40), wC = avail - wA - wB;
-        systemPanel(p, m, top, wA, bh);
-        visionCol(p, m + wA + gap, top, wB, bh);
-        navCol(p, m + wA + gap + wB + gap, top, wC, bh);
+        systemPanel(p, m, top, wA, bh); dbg("sys");
+        visionCol(p, m + wA + gap, top, wB, bh); dbg("vision");
+        navCol(p, m + wA + gap + wB + gap, top, wC, bh); dbg("nav");
+        dbgActive_ = false;
     }
 
 private:
     SystemStats sys; TennisStats tn; std::string buf;
     QElapsedTimer phase;
     int fd_ = 0, renderFps_ = 8; bool dirty_ = true; qint64 lastPaint_ = 0;
+    bool paintDbg_ = false; mutable bool dbgActive_ = false; int paintN_ = 0;  // STARRY_PAINT_DEBUG hang-locator
     // Responsive scale: driven by the tighter of the two axes so the HUD fits
     // any resolution/aspect (16:9, 16:10, 4:3, 21:9) without text overflow. On a
     // 16:9 panel W/1920 == H/1080, so this matches the 1080p reference exactly.
@@ -459,13 +470,13 @@ private:
 
     void topbar(QPainter &p, int x, int y, int w, int h) {
         QRect r(x, y, w, h);
-        p.setPen(QPen(T::line, 1)); p.setBrush(T::withA(T::bg1, 200)); p.drawRect(r);
-        p.setFont(disp(24, 5)); glow(p, disp(24, 5), T::amber, x + fs(20), y + h * 0.66, "STARRY//SIGNAL", 70);
+        p.setPen(QPen(T::line, 1)); p.setBrush(T::withA(T::bg1, 200)); p.drawRect(r); dbg("tb:rect");
+        p.setFont(disp(24, 5)); glow(p, disp(24, 5), T::amber, x + fs(20), y + h * 0.66, "STARRY//SIGNAL", 70); dbg("tb:latin");
         int wm = p.boundingRect(0, 0, w, h, 0, "STARRY//SIGNAL").width();
         double sx = x + fs(20) + wm + fs(34);
         p.setPen(QPen(T::withA(T::amber, 90), 1)); p.drawLine(QPointF(sx - fs(18), y + h * 0.30), QPointF(sx - fs(18), y + h * 0.72));
         p.setFont(cjk(11)); p.setPen(T::dim);
-        p.drawText(QPointF(sx, y + h * 0.64), "内核实时遥测 · RK3588 · 香橙派 5 Plus");
+        p.drawText(QPointF(sx, y + h * 0.64), "内核实时遥测 · RK3588 · 香橙派 5 Plus"); dbg("tb:cjk");
         // right cluster, laid out right-to-left: [clock] [uptime] [实时] [dot]
         double yb = y + h * 0.62;
         double cur = x + w - fs(24);
