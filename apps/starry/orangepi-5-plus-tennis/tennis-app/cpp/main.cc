@@ -525,6 +525,8 @@ static int parse_options(int argc, char **argv, Options &o) {
         if (arg_val(argc, argv, i, "--profile-csv", o.profile_csv)) continue;
         if (arg_val(argc, argv, i, "--infer-affinity", o.infer_affinity)) continue;
         if (arg_val(argc, argv, i, "--validate-list", o.validate_list)) continue;
+        if (arg_val(argc, argv, i, "--publish-camera", o.publish_camera)) continue;
+        if (arg_val(argc, argv, i, "--publish-fps", v)) { o.publish_fps = std::atoi(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--report-interval-sec", v)) { o.report_interval_sec = std::atoi(v.c_str()); continue; }
         if (std::strcmp(argv[i], "--profile") == 0) { o.profile = true; continue; }
         if (arg_val(argc, argv, i, "--device", v)) { o.device = std::atoi(v.c_str()); continue; }

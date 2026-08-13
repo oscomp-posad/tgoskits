@@ -62,14 +62,15 @@ bool Controller::process(const Detection &det) {
         const int mright = out.motor_op == MotorOp::Drive ? out.right : 0;
         const OdometryEstimate odom = odometry_.estimate(decision_ts);
         std::printf("TENNIS_STATE frame=%llu state=%s detections=%d "
-                    "bucket_visible=%d ball_area=%.4f ball_cx=%.1f "
+                    "bucket_visible=%d ball_area=%.4f ball_cx=%.1f ball_cy=%.1f "
                     "odom_valid=%d odom_x=%.3f odom_y=%.3f "
                     "odom_heading=%.3f odom_distance=%.3f frame_age_ms=%.3f\n",
                     static_cast<unsigned long long>(det.seq),
                     to_string(acting_state), had_ball ? 1 : 0,
                     had_bucket ? 1 : 0,
                     had_ball ? det.ball.area_ratio : 0.0f,
-                    had_ball ? det.ball.cx : 0.0f, odom.valid ? 1 : 0,
+                    had_ball ? det.ball.cx : 0.0f, had_ball ? det.ball.cy : 0.0f,
+                    odom.valid ? 1 : 0,
                     odom.x, odom.y, odom.heading, odom.distance_to_anchor,
                     frame_age_ms);
         std::printf("TENNIS_CMD frame=%llu state=%s motor_left=%d "

@@ -35,6 +35,7 @@
 #include "types.h"
 
 #include "uvc_capture.h" // frame_to_image, LatestFrame, image_buffer_t
+#include "camera_publish.h" // publish_camera_frame (opt-in dashboard viewport feed)
 
 namespace tennis {
 
@@ -290,6 +291,23 @@ int run_live(const Options &opts) {
                     opts.report_interval_sec * 1000.0) {
                 metrics.sample_resource(ns_to_ms(t_ctrl1 - start) / 1000.0);
                 last_report = t_ctrl1;
+            }
+        }
+
+        // Opt-in low-fps camera publish for the dashboard viewport, rate-limited and
+        // off the control path (the command was already issued above). BALL mode is
+        // zero-copy (no CPU RGB), so decode via frame_to_image only on published frames.
+        if (!opts.publish_camera.empty()) {
+            static int pub_ctr = 0;
+            const int pub_every = std::max(1, opts.fps / std::max(1, opts.publish_fps));
+            if (++pub_ctr >= pub_every) {
+                pub_ctr = 0;
+                if (d.mode == PerceptionMode::BALL) frame_to_image(lf, &img);  // BUCKET already decoded above
+                if (img.virt_addr && img.format == IMAGE_FORMAT_RGB888)
+                    publish_camera_frame(opts.publish_camera,
+                                         static_cast<const uint8_t*>(img.virt_addr),
+                                         img.width, img.height,
+                                         static_cast<int>(lf.id));
             }
         }
     }

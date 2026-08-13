@@ -28,6 +28,9 @@ struct Options {
     int camera_watchdog_ms = 2000;
     int log_every = 1;             // emit per-frame lines every Nth frame (1 = all)
     std::string core_mask = "all"; // NPU core mask for live mode
+    // --- Camera publish for the STARRY//SIGNAL dashboard viewport (opt-in) ---
+    std::string publish_camera;    // --publish-camera <path>: low-fps downscaled frame -> tmpfs (empty = off)
+    int publish_fps = 4;           // --publish-fps <n>: publish cadence (kept low to stay <1% of the pipeline)
     // --- Deep profiling (mirrors the sibling uvc-rknn bench) ---
     bool profile = false;          // --profile: collect per-stage timing + emit
                                    // the PROFILE/PIPELINE/COLD_START/RES lines
