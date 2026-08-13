@@ -530,31 +530,23 @@ private:
         p.setPen(QPen(T::withA(T::amber, 90), 1)); p.drawLine(QPointF(sx - fs(18), y + h * 0.30), QPointF(sx - fs(18), y + h * 0.72));
         p.setFont(cjk(11)); p.setPen(T::dim);
         p.drawText(QPointF(sx, y + h * 0.64), "内核实时遥测 · RK3588 · 香橙派 5 Plus"); dbg("tb:cjk");
-        // right cluster, laid out right-to-left: [clock] [uptime] [实时] [dot]
+        // right cluster, laid out right-to-left: [clock]  [uptime]
         double yb = y + h * 0.62;
         double cur = x + w - fs(24);
         QString clk = QDateTime::currentDateTime().toString("HH:mm:ss");
         p.setFont(mono(17, QFont::Bold)); int cw = p.boundingRect(0, 0, w, h, 0, clk).width();
-        cur -= cw; p.setPen(T::ink); p.drawText(QPointF(cur, yb), clk); cur -= fs(30);
+        cur -= cw; p.setPen(T::ink); p.drawText(QPointF(cur, yb), clk); cur -= fs(34);
         QString up = QString::asprintf("运行 %llu:%02llu:%02llu", (unsigned long long)(sys.uptime / 3600), (unsigned long long)((sys.uptime / 60) % 60), (unsigned long long)(sys.uptime % 60));
         p.setFont(cjk(11)); int uw = p.boundingRect(0, 0, w, h, 0, up).width();
-        cur -= uw; p.setPen(T::dim); p.drawText(QPointF(cur, yb), up); cur -= fs(26);
-        bool blink = phase.isValid() ? ((phase.elapsed() / 600) % 2 == 0) : true;
-        p.setFont(cjk(11, QFont::Bold)); int lw = p.boundingRect(0, 0, w, h, 0, "实时").width();
-        cur -= lw; p.setPen(blink ? T::coral : T::dim); p.drawText(QPointF(cur, yb), "实时"); cur -= fs(16);
-        p.setBrush(blink ? T::coral : T::withA(T::coral, 70)); p.setPen(Qt::NoPen);
-        p.drawEllipse(QPointF(cur - fs(4), y + h * 0.54), fs(6), fs(6));
-        p.setBrush(Qt::NoBrush);
+        cur -= uw; p.setPen(T::dim); p.drawText(QPointF(cur, yb), up);
     }
 
     void systemPanel(QPainter &p, int x, int y, int w, int h) {
         QRect R(x, y, w, h);
         frame(p, R, "01", "系统", T::cyan);
         int ix = x + int(fs(26)), iw = w - int(fs(52));
-        int cy = y + int(fs(64));
-        p.setFont(cjk(12, QFont::Bold, 2)); p.setPen(T::dim); p.drawText(ix, cy, "CPU  ·  8 核  ·  大小核架构");
-        cy += int(fs(30));
-        double rh = h * 0.042, rgap = fs(6), csep = fs(15);
+        int cy = y + int(fs(74));
+        double rh = h * 0.042, rgap = fs(6.5), csep = fs(16);
         for (int c = 0; c < 8; c++) {
             double ry = cy + c * (rh + rgap) + (c >= 4 ? csep : 0);
             bool little = c < 4; QColor acc = little ? T::green : T::cyan;
@@ -569,7 +561,7 @@ private:
             p.setFont(mono(13, QFont::Bold)); p.setPen(T::load(sys.cpu[c], T::ink, T::amber, T::coral));
             p.drawText(QRectF(ix + iw - fs(60), ry, fs(60), rh), Qt::AlignRight | Qt::AlignVCenter, QString::asprintf("%3.0f%%", sys.cpu[c]));
         }
-        cy += 8 * (rh + rgap) + csep + fs(16);
+        cy += 8 * (rh + rgap) + csep + fs(26);
         // aggregate sparkline
         p.setFont(cjk(12, QFont::Bold, 2)); p.setPen(T::dim); p.drawText(ix, cy, "总负载");
         p.setFont(mono(13, QFont::Bold)); p.setPen(T::cyan);
@@ -577,7 +569,7 @@ private:
         cy += fs(8);
         QRectF spark(ix, cy, iw, h * 0.09);
         sparkline(p, spark, sys.hist, T::cyan);
-        cy += spark.height() + fs(22);
+        cy += spark.height() + fs(30);
         // memory
         p.setFont(cjk(12, QFont::Bold, 2)); p.setPen(T::dim); p.drawText(ix, cy, "内存");
         cy += fs(10);
@@ -585,7 +577,7 @@ private:
         cy += h * 0.036 + fs(20);
         p.setFont(mono(12)); p.setPen(T::ink);
         p.drawText(QPointF(ix, cy), QString::asprintf("%.1f / %.1f GiB", sys.mem_used_gb, sys.mem_total_gb));
-        cy += fs(22);
+        cy += fs(30);
         // stat tiles: temp / load / freqs
         double tgap = fs(14); double tw = (iw - tgap * 2) / 3, th = h * 0.115;
         stat(p, ix, cy, tw, th, "SoC 温度", sys.temp_ok ? QString::asprintf("%.1f", sys.temp) : "—", sys.temp_ok ? "°C" : "", !sys.temp_ok ? T::dim : sys.temp > 80 ? T::coral : sys.temp > 65 ? T::amber : T::green);
