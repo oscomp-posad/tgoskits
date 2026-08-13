@@ -4,8 +4,8 @@ mod card0;
 #[cfg(feature = "rknpu")]
 mod card1;
 // The real contiguous coherent dma-heap is shared by every accelerator that
-// exchanges buffers (JPU / NPU; RGA when its node lands).
-#[cfg(any(feature = "jpeg", feature = "rknpu"))]
+// exchanges buffers (JPU / NPU / RGA).
+#[cfg(any(feature = "jpeg", feature = "rknpu", feature = "rga"))]
 mod dmaheap;
 mod drm;
 #[cfg(feature = "input")]
@@ -32,6 +32,8 @@ mod memtrack;
 mod pinmux;
 #[cfg(any(feature = "sg2002", feature = "rk3588-pwm"))]
 pub(super) mod pwm;
+#[cfg(feature = "rga")]
+mod rga;
 mod rtc;
 #[cfg(feature = "sg2002")]
 pub mod tpu;
@@ -573,8 +575,8 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
     // /dev/dma_heap — the real contiguous, DMA-coherent allocator that the
     // accelerators share buffers from (zero-copy across JPU / NPU / RGA). Every
     // heap name maps to the same allocator. Available under any accelerator
-    // feature, not just `jpeg`.
-    #[cfg(any(feature = "jpeg", feature = "rknpu"))]
+    // feature (jpeg / rknpu / rga).
+    #[cfg(any(feature = "jpeg", feature = "rknpu", feature = "rga"))]
     {
         let mut dma_heap_dir = DirMapping::new();
         for name in dmaheap::HEAP_NAMES {

@@ -6,13 +6,25 @@ A StarryOS board demo and benchmark app that ports the RK3588 tennis-ball pickup
 
 This app drives the full tennis pickup workflow — chase a tennis ball, grab it, find a red bucket, approach it, and deposit — and frames it as an **end-to-end latency benchmark**. The competition goal is minimizing the time from a camera frame to the motor/arm command that acts on it (frame-to-command latency), and the mandatory deliverable is the `TENNIS_BENCH_RESULT` line. Perception (YOLOv8 ball detection + HSV bucket detection) and control (a differential-drive state machine) run on the board's NPU and CPU; the actuators are virtual command traces, so the measured latency is the pure perception+control compute path on StarryOS.
 
-## Why virtual actuators
+## Actuator backends
 
-The virtual motor/arm backends give a clean, **non-blocking** seam between the control loop and the hardware:
+Motor and arm backends are selected independently and **default to the real UART
+hardware** (`--motor-backend uart --arm-backend uart`); pass `--virtual-actuators`
+(or `--motor-backend virtual`/`--arm-backend virtual`) for the non-blocking trace
+backends:
 
-- It **runs with no physical car** — only the OrangePi-5-Plus board and a UVC camera (for live modes) are required.
-- Because the virtual actuator backend never blocks, **frame-to-command latency stays pure compute** — there is no UART round-trip or servo settle time inflating the benchmark.
-- The **real UART backends are future, hardware-gated work**: a differential-motor backend (ESP32-C3) and a gripper-arm backend (ZP10D bus servo) are designed for but disabled until the car arrives. They are not the default.
+- **Real hardware (default):** the motor drives the ESP32-C3 UART chassis
+  controller used by `aka-rk3588` (or four RK3588 PWM sysfs channels through a
+  DRV8833 with `--motor-backend pwm`); the arm drives the ZP10S UART bus-servo
+  controller with the calibrated `aka00v4-rk3588` action sequence. Real backend
+  initialization errors are **fatal** and never silently fall back to virtual
+  output, so the robot never runs on stubs when hardware was expected.
+- **Virtual/trace backends** give a clean, non-blocking seam for benchmarking:
+  they **run with no physical car** (only the OrangePi-5-Plus board + a UVC camera
+  for live modes) and, because they never block, keep **frame-to-command latency
+  at pure compute** — no UART round-trip or servo settle time inflates the number.
+- `dry-run` always forces both virtual backends, so a synthetic scene can never
+  accidentally move physical hardware.
 
 ## Architecture
 

@@ -4,12 +4,14 @@ Team Posad · 清华大学 · 项目「面向边缘智能的 AIOS 设计与优�
 
 本目录收录全国大学生操作系统竞赛**决赛**的技术报告与进展汇报，覆盖约一个月在 RK3588（OrangePi-5-Plus）上将网球拾取机器人的操作系统由 Linux 迁移至 StarryOS、并令整套 StarryOS 在通用负载上追平 Linux 的工作。
 
+全部成果以原子 PR 回馈上游 [`rcore-os/tgoskits`](https://github.com/rcore-os/tgoskits)：自初赛至今，本队三名成员累计提交 122 个 PR，其中 **90 个已合并、19 个在审**（决赛期新增 24 个已合并 + 19 个在审），覆盖系统调用/进程/信号、调度与大小核、内存与分页、观测 perf、RGA/JPU/NPU 与原生显示驱动、网络、虚拟化与板级；另自建 QEMU RKNPU 功能级设备模型，全部经真机验证。
+
 ## 交付物
 
 | 文件 | 说明 |
 |------|------|
 | [`../设计方案（决赛）.pdf`](../设计方案（决赛）.pdf) | 技术报告（77 页，ctexart） |
-| [`../../slides/进展汇报（决赛）.pdf`](../../slides/进展汇报（决赛）.pdf) | 进展汇报幻灯片（34 页，ctexbeamer） |
+| [`../../slides/进展汇报（决赛）.pdf`](../../slides/进展汇报（决赛）.pdf) | 进展汇报幻灯片（28 页，ctexbeamer） |
 
 PDF 与初赛材料同路径放置：技术报告位于 `docs/设计方案（决赛）.pdf`，进展汇报位于 `slides/进展汇报（决赛）.pdf`。LaTeX 源码见本目录 [`report/`](report/) 与 [`slides/`](slides/)，构建方式见下文「从源码构建」。初赛进展汇报见 [`slides/进展汇报（初赛）.pdf`](../../slides/进展汇报（初赛）.pdf)，初赛设计方案见 [`docs/设计方案（初赛）.pdf`](../设计方案（初赛）.pdf)。
 

@@ -598,8 +598,13 @@ impl Device {
                 match self.port_speed {
                     Speed::High | Speed::SuperSpeed | Speed::SuperSpeedPlus => {
                         // HighSpeed, SuperSpeed, SuperSpeedPlus ISO 端点
-                        // Interval = max(1, min(16, bInterval))
-                        let interval = binterval.clamp(1, 16);
+                        // xHCI 6.2.3.6: Interval = bInterval - 1 (service period =
+                        // 2^Interval * 125µs microframes). A bInterval=1 HS/SS ISO
+                        // endpoint (the UVC camera) MUST encode Interval=0 (every
+                        // microframe); the old clamp(1, 16) serviced it every 2
+                        // microframes → halved ISO bandwidth → FIFO overflow →
+                        // truncated camera frames on RK3588.
+                        let interval = binterval.saturating_sub(1).clamp(0, 15);
                         debug!(
                             "ISO endpoint HS/SS: bInterval={} -> XHCI interval={}",
                             binterval, interval
@@ -628,8 +633,9 @@ impl Device {
                 match self.port_speed {
                     Speed::High | Speed::SuperSpeed | Speed::SuperSpeedPlus => {
                         // HighSpeed, SuperSpeed, SuperSpeedPlus 中断端点
-                        // Interval = max(1, min(16, bInterval))
-                        let interval = binterval.clamp(1, 16);
+                        // xHCI 6.2.3.6: Interval = bInterval - 1 (service period =
+                        // 2^Interval * 125µs microframes), same encoding as ISO above.
+                        let interval = binterval.saturating_sub(1).clamp(0, 15);
                         debug!(
                             "INT endpoint HS/SS: bInterval={} -> XHCI interval={}",
                             binterval, interval

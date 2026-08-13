@@ -36,8 +36,8 @@ power-on cue, TFTP-vs-loady) live in the board-run notes; the essentials:
    bash build-static-sysbench.sh          # -> ./sysbench-static-aarch64 (confirm `file` says statically linked)
    scp sysbench-static-aarch64 orangepi@192.168.50.2:/tmp/sysbench
    ssh orangepi@192.168.50.2 '
-     printf orangepi | sudo -S install -m755 /tmp/sysbench /usr/bin/sysbench
-     printf orangepi | sudo -S sync
+     sudo install -m755 /tmp/sysbench /usr/bin/sysbench
+     sudo sync
      /usr/bin/sysbench --version'
    ```
 

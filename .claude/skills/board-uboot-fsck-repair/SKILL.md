@@ -22,7 +22,7 @@ The script reads `~/.ostool/config.toml` by default. Override the server when ne
 
 ```bash
 node .claude/skills/board-uboot-fsck-repair/scripts/uboot_fsck_repair.js \
-  --server 10.3.10.9 --port 2999 --board-type OrangePi-5-Plus
+  --server <SERVER-IP> --port 2999 --board-type OrangePi-5-Plus
 ```
 
 Treat success as all of:

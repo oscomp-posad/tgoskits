@@ -1,19 +1,27 @@
-// STARRY//SIGNAL — a phosphor telemetry console for StarryOS / RK3588.
+// STARRY//SIGNAL — 面向 StarryOS / RK3588 的荧光遥测控制台 (phosphor telemetry HUD).
 //
 // A fullscreen HUD (rendered to the native VOP2 /dev/fb0 via Qt6 linuxfb) that
 // fuses live system stats with the tennis-robot app's telemetry. Aesthetic: an
 // avionics / oscilloscope readout — scope graticule, corner-bracket framing,
 // monospace telemetry, segmented bargraphs, center-zero motor meters, crosshair
-// detection reticles, CRT bloom.
+// detection reticles, a heading compass, CRT bloom. UI labels are Simplified
+// Chinese (Noto Sans CJK SC); numeric data stays in Fira Code.
 //
 // Data:
 //   system  — procfs/sysfs, 1 Hz (/proc/stat per-core, meminfo, loadavg, uptime,
 //             thermal_zone0, cpufreq policy0/4/6 for A55 / A76x2)
 //   robot   — the app's TENNIS_* stdout telemetry, read from STDIN (non-blocking),
 //             so `tennis-app … | dashboard` shows both; `dashboard` alone = system.
+//             TENNIS_STATE carries state + ball_area/ball_cx (视觉感知) + the
+//             odometry pose odom_valid/x/y/heading/distance (里程计); TENNIS_CMD
+//             carries the differential-drive motors + arm action.
+//
+// Responsive: all geometry scales by min(W/1920, H/1080) so it fits any
+// resolution/aspect (16:9, 16:10, 4:3, 21:9) without overflow.
 //
 // Run fullscreen:  QT_QPA_PLATFORM=linuxfb ./dashboard
-// Screenshot (host, offscreen):  QT_QPA_PLATFORM=offscreen ./dashboard --shot out.png
+// Screenshot (host, offscreen only — never offscreen on StarryOS):
+//   QT_QPA_PLATFORM=offscreen ./dashboard --shot out.png [--size 1600x1200]
 #include <QApplication>
 #include <QWidget>
 #include <QPainter>
@@ -23,6 +31,7 @@
 #include <QTimer>
 #include <QSocketNotifier>
 #include <QFontDatabase>
+#include <QFontMetrics>
 #include <QDateTime>
 #include <QElapsedTimer>
 #include <array>
@@ -80,8 +89,9 @@ static QColor load(double p, QColor cold, QColor mid, QColor hot) {
     if (p >= 82) return hot; if (p >= 50) return mid; return cold;
 }
 static QColor withA(QColor c, int a) { c.setAlpha(a); return c; }
-QString MONO = "Fira Code";
-QString DISP = "Oswald";
+QString MONO = "Fira Code";                 // Latin numeric / data
+QString DISP = "Oswald";                    // Latin display (brand + index)
+QString CJK  = "Noto Sans CJK SC";          // 思源黑体 — Chinese labels/headers
 } // namespace T
 
 // ------------------------------ system stats --------------------------------
@@ -93,9 +103,9 @@ struct SystemStats {
     bool have = false;
     double aggregate = 0;
     double mem_pct = 0, mem_used_gb = 0, mem_total_gb = 0;
-    double temp = 0;
-    std::array<int, 3> freq{};
-    double load1 = 0, load5 = 0, load15 = 0;
+    double temp = 0; bool temp_ok = false;
+    std::array<int, 3> freq{}; std::array<bool, 3> freq_ok{};
+    double load1 = 0, load5 = 0, load15 = 0; bool load_ok = false;
     uint64_t uptime = 0;
     std::deque<double> hist;  // aggregate CPU history for sparkline
 
@@ -132,12 +142,14 @@ struct SystemStats {
         mem_total_gb = tot / 1048576.0; mem_used_gb = (tot - av) / 1048576.0;
         mem_pct = tot ? 100.0 * (tot - av) / tot : 0;
         std::string t = slurp("/sys/class/thermal/thermal_zone0/temp");
-        temp = t.empty() ? 0 : std::strtod(t.c_str(), nullptr) / 1000.0;
+        temp_ok = !t.empty() && std::strtod(t.c_str(), nullptr) > 0;
+        temp = temp_ok ? std::strtod(t.c_str(), nullptr) / 1000.0 : 0;
         const char *pol[3] = {"/sys/devices/system/cpu/cpufreq/policy0/scaling_cur_freq",
                               "/sys/devices/system/cpu/cpufreq/policy4/scaling_cur_freq",
                               "/sys/devices/system/cpu/cpufreq/policy6/scaling_cur_freq"};
-        for (int i = 0; i < 3; i++) { std::string f = slurp(pol[i]); freq[i] = f.empty() ? 0 : int(std::strtol(f.c_str(), nullptr, 10) / 1000); }
-        std::sscanf(slurp("/proc/loadavg").c_str(), "%lf %lf %lf", &load1, &load5, &load15);
+        for (int i = 0; i < 3; i++) { std::string f = slurp(pol[i]); freq_ok[i] = !f.empty(); freq[i] = freq_ok[i] ? int(std::strtol(f.c_str(), nullptr, 10) / 1000) : 0; }
+        std::string la = slurp("/proc/loadavg");
+        load_ok = !la.empty(); if (load_ok) std::sscanf(la.c_str(), "%lf %lf %lf", &load1, &load5, &load15);
         uptime = uint64_t(std::strtod(slurp("/proc/uptime").c_str(), nullptr));
     }
 };
@@ -148,6 +160,10 @@ struct TennisStats {
     std::string state = "STANDBY";
     bool ball = false, bucket = false;
     double frame_age = 0;
+    double ball_area = 0, ball_cx = -1;                 // perception detail (latest app)
+    bool odom_valid = false;                            // odometry (latest app)
+    double odom_x = 0, odom_y = 0, odom_heading = 0, odom_distance = 0;
+    bool anchor_reset = false; double anchor_reset_w = 0;
     int mL = 0, mR = 0;
     std::string arm = "—";
     double f2c = 0, ttfi = -1;
@@ -160,9 +176,17 @@ struct TennisStats {
         if (l.rfind("TENNIS_STATE", 0) == 0) {
             seen = true; state = kv(l, "state");
             ball = kvl(l, "detections"); bucket = kvl(l, "bucket_visible");
+            ball_area = kvd(l, "ball_area"); ball_cx = kvd(l, "ball_cx", -1);
+            odom_valid = kvl(l, "odom_valid");
+            odom_x = kvd(l, "odom_x"); odom_y = kvd(l, "odom_y");
+            odom_heading = kvd(l, "odom_heading"); odom_distance = kvd(l, "odom_distance");
             frame_age = kvd(l, "frame_age_ms");
             uint64_t f = kvl(l, "frame"); double w = nowSec();
-            if (frames && f > last_f && w > last_w) { double i = (f - last_f) / (w - last_w); fps = fps == 0 ? i : fps * 0.7 + i * 0.3; }
+            if (frames && f > last_f && w - last_w > 0.005) {
+                double inst = (f - last_f) / (w - last_w);
+                if (inst > 120) inst = 120;  // clamp: real capture is <=60 fps
+                fps = fps == 0 ? inst : fps * 0.8 + inst * 0.2;
+            }
             last_f = f; last_w = w; frames++;
         } else if (l.rfind("TENNIS_CMD", 0) == 0) {
             seen = true; mL = kvl(l, "motor_left"); mR = kvl(l, "motor_right");
@@ -185,6 +209,29 @@ static QColor stateColor(const std::string &s) {
     if (s.find("APPROACH") != std::string::npos) return T::green;
     if (s.find("DEPOSIT") != std::string::npos) return T::green;
     return T::dim;
+}
+
+// State machine → Chinese (substring match mirrors stateColor; covers brake sub-phases).
+static QString stateCN(const std::string &s) {
+    if (s.find("BRAKE") != std::string::npos || s.find("Brake") != std::string::npos) return "制动";
+    if (s.find("CHASE") != std::string::npos) return "追球";
+    if (s.find("GRAB") != std::string::npos) return "抓取";
+    if (s.find("RETURN") != std::string::npos) return "返回球桶";
+    if (s.find("FIND") != std::string::npos) return "寻找球桶";
+    if (s.find("APPROACH") != std::string::npos) return "接近球桶";
+    if (s.find("DEPOSIT") != std::string::npos) return "投放";
+    if (s.find("SEARCH") != std::string::npos) return "搜索";
+    if (s.find("STANDBY") != std::string::npos || s.find("IDLE") != std::string::npos) return "待机";
+    return QString::fromStdString(s);
+}
+
+// Arm action → Chinese.
+static QString armCN(const std::string &a) {
+    if (a == "grab") return "抓取";
+    if (a == "release") return "释放";
+    if (a == "ready") return "就绪";
+    if (a.empty() || a == "None" || a == "none" || a == "—") return "无";
+    return QString::fromStdString(a);
 }
 
 // ------------------------------ dashboard -----------------------------------
@@ -210,12 +257,15 @@ public:
         double v[8] = {22, 14, 9, 31, 88, 74, 61, 45};
         for (int i = 0; i < 8; i++) sys.cpu[i] = v[i];
         sys.aggregate = 43; sys.mem_pct = 38; sys.mem_used_gb = 3.0; sys.mem_total_gb = 7.7;
-        sys.temp = 58.4; sys.freq = {1800, 2256, 2256}; sys.load1 = 2.31; sys.load5 = 1.9; sys.load15 = 1.4;
+        sys.temp = 58.4; sys.temp_ok = true; sys.freq = {1800, 2256, 2256}; sys.freq_ok = {true, true, true};
+        sys.load1 = 2.31; sys.load5 = 1.9; sys.load15 = 1.4; sys.load_ok = true;
         sys.uptime = 4293; sys.have = true;
         for (int i = 0; i < 120; i++) sys.hist.push_back(38 + 30 * std::sin(i * 0.21) + 12 * std::sin(i * 0.63) + (i % 7) * 1.5);
         tn.seen = true; tn.state = "CHASE_BALL"; tn.ball = true; tn.bucket = false; tn.frame_age = 11.4;
         tn.mL = 42; tn.mR = -42; tn.arm = "None"; tn.f2c = 23.7; tn.ttfi = 8420; tn.rss_kb = 41216;
         tn.frames = 1873; tn.detections = 512; tn.fps = 29.6;
+        tn.ball_area = 0.038; tn.ball_cx = 366;
+        tn.odom_valid = true; tn.odom_x = 1.24; tn.odom_y = -0.42; tn.odom_heading = -0.62; tn.odom_distance = 1.31;
         for (int i = 0; i < 120; i++) tn.f2c_hist.push_back(22 + 9 * std::sin(i * 0.28) + 5 * std::sin(i * 0.91) + (i % 5) * 0.8);
     }
 
@@ -239,9 +289,16 @@ protected:
 private:
     SystemStats sys; TennisStats tn; std::string buf;
     QElapsedTimer phase;
-    double fs(double b) const { return b * height() / 1080.0; }
+    // Responsive scale: driven by the tighter of the two axes so the HUD fits
+    // any resolution/aspect (16:9, 16:10, 4:3, 21:9) without text overflow. On a
+    // 16:9 panel W/1920 == H/1080, so this matches the 1080p reference exactly.
+    double scale() const { return std::min(width() / 1920.0, height() / 1080.0); }
+    double fs(double b) const { return b * scale(); }
     QFont mono(double pt, int weight = QFont::Medium) const { QFont f(T::MONO); f.setPointSizeF(fs(pt)); f.setWeight(QFont::Weight(weight)); return f; }
     QFont disp(double pt, double spacing = 3.0) const { QFont f(T::DISP); f.setPointSizeF(fs(pt)); f.setBold(true); f.setLetterSpacing(QFont::AbsoluteSpacing, fs(spacing)); f.setCapitalization(QFont::AllUppercase); return f; }
+    // Chinese label/header font (思源黑体). Latin glyphs in the same string render
+    // from this face too, so mixed "4× A55 · 能效核" stays visually consistent.
+    QFont cjk(double pt, int weight = QFont::Medium, double spacing = 1.0) const { QFont f(T::CJK); f.setPointSizeF(fs(pt)); f.setWeight(QFont::Weight(weight)); if (spacing) f.setLetterSpacing(QFont::AbsoluteSpacing, fs(spacing)); return f; }
 
     void drain() {
         char b[8192]; ssize_t n;
@@ -291,7 +348,7 @@ private:
         p.setFont(mono(12, QFont::Bold)); p.setPen(accent);
         p.drawText(r.left() + int(fs(20)), y, idx);
         QRect ib = p.boundingRect(r.left() + int(fs(20)), y, r.width(), int(fs(20)), Qt::AlignLeft, idx);
-        p.setFont(disp(15, 4)); p.setPen(T::ink);
+        p.setFont(cjk(15, QFont::Bold, 3)); p.setPen(T::ink);
         p.drawText(ib.right() + int(fs(14)), y, title);
         // right-side tick ruler
         p.setPen(QPen(T::line, 1));
@@ -343,7 +400,7 @@ private:
         p.drawLine(QPointF(cx - rad - fs(3), cy), QPointF(cx - t, cy)); p.drawLine(QPointF(cx + t, cy), QPointF(cx + rad + fs(3), cy));
         p.drawLine(QPointF(cx, cy - rad - fs(3)), QPointF(cx, cy - t)); p.drawLine(QPointF(cx, cy + t), QPointF(cx, cy + rad + fs(3)));
         if (on) { p.setBrush(c); p.setPen(Qt::NoPen); p.drawEllipse(QPointF(cx, cy), rad * 0.28, rad * 0.28); }
-        p.setFont(mono(12, on ? QFont::Bold : QFont::Normal)); p.setPen(on ? T::ink : T::dim);
+        p.setFont(cjk(12, on ? QFont::Bold : QFont::Normal)); p.setPen(on ? T::ink : T::dim);
         p.drawText(QPointF(cx + rad + fs(16), cy + fs(5)), label);
     }
 
@@ -360,20 +417,20 @@ private:
         int wm = p.boundingRect(0, 0, w, h, 0, "STARRY//SIGNAL").width();
         double sx = x + fs(20) + wm + fs(34);
         p.setPen(QPen(T::withA(T::amber, 90), 1)); p.drawLine(QPointF(sx - fs(18), y + h * 0.30), QPointF(sx - fs(18), y + h * 0.72));
-        p.setFont(mono(11)); p.setPen(T::dim);
-        p.drawText(QPointF(sx, y + h * 0.64), "RK3588 · ORANGEPI-5-PLUS · AARCH64");
-        // right cluster, laid out right-to-left: [clock] [uptime] [LIVE] [dot]
+        p.setFont(cjk(11)); p.setPen(T::dim);
+        p.drawText(QPointF(sx, y + h * 0.64), "内核实时遥测 · RK3588 · 香橙派 5 Plus · AARCH64");
+        // right cluster, laid out right-to-left: [clock] [uptime] [实时] [dot]
         double yb = y + h * 0.62;
         double cur = x + w - fs(24);
         QString clk = QDateTime::currentDateTime().toString("HH:mm:ss");
         p.setFont(mono(17, QFont::Bold)); int cw = p.boundingRect(0, 0, w, h, 0, clk).width();
         cur -= cw; p.setPen(T::ink); p.drawText(QPointF(cur, yb), clk); cur -= fs(30);
-        char up[48]; std::snprintf(up, sizeof up, "UP %llu:%02llu:%02llu", (unsigned long long)(sys.uptime / 3600), (unsigned long long)((sys.uptime / 60) % 60), (unsigned long long)(sys.uptime % 60));
-        p.setFont(mono(11)); int uw = p.boundingRect(0, 0, w, h, 0, up).width();
+        QString up = QString::asprintf("运行 %llu:%02llu:%02llu", (unsigned long long)(sys.uptime / 3600), (unsigned long long)((sys.uptime / 60) % 60), (unsigned long long)(sys.uptime % 60));
+        p.setFont(cjk(11)); int uw = p.boundingRect(0, 0, w, h, 0, up).width();
         cur -= uw; p.setPen(T::dim); p.drawText(QPointF(cur, yb), up); cur -= fs(26);
         bool blink = phase.isValid() ? ((phase.elapsed() / 600) % 2 == 0) : true;
-        p.setFont(mono(11, QFont::Bold)); int lw = p.boundingRect(0, 0, w, h, 0, "LIVE").width();
-        cur -= lw; p.setPen(blink ? T::coral : T::dim); p.drawText(QPointF(cur, yb), "LIVE"); cur -= fs(16);
+        p.setFont(cjk(11, QFont::Bold)); int lw = p.boundingRect(0, 0, w, h, 0, "实时").width();
+        cur -= lw; p.setPen(blink ? T::coral : T::dim); p.drawText(QPointF(cur, yb), "实时"); cur -= fs(16);
         p.setBrush(blink ? T::coral : T::withA(T::coral, 70)); p.setPen(Qt::NoPen);
         p.drawEllipse(QPointF(cur - fs(4), y + h * 0.54), fs(6), fs(6));
         p.setBrush(Qt::NoBrush);
@@ -381,18 +438,18 @@ private:
 
     void systemPanel(QPainter &p, int x, int y, int w, int h) {
         QRect R(x, y, w, h);
-        frame(p, R, "01", "SYSTEM", T::cyan);
+        frame(p, R, "01", "系统", T::cyan);
         int ix = x + int(fs(26)), iw = w - int(fs(52));
         int cy = y + int(fs(64));
-        p.setFont(disp(12, 3)); p.setPen(T::dim); p.drawText(ix, cy, "CPU  ·  8 CORES  ·  BIG.LITTLE");
+        p.setFont(cjk(12, QFont::Bold, 2)); p.setPen(T::dim); p.drawText(ix, cy, "CPU  ·  8 核  ·  大小核架构");
         cy += int(fs(30));
         double rh = h * 0.042, rgap = fs(6), csep = fs(15);
         for (int c = 0; c < 8; c++) {
             double ry = cy + c * (rh + rgap) + (c >= 4 ? csep : 0);
             bool little = c < 4; QColor acc = little ? T::green : T::cyan;
             if (c == 0 || c == 4) {  // cluster tag on the left
-                p.setFont(mono(9, QFont::Bold)); p.setPen(T::withA(acc, 200));
-                p.drawText(QPointF(ix, ry - fs(6)), little ? "4× A55 · EFFICIENCY" : "4× A76 · PERFORMANCE");
+                p.setFont(cjk(9, QFont::Bold)); p.setPen(T::withA(acc, 200));
+                p.drawText(QPointF(ix, ry - fs(6)), little ? "4× A55 · 能效核" : "4× A76 · 性能核");
             }
             p.setFont(mono(11, QFont::Bold)); p.setPen(acc);
             p.drawText(QPointF(ix, ry + rh * 0.72), QString::asprintf("C%d", c));
@@ -403,7 +460,7 @@ private:
         }
         cy += 8 * (rh + rgap) + csep + fs(16);
         // aggregate sparkline
-        p.setFont(disp(12, 3)); p.setPen(T::dim); p.drawText(ix, cy, "AGGREGATE LOAD");
+        p.setFont(cjk(12, QFont::Bold, 2)); p.setPen(T::dim); p.drawText(ix, cy, "总负载");
         p.setFont(mono(13, QFont::Bold)); p.setPen(T::cyan);
         p.drawText(QRectF(ix, cy - fs(12), iw, fs(16)), Qt::AlignRight, QString::asprintf("%.0f%%", sys.aggregate));
         cy += fs(8);
@@ -411,23 +468,23 @@ private:
         sparkline(p, spark, sys.hist, T::cyan);
         cy += spark.height() + fs(22);
         // memory
-        p.setFont(disp(12, 3)); p.setPen(T::dim); p.drawText(ix, cy, "MEMORY");
+        p.setFont(cjk(12, QFont::Bold, 2)); p.setPen(T::dim); p.drawText(ix, cy, "内存");
         cy += fs(10);
         seg(p, QRectF(ix, cy, iw, h * 0.036), sys.mem_pct / 100.0, T::green, 40);
         cy += h * 0.036 + fs(20);
         p.setFont(mono(12)); p.setPen(T::ink);
         p.drawText(QPointF(ix, cy), QString::asprintf("%.1f / %.1f GiB", sys.mem_used_gb, sys.mem_total_gb));
-        p.setPen(T::dim); p.drawText(QRectF(ix, cy - fs(12), iw, fs(16)), Qt::AlignRight, QString::asprintf("%.0f%% used", sys.mem_pct));
+        p.setFont(cjk(12)); p.setPen(T::dim); p.drawText(QRectF(ix, cy - fs(12), iw, fs(16)), Qt::AlignRight, QString::asprintf("已用 %.0f%%", sys.mem_pct));
         cy += fs(22);
         // stat tiles: temp / load / freqs
         double tgap = fs(14); double tw = (iw - tgap * 2) / 3, th = h * 0.115;
-        stat(p, ix, cy, tw, th, "SOC TEMP", QString::asprintf("%.1f", sys.temp), "°C", sys.temp > 80 ? T::coral : sys.temp > 65 ? T::amber : T::green);
-        stat(p, ix + tw + tgap, cy, tw, th, "LOAD 1m", QString::asprintf("%.2f", sys.load1), "", T::cyan);
-        stat(p, ix + 2 * (tw + tgap), cy, tw, th, "LOAD 15m", QString::asprintf("%.2f", sys.load15), "", T::dim);
+        stat(p, ix, cy, tw, th, "SoC 温度", sys.temp_ok ? QString::asprintf("%.1f", sys.temp) : "—", sys.temp_ok ? "°C" : "", !sys.temp_ok ? T::dim : sys.temp > 80 ? T::coral : sys.temp > 65 ? T::amber : T::green);
+        stat(p, ix + tw + tgap, cy, tw, th, "负载·1分", sys.load_ok ? QString::asprintf("%.2f", sys.load1) : "—", "", sys.load_ok ? T::cyan : T::dim);
+        stat(p, ix + 2 * (tw + tgap), cy, tw, th, "负载·15分", sys.load_ok ? QString::asprintf("%.2f", sys.load15) : "—", "", T::dim);
         cy += th + fs(14);
         const char *fn[3] = {"A55", "A76-0", "A76-1"};
         for (int i = 0; i < 3; i++)
-            stat(p, ix + i * (tw + tgap), cy, tw, th, fn[i], QString::asprintf("%d", sys.freq[i]), "MHz", i == 0 ? T::green : T::cyan);
+            stat(p, ix + i * (tw + tgap), cy, tw, th, fn[i], sys.freq_ok[i] ? QString::asprintf("%d", sys.freq[i]) : "—", sys.freq_ok[i] ? "MHz" : "", !sys.freq_ok[i] ? T::dim : i == 0 ? T::green : T::cyan);
     }
 
     void sparkline(QPainter &p, QRectF r, const std::deque<double> &d, QColor c, double maxv = 100.0) {
@@ -452,91 +509,165 @@ private:
         QRectF r(x, y, w, h);
         p.setPen(QPen(T::line, 1)); p.setBrush(T::withA(T::bg0, 150)); p.drawRect(r);
         p.fillRect(QRectF(x, y, fs(3), h), c); // accent tab
-        p.setFont(mono(9)); p.setPen(T::dim); p.drawText(QPointF(x + fs(12), y + fs(16)), label);
+        p.setFont(cjk(9)); p.setPen(T::dim); p.drawText(QPointF(x + fs(12), y + fs(16)), label);
         p.setFont(mono(24, QFont::Bold)); p.setPen(c);
         int vw = p.boundingRect(0, 0, 999, 99, 0, val).width();
         p.drawText(QPointF(x + fs(12), y + h - fs(12)), val);
         if (!unit.isEmpty()) { p.setFont(mono(11)); p.setPen(T::dim); p.drawText(QPointF(x + fs(12) + vw + fs(6), y + h - fs(12)), unit); }
     }
 
+    // ---- odometry heading dial (0 rad = initial forward, at top; needle rotates) ----
+    void compass(QPainter &p, double cx, double cy, double rad, double headingRad, bool valid) {
+        QColor c = valid ? T::violet : T::withA(T::dim, 150);
+        p.setPen(QPen(T::withA(c, valid ? 200 : 110), std::max(1, int(fs(1.4))))); p.setBrush(T::withA(T::bg0, 170));
+        p.drawEllipse(QPointF(cx, cy), rad, rad);
+        for (int i = 0; i < 12; i++) {  // tick ring
+            double a = i * M_PI / 6.0, r0 = rad * (i % 3 == 0 ? 0.76 : 0.88);
+            p.setPen(QPen(T::withA(c, i % 3 == 0 ? 190 : 80), 1));
+            p.drawLine(QPointF(cx + std::sin(a) * r0, cy - std::cos(a) * r0), QPointF(cx + std::sin(a) * rad, cy - std::cos(a) * rad));
+        }
+        // forward reference marker (initial heading) — small triangle at top
+        p.setBrush(T::withA(c, 200)); p.setPen(Qt::NoPen);
+        QPointF tri[3] = {QPointF(cx, cy - rad - fs(4)), QPointF(cx - fs(3.2), cy - rad + fs(3)), QPointF(cx + fs(3.2), cy - rad + fs(3))};
+        p.drawPolygon(tri, 3);
+        // heading needle
+        double hx = std::sin(headingRad), hy = -std::cos(headingRad);
+        if (valid) for (int k = 3; k >= 1; k--) { p.setPen(QPen(T::withA(c, 22 * k), fs(2.4))); p.drawLine(QPointF(cx, cy), QPointF(cx + hx * rad * 0.8, cy + hy * rad * 0.8)); }
+        p.setPen(QPen(c, std::max(1, int(fs(2))))); p.setBrush(Qt::NoBrush);
+        p.drawLine(QPointF(cx - hx * rad * 0.3, cy - hy * rad * 0.3), QPointF(cx + hx * rad * 0.8, cy + hy * rad * 0.8));
+        p.setBrush(c); p.setPen(Qt::NoPen); p.drawEllipse(QPointF(cx, cy), fs(2.6), fs(2.6));
+    }
+
+    // ---- ball horizontal-position strip: aim line at centre, marker at cx/frame_w ----
+    void ballBar(QPainter &p, QRectF r, double pos01, bool present) {
+        p.setPen(QPen(T::line, 1)); p.setBrush(T::withA(T::bg0, 160)); p.drawRect(r);
+        double midx = r.center().x();
+        p.setPen(QPen(T::withA(T::amber, 130), std::max(1, int(fs(1))), Qt::DashLine));
+        p.drawLine(QPointF(midx, r.top() - fs(3)), QPointF(midx, r.bottom() + fs(3)));
+        if (present) {
+            double bx = r.left() + std::max(0.0, std::min(1.0, pos01)) * r.width();
+            double rr = std::max(fs(3.0), r.height() * 0.34);
+            for (int k = 3; k >= 1; k--) { p.setPen(Qt::NoPen); p.setBrush(T::withA(T::green, 16 * k)); p.drawEllipse(QPointF(bx, r.center().y()), rr + k * fs(1.6), rr + k * fs(1.6)); }
+            p.setBrush(T::green); p.setPen(Qt::NoPen); p.drawEllipse(QPointF(bx, r.center().y()), rr, rr);
+        }
+    }
+
     void robotPanel(QPainter &p, int x, int y, int w, int h) {
         QRect R(x, y, w, h);
-        frame(p, R, "02", "TENNIS ROBOT", T::amber);
+        frame(p, R, "02", "网球机器人", T::amber);
         int ix = x + int(fs(26)), iw = w - int(fs(52));
         if (!tn.seen) {
-            p.setFont(disp(20, 4)); p.setPen(T::dim);
             reticle(p, x + w / 2.0, y + h * 0.42, fs(40), false, T::dim, "");
-            p.drawText(R.adjusted(0, int(h * 0.5), 0, 0), Qt::AlignHCenter | Qt::AlignTop, "NO SIGNAL");
-            p.setFont(mono(11)); p.setPen(T::faint.lighter(160));
-            p.drawText(R.adjusted(0, int(h * 0.56), 0, 0), Qt::AlignHCenter | Qt::AlignTop, "pipe telemetry:  tennis-app … | dashboard");
+            p.setFont(cjk(20, QFont::Bold, 3)); p.setPen(T::dim);
+            p.drawText(R.adjusted(0, int(h * 0.5), 0, 0), Qt::AlignHCenter | Qt::AlignTop, "无 信 号");
+            p.setFont(cjk(11)); p.setPen(T::faint.lighter(160));
+            p.drawText(R.adjusted(0, int(h * 0.56), 0, 0), Qt::AlignHCenter | Qt::AlignTop, "接入遥测：  tennis-app … | dashboard");
             return;
         }
-        int cy = y + int(fs(66));
-        // STATE big readout
+        int cy = y + int(fs(62));
+        // STATE — big Chinese readout + small raw enum
         QColor sc = stateColor(tn.state);
-        p.setFont(mono(10)); p.setPen(T::dim); p.drawText(QPointF(ix, cy), "STATE MACHINE");
-        cy += int(fs(68));
-        glow(p, disp(46, 4), sc, ix, cy, QString::fromStdString(tn.state), 80);
-        cy += int(fs(20));
-        p.setPen(QPen(T::withA(sc, 120), 1)); p.drawLine(QPointF(ix, cy), QPointF(ix + iw, cy));
-        cy += int(fs(30));
-        // detection reticles
-        reticle(p, ix + fs(22), cy, fs(20), tn.ball, T::green, "BALL DETECTED");
-        reticle(p, ix + iw * 0.52 + fs(22), cy, fs(20), tn.bucket, T::amber, "BUCKET VISIBLE");
+        p.setFont(cjk(10)); p.setPen(T::dim); p.drawText(QPointF(ix, cy), "状态机");
         cy += int(fs(56));
+        QFont bigf = cjk(44, QFont::Bold, 2);
+        glow(p, bigf, sc, ix, cy, stateCN(tn.state), 80);
+        int sw = QFontMetrics(bigf).horizontalAdvance(stateCN(tn.state));
+        p.setFont(mono(11)); p.setPen(T::withA(sc, 160));
+        p.drawText(QPointF(ix + sw + fs(18), cy - fs(3)), QString::fromStdString(tn.state));
+        cy += int(fs(16));
+        p.setPen(QPen(T::withA(sc, 120), 1)); p.drawLine(QPointF(ix, cy), QPointF(ix + iw, cy));
+        cy += int(fs(26));
+        // detection reticles
+        reticle(p, ix + fs(20), cy, fs(18), tn.ball, T::green, "检测到球");
+        reticle(p, ix + iw * 0.54 + fs(20), cy, fs(18), tn.bucket, T::amber, "球桶可见");
+        cy += int(fs(44));
+        // vision: ball area % + horizontal position strip (aim = frame centre)
+        p.setFont(cjk(10)); p.setPen(T::dim); p.drawText(QPointF(ix, cy), "视觉感知");
+        p.setFont(mono(11, QFont::Bold)); p.setPen(tn.ball ? T::green : T::dim);
+        p.drawText(QRectF(ix, cy - fs(12), iw, fs(16)), Qt::AlignRight | Qt::AlignVCenter, QString::asprintf("目标面积 %.1f%%", tn.ball_area * 100.0));
+        cy += int(fs(8));
+        ballBar(p, QRectF(ix + fs(16), cy, iw - fs(32), fs(13)), tn.ball_cx / 640.0, tn.ball && tn.ball_cx >= 0);
+        p.setFont(cjk(8)); p.setPen(T::withA(T::dim, 190));
+        p.drawText(QPointF(ix, cy + fs(11)), "左");
+        p.drawText(QPointF(ix + iw - fs(10), cy + fs(11)), "右");
+        cy += int(fs(13) + fs(20));
         // motors
-        p.setFont(disp(12, 3)); p.setPen(T::dim); p.drawText(ix, cy, "DIFFERENTIAL DRIVE  ·  −100 … +100");
-        cy += int(fs(14));
-        double mh = h * 0.05;
-        p.setFont(mono(11, QFont::Bold)); p.setPen(T::ink); p.drawText(QPointF(ix, cy + mh * 0.72), "L");
+        p.setFont(cjk(12, QFont::Bold, 2)); p.setPen(T::dim); p.drawText(ix, cy, "差速驱动  ·  −100 … +100");
+        cy += int(fs(12));
+        double mh = h * 0.045;
+        p.setFont(cjk(11, QFont::Bold)); p.setPen(T::ink); p.drawText(QPointF(ix, cy + mh * 0.72), "左");
         motor(p, QRectF(ix + fs(26), cy, iw - fs(26) - fs(70), mh), tn.mL);
-        p.setPen(tn.mL >= 0 ? T::green : T::coral); p.drawText(QRectF(ix + iw - fs(64), cy, fs(64), mh), Qt::AlignRight | Qt::AlignVCenter, QString::asprintf("%+d", tn.mL));
-        cy += mh + fs(10);
-        p.setPen(T::ink); p.drawText(QPointF(ix, cy + mh * 0.72), "R");
+        p.setFont(mono(12, QFont::Bold)); p.setPen(tn.mL >= 0 ? T::green : T::coral); p.drawText(QRectF(ix + iw - fs(64), cy, fs(64), mh), Qt::AlignRight | Qt::AlignVCenter, QString::asprintf("%+d", tn.mL));
+        cy += mh + fs(9);
+        p.setFont(cjk(11, QFont::Bold)); p.setPen(T::ink); p.drawText(QPointF(ix, cy + mh * 0.72), "右");
         motor(p, QRectF(ix + fs(26), cy, iw - fs(26) - fs(70), mh), tn.mR);
-        p.setPen(tn.mR >= 0 ? T::green : T::coral); p.drawText(QRectF(ix + iw - fs(64), cy, fs(64), mh), Qt::AlignRight | Qt::AlignVCenter, QString::asprintf("%+d", tn.mR));
-        cy += mh + fs(24);
+        p.setFont(mono(12, QFont::Bold)); p.setPen(tn.mR >= 0 ? T::green : T::coral); p.drawText(QRectF(ix + iw - fs(64), cy, fs(64), mh), Qt::AlignRight | Qt::AlignVCenter, QString::asprintf("%+d", tn.mR));
+        cy += mh + fs(18);
+        // odometry: heading dial + distance/coordinate readouts
+        p.setFont(cjk(12, QFont::Bold, 2)); p.setPen(T::dim); p.drawText(ix, cy, "里程计");
+        if (!tn.odom_valid) { p.setFont(cjk(9)); p.setPen(T::withA(T::dim, 170)); p.drawText(QRectF(ix, cy - fs(12), iw, fs(16)), Qt::AlignRight | Qt::AlignVCenter, "锚点未初始化"); }
+        double odoTop = cy + fs(6), dialR = fs(33), dialCx = ix + dialR + fs(4), dialCy = odoTop + dialR + fs(3);
+        compass(p, dialCx, dialCy, dialR, tn.odom_heading, tn.odom_valid);
+        p.setFont(mono(9)); p.setPen(tn.odom_valid ? T::violet : T::dim);
+        p.drawText(QRectF(dialCx - dialR, dialCy + dialR + fs(3), dialR * 2, fs(12)), Qt::AlignHCenter, tn.odom_valid ? QString::asprintf("%+.0f°", tn.odom_heading * 180.0 / M_PI) : "—");
+        double ox = dialCx + dialR + fs(22), ow = (ix + iw) - ox;
+        auto odoRow = [&](double ry, const QString &label, const QString &val, QColor vc) {
+            p.setFont(cjk(9)); p.setPen(T::dim); p.drawText(QPointF(ox, ry), label);
+            p.setFont(mono(15, QFont::Bold)); p.setPen(tn.odom_valid ? vc : T::dim);
+            p.drawText(QRectF(ox, ry - fs(15), ow, fs(18)), Qt::AlignRight | Qt::AlignVCenter, val);
+        };
+        double ob = odoTop + fs(18);
+        odoRow(ob, "距锚点", tn.odom_valid ? QString::asprintf("%.2f m", tn.odom_distance) : "—", T::amber);
+        odoRow(ob + fs(24), "坐标 X", tn.odom_valid ? QString::asprintf("%+.2f m", tn.odom_x) : "—", T::cyan);
+        odoRow(ob + fs(48), "坐标 Y", tn.odom_valid ? QString::asprintf("%+.2f m", tn.odom_y) : "—", T::cyan);
+        cy = dialCy + dialR + fs(20);
         // metric tiles
-        double tgap = fs(14); double tw = (iw - tgap * 2) / 3, th = h * 0.115;
-        stat(p, ix, cy, tw, th, "ARM", QString::fromStdString(tn.arm), "", T::amber);
-        stat(p, ix + tw + tgap, cy, tw, th, "FPS", QString::asprintf("%.1f", tn.done ? tn.res_fps : tn.fps), "", T::green);
-        stat(p, ix + 2 * (tw + tgap), cy, tw, th, "FRAME→CMD", QString::asprintf("%.1f", tn.f2c), "ms", tn.f2c > 40 ? T::amber : T::cyan);
-        cy += th + fs(14);
-        stat(p, ix, cy, tw, th, "TTFI", tn.ttfi < 0 ? "—" : QString::asprintf("%.0f", tn.ttfi), tn.ttfi < 0 ? "" : "ms", T::amber);
-        stat(p, ix + tw + tgap, cy, tw, th, "DETECTIONS", QString::asprintf("%llu", (unsigned long long)tn.detections), "", T::cyan);
-        stat(p, ix + 2 * (tw + tgap), cy, tw, th, "APP RSS", tn.rss_kb ? QString::asprintf("%.0f", tn.rss_kb / 1024.0) : "—", tn.rss_kb ? "MB" : "", T::dim);
-        cy += th + fs(20);
-        p.setFont(mono(10)); p.setPen(T::dim);
-        p.drawText(QPointF(ix, cy), QString::asprintf("frame age %.1f ms   ·   frames %llu%s", tn.frame_age, (unsigned long long)tn.frames, tn.done ? "   ·   RUN COMPLETE" : ""));
-        cy += int(fs(24));
+        double tgap = fs(14); double tw = (iw - tgap * 2) / 3, th = h * 0.10;
+        stat(p, ix, cy, tw, th, "机械臂", armCN(tn.arm), "", T::amber);
+        stat(p, ix + tw + tgap, cy, tw, th, "帧率", QString::asprintf("%.1f", tn.done ? tn.res_fps : tn.fps), "", T::green);
+        stat(p, ix + 2 * (tw + tgap), cy, tw, th, "帧→指令", QString::asprintf("%.1f", tn.f2c), "ms", tn.f2c > 40 ? T::amber : T::cyan);
+        cy += th + fs(12);
+        stat(p, ix, cy, tw, th, "首帧推理", tn.ttfi < 0 ? "—" : QString::asprintf("%.0f", tn.ttfi), tn.ttfi < 0 ? "" : "ms", T::amber);
+        stat(p, ix + tw + tgap, cy, tw, th, "检测数", QString::asprintf("%llu", (unsigned long long)tn.detections), "", T::cyan);
+        stat(p, ix + 2 * (tw + tgap), cy, tw, th, "应用内存", tn.rss_kb ? QString::asprintf("%.0f", tn.rss_kb / 1024.0) : "—", tn.rss_kb ? "MB" : "", T::dim);
+        cy += th + fs(16);
+        p.setFont(cjk(10)); p.setPen(T::dim);
+        p.drawText(QPointF(ix, cy), QString::asprintf("帧延迟 %.1f ms   ·   帧数 %llu%s", tn.frame_age, (unsigned long long)tn.frames, tn.done ? "   ·   运行结束" : ""));
+        cy += int(fs(18));
         // frame->command latency history fills the remaining space
-        p.setFont(disp(12, 3)); p.setPen(T::dim); p.drawText(ix, cy, "FRAME → COMMAND LATENCY  ·  ms");
+        p.setFont(cjk(12, QFont::Bold, 2)); p.setPen(T::dim); p.drawText(ix, cy, "帧 → 指令延迟  ·  ms");
         p.setFont(mono(11, QFont::Bold)); p.setPen(T::amber);
         p.drawText(QRectF(ix, cy - fs(12), iw, fs(16)), Qt::AlignRight, QString::asprintf("%.1f", tn.f2c));
-        cy += int(fs(10));
-        double rem = (y + h - int(fs(24))) - cy;
-        if (rem > fs(40)) sparkline(p, QRectF(ix, cy, iw, std::min(rem, h * 0.13)), tn.f2c_hist, T::amber, 60.0);
+        cy += int(fs(8));
+        double rem = (y + h - int(fs(20))) - cy;
+        if (rem > fs(36)) sparkline(p, QRectF(ix, cy, iw, std::min(rem, h * 0.11)), tn.f2c_hist, T::amber, 60.0);
     }
 };
 
 int main(int argc, char **argv) {
-    QString shot; bool demo = false;
+    QString shot; bool demo = false; int sw = 1920, sh = 1080;
     for (int i = 1; i < argc; i++) {
         if (!std::strcmp(argv[i], "--shot") && i + 1 < argc) { shot = argv[++i]; demo = true; }
+        else if (!std::strcmp(argv[i], "--size") && i + 1 < argc) { std::sscanf(argv[++i], "%dx%d", &sw, &sh); }  // responsive test: --size 1280x720
         else if (!std::strcmp(argv[i], "--demo")) demo = true;
     }
     QApplication app(argc, argv);
-    // Load bundled display fonts so the HUD looks right regardless of the
-    // board's fontconfig. Falls back to defaults if absent.
+    // Load bundled display fonts so the HUD looks right regardless of the board's
+    // fontconfig: Fira Code (Latin data), Oswald (Latin brand), Noto Sans CJK SC
+    // (思源黑体 — Chinese labels). Falls back to system fonts if a file is absent.
     QString ed = QCoreApplication::applicationDirPath();
     for (const QString &fp : {ed + "/fonts/FiraCode-Regular.ttf", ed + "/fonts/FiraCode-Bold.ttf",
-                              ed + "/fonts/Oswald.ttf", QStringLiteral("/usr/share/fonts/truetype/hud/Oswald.ttf")})
+                              ed + "/fonts/Oswald.ttf", QStringLiteral("/usr/share/fonts/truetype/hud/Oswald.ttf"),
+                              ed + "/fonts/NotoSansCJKsc-Regular.otf", ed + "/fonts/NotoSansCJKsc-Bold.otf",
+                              ed + "/fonts/NotoSansCJK-Regular.ttc",
+                              QStringLiteral("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+                              QStringLiteral("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc")})
         QFontDatabase::addApplicationFont(fp);
     if (!shot.isEmpty()) {
-        Dashboard d(true); d.resize(1920, 1080);
+        Dashboard d(true); d.resize(sw, sh);
         QPixmap pm = d.grab();
         pm.save(shot);
-        std::printf("DASHBOARD_SHOT %s\n", shot.toUtf8().constData());
+        std::printf("DASHBOARD_SHOT %s %dx%d\n", shot.toUtf8().constData(), sw, sh);
         return 0;
     }
     Dashboard d(demo);

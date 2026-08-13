@@ -386,6 +386,12 @@ clk_id_group!(CLK_PCIE1L0_PIPE = 708, CLK_PCIE1L1_PIPE = 709,);
 // =============================================================================
 clk_id_group!(ACLK_JPEG_DECODER = 436, HCLK_JPEG_DECODER = 437,);
 
+// RGA2 总线时钟（门控位在 CLKGATE_CON45，见 gate.rs）。U-Boot 交接时 RGA 时钟处于
+// 门控状态，ax-driver 的 RGA probe 在首次 MMIO 前解除门控。键 438/439/440 在本文件内
+// 未被占用（规范 rk3588-cru.h 的 RGA2 id 与上方既有条目冲突），实际门控由 gate.rs 的
+// CLKGATE_CON(45) bit 7/8/9 选择。
+clk_id_group!(HCLK_RGA2 = 438, ACLK_RGA2 = 439, CLK_RGA2_CORE = 440,);
+
 pub const PCLK_PHP_USBHOST3_0: ClkId = PCLK_PHP_ROOT;
 pub const CLK_PIPE_USBHOST3_0: ClkId = CLK_PIPEPHY2_PIPE_U3_G;
 pub const CLK_REF_USB3OTG0: ClkId = REF_CLK_USB3OTG0;

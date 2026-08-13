@@ -53,14 +53,14 @@ apps/starry/orangepi-5-plus-uvc-rknn/build-image-runner.sh
 Install it into the board Linux rootfs:
 
 ```bash
-export BOARD_IP=10.3.10.24
+export BOARD_IP=<BOARD-IP>
 rsync -az --delete \
   apps/starry/orangepi-5-plus-uvc-rknn/rknn-yolov8-image/install/rk3588_linux_aarch64/rknn_yolov8_image/ \
   orangepi@${BOARD_IP}:/tmp/rknn_yolov8_image/
 ssh orangepi@${BOARD_IP} '
-  printf "%s\n" orangepi | sudo -S rm -rf /rknn_yolov8_image &&
-  printf "%s\n" orangepi | sudo -S mv /tmp/rknn_yolov8_image /rknn_yolov8_image &&
-  printf "%s\n" orangepi | sudo -S chown -R root:root /rknn_yolov8_image &&
+  sudo rm -rf /rknn_yolov8_image &&
+  sudo mv /tmp/rknn_yolov8_image /rknn_yolov8_image &&
+  sudo chown -R root:root /rknn_yolov8_image &&
   sync
 '
 ```
@@ -71,7 +71,7 @@ Linux-side finite smoke test on the board:
 ssh orangepi@${BOARD_IP} '
   cd /rknn_yolov8_image &&
   export LD_LIBRARY_PATH=/rknn_yolov8_image/lib:/usr/local/lib:/usr/lib/aarch64-linux-gnu:$LD_LIBRARY_PATH &&
-  printf "%s\n" orangepi | sudo -E -S \
+  sudo -E \
     ./rknn_yolov8_stream --model model/yolov8.rknn --label model/coco_80_labels_list.txt \
       --device 0 --width 320 --height 240 --fps 30 --duration-sec 8 --infer-every 2 --max-inferences 3 \
       --http-port 8080 --http-fps 15 --jpeg-quality 80
@@ -85,7 +85,7 @@ when the validation assets are present:
 ssh orangepi@${BOARD_IP} '
   cd /rknn_yolov8_image &&
   export LD_LIBRARY_PATH=/rknn_yolov8_image/lib:/usr/local/lib:/usr/lib/aarch64-linux-gnu:$LD_LIBRARY_PATH &&
-  printf "%s\n" orangepi | sudo -E -S \
+  sudo -E \
     ./rknn_yolov8_bench --validate-list validation/images.txt --expected validation/expected.txt \
       --min-confidence 25 --core-mask all --profile
 '
@@ -103,7 +103,7 @@ Linux-side 60-second benchmark smoke can be shortened during setup:
 ssh orangepi@${BOARD_IP} '
   cd /rknn_yolov8_image &&
   export LD_LIBRARY_PATH=/rknn_yolov8_image/lib:/usr/local/lib:/usr/lib/aarch64-linux-gnu:$LD_LIBRARY_PATH &&
-  printf "%s\n" orangepi | sudo -E -S \
+  sudo -E \
     ./rknn_yolov8_bench --model model/yolov8.rknn --label model/coco_80_labels_list.txt \
       --device 0 --width 320 --height 240 --fps 30 --duration-sec 8 --infer-every 1 \
       --report-interval-sec 2 --min-confidence 25
@@ -117,7 +117,7 @@ For continuous manual testing with browser preview, use `--duration-sec 0
 ssh orangepi@${BOARD_IP} '
   cd /rknn_yolov8_image &&
   export LD_LIBRARY_PATH=/rknn_yolov8_image/lib:/usr/local/lib:/usr/lib/aarch64-linux-gnu:$LD_LIBRARY_PATH &&
-  printf "%s\n" orangepi | sudo -E -S \
+  sudo -E \
     ./rknn_yolov8_stream --model model/yolov8.rknn --label model/coco_80_labels_list.txt \
       --device 0 --width 320 --height 240 --fps 30 --duration-sec 0 --infer-every 2 --max-inferences 0 \
       --http-port 8080 --http-fps 15 --jpeg-quality 80
@@ -215,7 +215,7 @@ cargo starry board \
   --target aarch64-unknown-none-softfloat \
   --board-config apps/starry/orangepi-5-plus-uvc-rknn/board-orangepi-5-plus.toml \
   -b OrangePi-5-Plus-robot \
-  --server 10.30.12.60 \
+  --server <SERVER-IP> \
   --port 2999
 ```
 

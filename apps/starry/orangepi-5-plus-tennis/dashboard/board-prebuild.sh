@@ -24,6 +24,7 @@ FROM ubuntu:22.04
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
       g++ qt6-base-dev qt6-qpa-plugins libgl1 fonts-firacode curl ca-certificates fontconfig \
+      fonts-noto-cjk python3-fonttools \
  && mkdir -p /usr/share/fonts/truetype/hud \
  && curl -sL -o /usr/share/fonts/truetype/hud/Oswald.ttf "https://github.com/google/fonts/raw/main/ofl/oswald/Oswald%5Bwght%5D.ttf" \
  && fc-cache -f && rm -rf /var/lib/apt/lists/*
@@ -43,6 +44,22 @@ for pl in libqlinuxfb.so libqoffscreen.so; do
   f=$(find /usr/lib -name "$pl" | head -1); [ -n "$f" ] && cp -L "$f" /work/out/plugins/platforms/; done
 cp /usr/share/fonts/truetype/firacode/FiraCode-Regular.ttf /usr/share/fonts/truetype/firacode/FiraCode-Bold.ttf /work/out/fonts/ 2>/dev/null || true
 cp /usr/share/fonts/truetype/hud/Oswald.ttf /work/out/fonts/ 2>/dev/null || true
+# Subset the Simplified-Chinese face of the Noto Sans CJK OTC down to just the
+# glyphs this dashboard uses. Keeps the board bundle tiny (~0.3 MB vs ~40 MB for
+# the full OTC) while guaranteeing correct SC glyph forms (测/见/应/负 …) — the JP
+# default face would render some of these as traditional variants or tofu.
+python3 - <<'PY'
+s = open('/work/dashboard.cpp', encoding='utf-8').read()
+open('/work/glyphs.txt', 'w', encoding='utf-8').write(''.join(sorted({c for c in s if ord(c) > 0x7f})))
+PY
+NOTO=/usr/share/fonts/opentype/noto
+for wf in Regular Bold; do
+  ttc="$NOTO/NotoSansCJK-$wf.ttc"
+  idx=$(python3 -c "from fontTools.ttLib import TTCollection;c=TTCollection('$ttc');print(next(i for i,f in enumerate(c.fonts) if f['name'].getDebugName(1)=='Noto Sans CJK SC'))")
+  python3 -m fontTools.subset "$ttc" --font-number="$idx" --text-file=/work/glyphs.txt --unicodes=U+0020-007E \
+    --output-file="/work/out/fonts/NotoSansCJKsc-$wf.otf" --no-hinting --desubroutinize \
+    && echo "subset Noto Sans CJK SC $wf (face $idx): $(du -h /work/out/fonts/NotoSansCJKsc-$wf.otf | cut -f1)"
+done
 gather() { ldd "$1" 2>/dev/null | awk '/=>/ {print $3}' | grep -E '^/' || true; }
 { gather /work/out/dashboard; for p in /work/out/plugins/platforms/*.so; do gather "$p"; done; } | sort -u | while read so; do
   case "$so" in */libc.so.6|*/ld-linux-*|*/libm.so.6|*/libpthread.so.0|*/libdl.so.2|*/librt.so.1|*/libresolv.so.2) : ;; *) cp -L "$so" /work/out/lib/ ;; esac

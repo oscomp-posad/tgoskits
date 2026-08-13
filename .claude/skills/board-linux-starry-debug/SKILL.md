@@ -53,10 +53,10 @@ ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=8 orangepi@<i
 rsync -az --delete <local-dir>/ orangepi@<ip>:/tmp/<name>/
 ssh orangepi@<ip> '
   set -e
-  printf "%s\n" orangepi | sudo -S rm -rf /target/path
-  printf "%s\n" orangepi | sudo -S mv /tmp/<name> /target/path
-  printf "%s\n" orangepi | sudo -S chown -R root:root /target/path
-  printf "%s\n" orangepi | sudo -S sync
+  sudo rm -rf /target/path
+  sudo mv /tmp/<name> /target/path
+  sudo chown -R root:root /target/path
+  sudo sync
   ls -l /target/path
   sync
 '

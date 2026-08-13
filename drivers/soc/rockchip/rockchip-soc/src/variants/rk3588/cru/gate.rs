@@ -342,6 +342,15 @@ clk_gate_table!(
     ACLK_JPEG_DECODER => (45, 2),
     HCLK_JPEG_DECODER => (45, 3),
 
+    // ========================================================================
+    // RGA2 叶子时钟门控 (CLKGATE_CON45 bits 7/8/9, verified against mainline
+    // drivers/clk/rockchip/clk-rk3588.c; the aclk_vdpu_root parent is left
+    // enabled by the bootloader, as for the JPEG decoder above)
+    // ========================================================================
+    HCLK_RGA2 => (45, 7),
+    ACLK_RGA2 => (45, 8),
+    CLK_RGA2_CORE => (45, 9),
+
 );
 
 clk_pmu_gate_table!(
@@ -441,14 +450,15 @@ mod tests {
         // USB: 21 main/php gates + 2 PMU composite gates
         // NVM/eMMC: 7
         // JPEG decoder (VDPU): 2
-        // 总计: 175
+        // RGA2: 3 (hclk/aclk/core)
+        // 总计: 178
         assert_eq!(
             CLK_GATE_TABLE.len()
                 + CLK_PMU_GATE_TABLE.len()
                 + CLK_PHP_GATE_TABLE.len()
                 + CLK_COMPOSITE_TABLE.len()
                 + CLK_PMU_COMPOSITE_TABLE.len(),
-            175
+            178
         );
     }
 

@@ -31,146 +31,12 @@
   \vfill\centering
   {\sffamily\bfseries\color{ink}\LARGE 面向边缘智能的 AIOS 设计与优化}\\[6pt]
   {\color{teal}\rule{0.46\paperwidth}{1pt}}\\[10pt]
-  {\sffamily\color{teal}\large 决赛进展汇报}\\[18pt]
+  {\sffamily\color{teal}\large 决赛进展汇报}\\[14pt]
+  {\color{ink}\footnotesize 以一个真实的边缘 AI 机器人为牵引，将 StarryOS 在 RK3588 上做到对 Linux 逐轴对等乃至反超，}\\[2pt]
+  {\color{ink}\footnotesize 成果全部回馈上游 rcore-os/tgoskits（累计 \nPRMerged{} 个 PR 已合并）。}\\[16pt]
   {\sffamily\color{muted}\large Team Posad\quad·\quad 清华大学}\\[8pt]
   {\color{muted}\footnotesize RK3588 / OrangePi-5-Plus\quad·\quad 基线 rcore-os/tgoskits dev @73409e079\quad·\quad 2026-08}
   \vfill
-\end{frame}
-
-% ============================== 2 目录 ==============================
-\begin{frame}
-  \frametitle{目录}
-  \vspace{3mm}
-  \setlength{\leftmargini}{1.2em}
-  {\large
-  \begin{itemize}\setlength{\itemsep}{9pt}
-    \item \headline{一\ \ 背景与结果}\quad{\color{muted}命题、工作量总览、对 Linux 记分卡、系统分层、机器人回路}
-    \item \headline{二\ \ 系统能力与性能}\quad{\color{muted}观测、调度、内存、启动、系统调用、频率、NPU 模型、显示与板级、正确性、回退}
-    \item \headline{三\ \ 增量与展望}\quad{\color{muted}时间线、分工、主要贡献}
-    \item \headline{四\ \ 方法与复现}\quad{\color{muted}AI 方法与自治测试台、后续工作、材料入口}
-  \end{itemize}}
-  \vfill
-  {\color{muted}\footnotesize 顶部导航条标示当前所在段落；正文之后附有备用材料（附录）。}
-\end{frame}
-
-% ============================== 4 从初赛到决赛的转变 ==============================
-\begin{frame}
-  \navsegment{1}
-  \frametitle{从初赛到决赛：整 OS 对等命题}
-  \begin{columns}[T]
-    \begin{column}{0.48\textwidth}
-      {\headline{初赛}}\smallskip
-      \begin{itemize}
-        \item 重心在单条推理流水线
-        \item 依靠应用侧取球循环与数据布局，将首帧延迟降至接近 Linux
-      \end{itemize}
-    \end{column}
-    \begin{column}{0.48\textwidth}
-      {\headline{决赛}}\smallskip
-      \begin{itemize}
-        \item 命题转为整机对等，令 StarryOS 作为通用 OS
-        \item 在调度、系统调用、内存、频率等与机器人无关的子系统直接对比 Linux
-        \item 机器人为众多负载之一，考核对象为操作系统的通用性
-      \end{itemize}
-    \end{column}
-  \end{columns}
-  \smallskip
-  {\color{muted} 两侧运行同一份遵循 Linux ABI 的可执行文件，避免以不可比的口径拼凑结论。}
-  \advance{初赛单流水线接近 Linux}{决赛命题：整 OS 在通用负载上对等}
-\end{frame}
-
-% ============================== 3 主要工作与结果 ==============================
-\begin{frame}
-  \navsegment{1}
-  \frametitle{主要工作与结果}
-  \begin{columns}[T]
-    \begin{column}{0.5\textwidth}
-      \includegraphics[width=\linewidth]{F01.png}
-    \end{column}
-    \begin{column}{0.47\textwidth}
-      起点：网球拾取机器人由 C 语言的 Linux 迁移至 Rust 实现的 StarryOS，平台为 RK3588。\smallskip
-      \begin{itemize}
-        \item \headline{整机回路跑通}\ 追球到投放五阶段闭环在板上运行，TTFI \nTtfiBefore $\to$ \nTtfi\,s，优于 Linux \nTtfiLin\,s
-        \item \headline{整 OS 向 Linux 对等}\ 两侧同一份 ELF，cpu 八线程 \nCpuTEightBefore $\to$ \nCpuTEight\,ev/s，为 Linux \nCpuTEightLin 的 \nCpuTEightRatio 倍
-        \item \headline{多项已合并上游}\ 观测、调度、DVFS、驱动多项改动并入 rcore-os/tgoskits
-      \end{itemize}
-    \end{column}
-  \end{columns}
-  \advance{机器人从 C-Linux 迁至 Rust 的 StarryOS}{三条头条：回路跑通、整 OS 对等、多项已合并上游}
-\end{frame}
-
-% ============================== S 工作量总览 ==============================
-\begin{frame}
-  \navsegment{1}
-  \frametitle{一个月做了多少：工作量一览}
-  \begin{columns}[T]
-    \begin{column}{0.5\textwidth}
-      \begin{itemize}
-        \item \headline{32 项原子改动}\ 20 项已并入上游或 QEMU fork，7 项在审，5 项已在集成分支实现并板级验证
-        \item \headline{6 个内核子系统}\ 观测 perf、调度与大小核、DVFS、内存与分页、页表正确性、启动 TTFI
-        \item \headline{一套 QEMU RKNPU 设备模型}\ 把闭源 NPU 实现为功能级仿真，106 个 qtest
-      \end{itemize}
-    \end{column}
-    \begin{column}{0.47\textwidth}
-      \begin{itemize}
-        \item \headline{约 8 个 RK3588 驱动}\ RGA、JPU、UART、USB-tty、PWM、UVC、网络、GEM
-        \item \headline{原生显示栈 + 合成器}\ VOP2 / HDMI-QP / HDPTX 四 crate 上板点亮，Weston 跑通
-        \item \headline{机器人拾球应用}\ 五阶段闭环在真机完整运行
-        \item \headline{全部真机验证}\ perf 板级 39/0 与 56/0；性能数取三次重复中位数
-      \end{itemize}
-    \end{column}
-  \end{columns}
-  \advance{三名成员、约一个月}{32 项改动、6 个子系统、一套 QEMU NPU 模型、约 8 个驱动，全部 RK3588 真机验证}
-\end{frame}
-
-% ============================== 22 按轴诚实图例 ==============================
-\begin{frame}
-  \navsegment{1}
-  \frametitle{对 Linux 逐轴记分卡（StarryOS 优化前 $\to$ 后）}
-  \scriptsize
-  \begin{tabular}{@{}l r r r l@{}}
-    \toprule
-    轴（单位） & 优化前 & 优化后 & Linux & 判定 \\
-    \midrule
-    THP first-touch (s) & \nThpFTBefore & \nThpFT & \nThpFTLin & \vgood{领先 \nThpRatio×} \\
-    启动 TTFI (s) & \nTtfiBefore & \nTtfi & \nTtfiLin & \vgood{领先} \\
-    A55 单核 (ev/s) & 约 \nAfiveBefore & \nAfive & \nAfiveLin & \vgood{领先 \nAfiveRatio×} \\
-    schbench RPS & \nSchRpsBefore & \nSchRps & \nSchRpsLin & \vgood{反超 \nSchRpsRatio×} \\
-    A76 单核 (ev/s) & 约 \nAsevenBefore & \nAseven & \nAsevenLin & 持平 \nAsevenRatio× \\
-    cpu 八线程 (ev/s) & \nCpuTEightBefore & \nCpuTEight & \nCpuTEightLin & 持平 \nCpuTEightRatio× \\
-    唤醒 p50 (µs) & \nWakeBefore & \nWake & \nWakeLin & 持平 \\
-    getpid (ns) & \nGetpidBefore & \nGetpid & \nGetpidLin & 收窄 \nGetpidRatio× \\
-    mutex 8T (s) & \nMutexBefore & \nMutexAfter & \nMutexLin & 收窄 \nMutexRatio× \\
-    内存写 (MiB/s) & \nMemBWWriteBefore & \nMemBWWrite & \nMemBWWriteLin & 收窄 \nMemBWWriteRatio× \\
-    \bottomrule
-  \end{tabular}
-  \par\smallskip
-  {\color{muted}\scriptsize “收窄”指相对 Linux 的差距已大幅缩小（getpid 由 7$\times$ 收至 \nGetpidRatio$\times$，mutex 由 3.5$\times$ 收至 \nMutexRatio$\times$）；内存写受 DDR 变频固件限制。}
-  \advance{一图看清对 Linux 的位置}{十个轴：领先 THP/TTFI/A55/schbench，其余持平或收窄}
-\end{frame}
-
-% ============================== 6 系统分层总览 ==============================
-\begin{frame}
-  \navsegment{1}
-  \frametitle{系统分层总览与术语}
-  \begin{columns}[T]
-    \begin{column}{0.52\textwidth}
-      \includegraphics[width=\linewidth]{F02.png}
-    \end{column}
-    \begin{column}{0.45\textwidth}
-      \begin{itemize}
-        \item StarryOS 复用 ArceOS 模块层，补齐 Linux 兼容的系统调用、进程与信号，按设备类型分层驱动
-        \item 本队改动集中于调度、DVFS、分页、观测四层，另含若干 RK3588 驱动
-      \end{itemize}
-      \smallskip
-      {\color{muted}\footnotesize
-      术语一次讲清：\\
-      big.LITTLE = 4×A55 小核（cpu0-3）+ 4×A76 大核（cpu4-7）；\\
-      DVFS = 动态调频调压；THP = 透明大页；\\
-      TTFI = 上电到首帧推理。}
-    \end{column}
-  \end{columns}
-  \advance{机器人回路跨越多层}{改动落在调度/DVFS/分页/观测四层，另含 RK3588 驱动}
 \end{frame}
 
 % ============================== 7 网球机器人与拾球回路 ==============================
@@ -193,12 +59,91 @@
   \advance{机器人是内核侧工作的应用载体}{感知到控制闭环：相机 → JPU → RGA → NPU → 定位 → 运动}
 \end{frame}
 
+% ============================== H 从初赛到决赛 ==============================
+\begin{frame}
+  \navsegment{1}
+  \frametitle{从初赛到决赛：从机器人推理到整个操作系统}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      {\headline{初赛}}\smallskip
+      \begin{itemize}
+        \item 把网球拾取机器人的操作系统由 C 语言的 Linux 迁移到 Rust 实现的 StarryOS
+        \item 优化机器人的视觉推理链路，使端到端推理在真机上追平 Linux（下页详述）
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      {\headline{决赛}}\smallskip
+      \begin{itemize}
+        \item 命题扩展为整机对等：让整个 StarryOS 作为通用 OS，在调度、内存、频率、启动等子系统上也对 Linux 逐轴对齐
+        \item 机器人成为众多负载之一，考核操作系统的通用能力
+      \end{itemize}
+    \end{column}
+  \end{columns}
+  \vspace{1.5mm}
+  {\color{muted}\footnotesize 工作量以回馈上游 rcore-os/tgoskits 计量（自初赛至今累计；决赛期新增 \nPRFinalsMerged{} 已合并 + \nPRInflight{} 在审）：}
+  \begin{center}\setlength{\tabcolsep}{22pt}
+  \begin{tabular}{ccc}
+    {\Large\color{teal}\bfseries \nPRMerged} & {\Large\color{teal}\bfseries \nPROpened} & {\Large\color{teal}\bfseries \nPRInflight}\\[2pt]
+    {\footnotesize\color{muted}PR 已合并} & {\footnotesize\color{muted}PR 累计提交} & {\footnotesize\color{muted}PR 评审中}\\
+  \end{tabular}
+  \end{center}
+  \vspace{-0.5mm}
+  {\color{muted}\footnotesize 覆盖系统调用/进程/信号、调度/大小核、内存/分页、观测 perf、RGA/JPU/NPU 与显示驱动、网络、虚拟化、板级；另自建 QEMU RKNPU 功能级模型，全部经 RK3588 真机验证。}
+  \advance{初赛：机器人推理追平 Linux}{决赛：整个 OS 对 Linux 逐轴对等，全部成果回馈上游（累计 \nPRMerged{} 个 PR 已合并）}
+\end{frame}
+
+% ============================== 19b 视觉推理链路优化 ==============================
+\begin{frame}
+  \navsegment{0}
+  \frametitle{视觉推理链路：从落后 6.3 倍到对等}
+  \begin{columns}[T]
+    \begin{column}{0.52\textwidth}
+      \includegraphics[width=\linewidth]{Fvision.png}
+    \end{column}
+    \begin{column}{0.45\textwidth}
+      \begin{itemize}
+        \item 同一份 ELF 两侧对测，StarryOS 起点端到端落后 Linux 约 6.3 倍，热点散在链路各阶段
+        \item 绑定 A76 大核：640×640 端到端 \nEteDefault$\to$\nEteBig\,ms，三大 CPU 阶段各降约 3 到 5 倍
+        \item 整数取回路径（\texttt{want\_float=0}）使 \texttt{outputs\_get} 约 12$\to$1\,ms，285 张测图逐张一致
+        \item 原生 ReLU 模型将 480×640 p50 30.6$\to$\nInferTennis\,ms 追平 Linux，再加 RGA 零拷贝逐帧命令降到约 9.65\,ms
+      \end{itemize}
+    \end{column}
+  \end{columns}
+  \advance{小模型上曾落后 Linux 约 6.3 倍}{绑核 + 整数取回 + 原生 ReLU 模型 $\to$ \nInferTennis\,ms 与 Linux 持平}
+\end{frame}
+
+% ============================== 22 按轴诚实图例 ==============================
+\begin{frame}
+  \navsegment{1}
+  \frametitle{对 Linux 的完整基准结果（StarryOS 优化前 $\to$ 后）}
+  \scriptsize
+  \begin{tabular}{@{}l r r r l@{}}
+    \toprule
+    轴（单位） & 优化前 & 优化后 & Linux & 判定 \\
+    \midrule
+    THP first-touch (s) & \nThpFTBefore & \nThpFT & \nThpFTLin & \vgood{领先 \nThpRatio×} \\
+    启动 TTFI (s) & \nTtfiBefore & \nTtfi & \nTtfiLin & \vgood{领先} \\
+    A55 单核 (ev/s) & 约 \nAfiveBefore & \nAfive & \nAfiveLin & \vgood{领先 \nAfiveRatio×} \\
+    schbench RPS & \nSchRpsBefore & \nSchRps & \nSchRpsLin & \vgood{反超 \nSchRpsRatio×} \\
+    A76 单核 (ev/s) & 约 \nAsevenBefore & \nAseven & \nAsevenLin & 持平 \nAsevenRatio× \\
+    cpu 八线程 (ev/s) & \nCpuTEightBefore & \nCpuTEight & \nCpuTEightLin & 持平 \nCpuTEightRatio× \\
+    唤醒 p50 (µs) & \nWakeBefore & \nWake & \nWakeLin & 持平 \\
+    getpid (ns) & \nGetpidBefore & \nGetpid & \nGetpidLin & 收窄 \nGetpidRatio× \\
+    mutex 8T (s) & \nMutexBefore & \nMutexAfter & \nMutexLin & 收窄 \nMutexRatio× \\
+    内存写 (MiB/s) & \nMemBWWriteBefore & \nMemBWWrite & \nMemBWWriteLin & 收窄 \nMemBWWriteRatio× \\
+    \bottomrule
+  \end{tabular}
+  \par\smallskip
+  {\color{muted}\scriptsize “收窄”指相对 Linux 的差距已大幅缩小（getpid 由 7$\times$ 收至 \nGetpidRatio$\times$，mutex 由 3.5$\times$ 收至 \nMutexRatio$\times$）；内存写受 DDR 变频固件限制。hackbench 的 \texttt{-T}／\texttt{-P} 比值经无锁用户拷贝快路径恢复到约 1（回到 Linux 形态）。}
+  \advance{一图看清对 Linux 的位置}{十个轴：领先 THP/TTFI/A55/schbench，其余持平或收窄}
+\end{frame}
+
 % ============================== 9 观测 perf + ftrace ==============================
 \begin{frame}
   \navsegment{2}
   \frametitle{观测能力：硬件 PMU perf 与 ftrace}
   \begin{itemize}
-    \item 后续数据均来自测量，测量依赖工具；决赛前 StarryOS 尚无基于硬件 PMU 的 perf，热点难以定位到层
+    \item 前页的对等结论均建立在测量之上，而测量依赖工具；决赛前 StarryOS 尚无基于硬件 PMU 的 perf，热点难以定位到层
     \item 构建一整套硬件 PMU perf：单核 PMUv3、big.LITTLE 分簇、软件与 cache 事件、事件组、调用栈、kprobe/tracepoint、ftrace
     \item 未经修改的上游 perf 6.1.0 二进制直接产出 \texttt{perf.data}、\texttt{report} 与 \texttt{top}；板级 big.LITTLE 矩阵 39/0、特性矩阵 56/0
     \item 受硬件限制的 PEBS 与 BRBE 类特性，按 Linux 在同一 SoC 上的行为如实拒绝，未伪造读数
@@ -225,26 +170,6 @@
     \end{column}
   \end{columns}
   \advance{整机压在单个小核、落后约三十倍}{跨核分发 + 占用放置 + 顶频 $\to$ \nCpuTEightRatio× Linux（持平）}
-\end{frame}
-
-% ============================== 11 调度 核驻留 + wake_affine ==============================
-\begin{frame}
-  \navsegment{2}
-  \frametitle{调度：核驻留与唤醒延迟}
-  \begin{columns}[T]
-    \begin{column}{0.54\textwidth}
-      \includegraphics[width=\linewidth]{F05.png}
-    \end{column}
-    \begin{column}{0.43\textwidth}
-      \begin{itemize}
-        \item 八线程曾塌陷至 3 个 A76、A55 全程空闲，根因为唤醒聚簇
-        \item 对齐 Linux \texttt{select\_idle\_sibling}：仅 occ==0 时保留 last\_cpu，否则选最空闲核，驻留随即均匀
-        \item \texttt{wake\_affine} 将 m1t4 唤醒 p50 由 1042 降至 \nWake\,µs，接近 Linux \nWakeLin\,µs，判定持平
-        \item 出厂启用 idle-poll 后，并发工作线程经 \texttt{select\_idle\_sibling} 铺开，schbench RPS \nSchRps 反超 Linux \nSchRpsLin（\nSchRpsRatio×）
-      \end{itemize}
-    \end{column}
-  \end{columns}
-  \advance{放置均衡后仍聚簇、唤醒存在下限}{驻留均匀 + \texttt{wake\_affine} 唤醒 \nWake\,µs 追平 Linux}
 \end{frame}
 
 % ============================== 13 内存 THP first-touch 领先 ==============================
@@ -287,50 +212,10 @@
   \advance{提交版 TTFI 慢 Linux 约 1.7 倍}{根因定位降至 \nTtfi\,s 领先，机制为精简 init 相对 systemd bringup 的优势}
 \end{frame}
 
-% ============================== 12 系统调用 getpid 微阶梯 ==============================
-\begin{frame}
-  \navsegment{2}
-  \frametitle{系统调用入口：getpid 微阶梯}
-  \begin{columns}[T]
-    \begin{column}{0.54\textwidth}
-      \includegraphics[width=\linewidth]{F07.png}
-    \end{column}
-    \begin{column}{0.43\textwidth}
-      \begin{itemize}
-        \item 空系统调用 getpid 基线 1200\,ns，Linux \nGetpidLin\,ns，相差约 7 倍，开销集中于进入与返回路径
-        \item 三层剥离每次调用均付而多数不用的固定成本：ptrace 快路径 $-25\%$、跳过 poll\_process\_timer $-17\%$、无锁 timer\_state 粗 tick 记账 $-50\%$
-        \item getpid 降至 \nGetpid\,ns，相对 Linux 由 7 倍收窄至 \nGetpidRatio 倍，stime 秒占比 0.71 对齐 Linux 0.72
-        \item 残余 \nGetpid\,ns 为 \texttt{uctx.run} 陷入的架构地板，三套系统共用，无冗余可摘
-      \end{itemize}
-    \end{column}
-  \end{columns}
-  \advance{getpid 基线慢 Linux 约 7 倍}{三层剥离固定成本 $\to$ \nGetpid\,ns（\nGetpidRatio× Linux），贴陷入下限}
-\end{frame}
-
-% ============================== 15 频率电压 DVFS/PVTPLL + DDR 外因 ==============================
-\begin{frame}
-  \navsegment{2}
-  \frametitle{频率电压：DVFS / PVTPLL 与 DDR 变频固件外因}
-  \begin{columns}[T]
-    \begin{column}{0.52\textwidth}
-      \includegraphics[width=\linewidth]{F10.png}
-    \end{column}
-    \begin{column}{0.45\textwidth}
-      \begin{itemize}
-        \item RK3588 CPU 时钟为电压耦合的 PVTPLL，频率随轨压变化，CPU CRU 由 BL31 保护
-        \item \#1657：按簇 ondemand governor + PMIC 电压标定（A76 走 I2C、A55 走 SPI），事务式先电压后时钟
-        \item 环长调节：更高 SCMI 速率将环由 17 重编为 11，同压更高频；A76 顶 \nDvfsAseven\,MHz、A55 顶 \nDvfsAfive\,MHz，八线程达 \nCpuTEightRatio× Linux
-        \item \vwarn{DDR 变频}走 Rockchip SIP DRAM 接口，主线 TF-A 缺该 EL3 处理器，驱动已实现，停在探测态，受主线固件限制
-      \end{itemize}
-    \end{column}
-  \end{columns}
-  \advance{CPU 固定于上电低频、落后约三十倍}{ondemand + PMIC + 环长调节逐核 \nPerCoreRatio× Linux；DDR 变频受主线固件限制}
-\end{frame}
-
 % ============================== 18 QEMU NPU 模型 + 模型协同 ==============================
 \begin{frame}
   \navsegment{2}
-  \frametitle{QEMU RKNPU 设备模型与模型协同优化}
+  \frametitle{QEMU RKNPU 设备模型与机器人检测模型的协同优化}
   \begin{columns}[T]
     \begin{column}{0.54\textwidth}
       \includegraphics[width=\linewidth]{F13.png}
@@ -365,9 +250,143 @@
   \advance{性能对比需先能驱动板子}{显示栈上板点亮、Weston 跑通、约 8 个板级驱动合入上游}
 \end{frame}
 
+% ============================== R 借鉴与创新 ==============================
+\begin{frame}
+  \navsegment{3}
+  \frametitle{借鉴与创新：基础版本与本队增量}
+  \begin{columns}[T]
+    \begin{column}{0.47\textwidth}
+      {\headline{站在何处（借鉴的基础版本）}}\smallskip
+      \begin{itemize}
+        \item 内核：rcore-os/tgoskits 的 dev 分支 @73409e079（StarryOS + ArceOS 组件）
+        \item 机器人应用：移植自 pengzechen/aka-rk3588
+        \item 模型转换：airockchip/rknn-toolkit2
+        \item 每处改动首次提交即固定基线、如实标注来源
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.5\textwidth}
+      {\headline{本队的创新与增量工作}}\smallskip
+      \begin{itemize}
+        \item 机器人视觉推理链路：端到端由落后 Linux 约 6.3 倍优化到持平
+        \item 整 OS 对 Linux 逐轴对等，THP / TTFI / A55 / schbench 领先；全部拆为原子 PR 回馈上游，累计 \nPRMerged{} 个已合并、\nPRInflight{} 个在审，覆盖调度/内存/观测/驱动/显示/网络/虚拟化等子系统
+        \item \headline{创新}\ QEMU RKNPU 功能级设备模型：把闭源 NPU 变为板外可开发、可 CI 的载体（106 qtest）
+        \item \headline{创新}\ AI 掌控-闭环开发方法 + 带外电源自治测试台
+      \end{itemize}
+    \end{column}
+  \end{columns}
+  \advance{清楚区分借鉴与自研}{基础：tgoskits / aka-rk3588 / rknn-toolkit2；增量：机器人推理对等 + 整 OS 对等 + QEMU NPU 模型 + AI 方法}
+\end{frame}
+
+% ============================== M AI 方法与测试台 ==============================
+\begin{frame}
+  \navsegment{4}
+  \frametitle{AI 掌控-闭环开发方法与自治测试台}
+  \begin{columns}[T]
+    \begin{column}{0.42\textwidth}
+      \includegraphics[width=\linewidth]{Fharness.png}
+    \end{column}
+    \begin{column}{0.55\textwidth}
+      \begin{itemize}
+        \item 人掌架构与验收，AI 在真机与 QEMU 闭环内迭代实现，运行至机器可判定的判定门：一次运行产出一个可比对数值
+        \item 四类判定门：sysbench 对等回归、schbench 延迟阈值、多智能体对抗评审、s\_frac 计时 oracle；触及 SMP 同步的改动每次配 7 到 26 名评审
+        \item 带外电源自治测试台：计量式智能插座（miIO 本地）分级恢复 L0 暖重启、L1 硬断电冷启、L2 U-Boot 金身、L3 人工，令会挂死内核的改动也可无人值守
+        \item 实例：cpufreq 静默吞掉电压写失败（欠压风险）经 26 人评审查出，改为失败即中止
+      \end{itemize}
+    \end{column}
+  \end{columns}
+  \advance{工作量大、共享 crate 风险高}{人掌架构、AI 闭环迭代至判定门，带外电源使真机回路无人值守}
+\end{frame}
+
+% ============================== C 小结分工与材料 ==============================
+\begin{frame}
+  \navsegment{4}
+  \frametitle{小结、分工与材料}
+  \begin{itemize}
+    \item \headline{贡献小结}\ 机器人推理追平 Linux；整 OS 对 Linux 逐轴对等，THP / TTFI / A55 / schbench 领先；QEMU NPU 设备模型与 AI 开发范式；全部成果回馈上游 rcore-os/tgoskits，累计 \nPRMerged{} 个 PR 已合并、\nPRInflight{} 个在审
+    \item \headline{分工}\ 洪世金（队长，内核性能/内存/驱动/显示）、王乙凡（QEMU NPU 模型 + 机器人应用）、徐子航（板级 I/O 与网络 + 机器人应用）
+    \item \headline{后续}\ 调度全量均衡、DVFS Phase 2 电压闭环、DDR SIP 换 rkbin BL31、THP 通用化、NPU 三核上真机
+    \item \headline{材料与复现}\ 同一份 ELF 两侧对照、三次重复中位数；代码见 rcore-os/tgoskits 与 processmission/qemu，报告与幻灯见 \texttt{docs/final-round/}
+  \end{itemize}
+  \vfill
+  \centering{\sffamily\color{teal}\large Team Posad\quad·\quad 清华大学\quad·\quad 感谢 rcore-os 社区与竞赛组委会}
+  \advance{开篇给出机器人与工作量}{收束：机器人对等 + 整 OS 对等 + QEMU 模型 + AI 范式；三人分工、全链可复现}
+\end{frame}
+
+% ============================== A 附录扉页 ==============================
+\begin{frame}[plain]
+  \vfill\centering
+  {\sffamily\bfseries\color{teal}\LARGE 附录 · 备用材料}\\[8pt]
+  {\color{muted}\large 目标完成表 · 基准与口径 · 增量 PR 一览 · 与类似工作对比 · 机器人状态机 · 视觉推理链路 · AI 使用说明}
+  \vfill
+\end{frame}
+
+% ============================== 6 系统分层总览 ==============================
+\begin{frame}
+  \navsegment{0}
+  \frametitle{系统分层总览与术语}
+  \begin{columns}[T]
+    \begin{column}{0.52\textwidth}
+      \includegraphics[width=\linewidth]{F02.png}
+    \end{column}
+    \begin{column}{0.45\textwidth}
+      \begin{itemize}
+        \item StarryOS 复用 ArceOS 模块层，补齐 Linux 兼容的系统调用、进程与信号，按设备类型分层驱动
+        \item 本队改动集中于调度、DVFS、分页、观测四层，另含若干 RK3588 驱动
+      \end{itemize}
+      \smallskip
+      {\color{muted}\footnotesize
+      术语一次讲清：\\
+      big.LITTLE = 4×A55 小核（cpu0-3）+ 4×A76 大核（cpu4-7）；\\
+      DVFS = 动态调频调压；THP = 透明大页；\\
+      TTFI = 上电到首帧推理。}
+    \end{column}
+  \end{columns}
+  \advance{机器人回路跨越多层}{改动落在调度/DVFS/分页/观测四层，另含 RK3588 驱动}
+\end{frame}
+
+% ============================== 11 调度 核驻留 + wake_affine ==============================
+\begin{frame}
+  \navsegment{0}
+  \frametitle{调度：核驻留与唤醒延迟}
+  \begin{columns}[T]
+    \begin{column}{0.54\textwidth}
+      \includegraphics[width=\linewidth]{F05.png}
+    \end{column}
+    \begin{column}{0.43\textwidth}
+      \begin{itemize}
+        \item 八线程曾塌陷至 3 个 A76、A55 全程空闲，根因为唤醒聚簇
+        \item 对齐 Linux \texttt{select\_idle\_sibling}：仅 occ==0 时保留 last\_cpu，否则选最空闲核，驻留随即均匀
+        \item \texttt{wake\_affine} 将 m1t4 唤醒 p50 由 1042 降至 \nWake\,µs，接近 Linux \nWakeLin\,µs，判定持平
+        \item 出厂启用 idle-poll 后，并发工作线程经 \texttt{select\_idle\_sibling} 铺开，schbench RPS \nSchRps 反超 Linux \nSchRpsLin（\nSchRpsRatio×）
+      \end{itemize}
+    \end{column}
+  \end{columns}
+  \advance{放置均衡后仍聚簇、唤醒存在下限}{驻留均匀 + \texttt{wake\_affine} 唤醒 \nWake\,µs 追平 Linux}
+\end{frame}
+
+% ============================== 15 频率电压 DVFS/PVTPLL + DDR 外因 ==============================
+\begin{frame}
+  \navsegment{0}
+  \frametitle{频率电压：DVFS / PVTPLL 与 DDR 变频固件外因}
+  \begin{columns}[T]
+    \begin{column}{0.52\textwidth}
+      \includegraphics[width=\linewidth]{F10.png}
+    \end{column}
+    \begin{column}{0.45\textwidth}
+      \begin{itemize}
+        \item RK3588 CPU 时钟为电压耦合的 PVTPLL，频率随轨压变化，CPU CRU 由 BL31 保护
+        \item \#1657：按簇 ondemand governor + PMIC 电压标定（A76 走 I2C、A55 走 SPI），事务式先电压后时钟
+        \item 环长调节：更高 SCMI 速率将环由 17 重编为 11，同压更高频；A76 顶 \nDvfsAseven\,MHz、A55 顶 \nDvfsAfive\,MHz，八线程达 \nCpuTEightRatio× Linux
+        \item \vwarn{DDR 变频}走 Rockchip SIP DRAM 接口，主线 TF-A 缺该 EL3 处理器，驱动已实现，停在探测态，受主线固件限制
+      \end{itemize}
+    \end{column}
+  \end{columns}
+  \advance{CPU 固定于上电低频、落后约三十倍}{ondemand + PMIC + 环长调节逐核 \nPerCoreRatio× Linux；DDR 变频受主线固件限制}
+\end{frame}
+
 % ============================== 14 页表·TLB 正确性 + blast radius ==============================
 \begin{frame}
-  \navsegment{2}
+  \navsegment{0}
   \frametitle{正确性：页表与 TLB 修复的波及面}
   \begin{columns}[T]
     \begin{column}{0.5\textwidth}
@@ -386,7 +405,7 @@
 
 % ============================== 21 无收益与已回退 ==============================
 \begin{frame}
-  \navsegment{2}
+  \navsegment{0}
   \frametitle{经验证暂不适用当前平台的尝试}
   \scriptsize
   \vfill
@@ -406,9 +425,50 @@
   \advance{每一项改动都上板 A/B}{五条测平或测负者如实回退，并列出各自的适用边界}
 \end{frame}
 
+% ============================== 12 系统调用 getpid 微阶梯 ==============================
+\begin{frame}
+  \navsegment{0}
+  \frametitle{系统调用入口：getpid 微阶梯}
+  \begin{columns}[T]
+    \begin{column}{0.54\textwidth}
+      \includegraphics[width=\linewidth]{F07.png}
+    \end{column}
+    \begin{column}{0.43\textwidth}
+      \begin{itemize}
+        \item 空系统调用 getpid 基线 1200\,ns，Linux \nGetpidLin\,ns，相差约 7 倍，开销集中于进入与返回路径
+        \item 三层剥离每次调用均付而多数不用的固定成本：ptrace 快路径 $-25\%$、跳过 poll\_process\_timer $-17\%$、无锁 timer\_state 粗 tick 记账 $-50\%$
+        \item getpid 降至 \nGetpid\,ns，相对 Linux 由 7 倍收窄至 \nGetpidRatio 倍，stime 秒占比 0.71 对齐 Linux 0.72
+        \item 残余 \nGetpid\,ns 为 \texttt{uctx.run} 陷入的架构地板，三套系统共用，无冗余可摘
+      \end{itemize}
+    \end{column}
+  \end{columns}
+  \advance{getpid 基线慢 Linux 约 7 倍}{三层剥离固定成本 $\to$ \nGetpid\,ns（\nGetpidRatio× Linux），贴陷入下限}
+\end{frame}
+
+% ============================== 20 机器人拾球应用 ==============================
+\begin{frame}
+  \navsegment{0}
+  \frametitle{机器人拾球应用：状态机与里程计回桶}
+  \begin{columns}[T]
+    \begin{column}{0.34\textwidth}
+      \gfxt[0.92\linewidth]{F20.png}\\[3pt]
+      \gfxt[0.72\linewidth]{F21.png}
+    \end{column}
+    \begin{column}{0.63\textwidth}
+      \begin{itemize}
+        \item 应用为一份 C++ 状态机，主机 dry-run 与板端同源，仅替换电机与机械臂后端
+        \item 六状态拾球闭环（追球、抓取、回桶、寻桶、趋近、投放）纯逻辑非阻塞，定时时相由单调时钟推进而与相机 FPS 解耦
+        \item 里程计引导回桶：投放时 reset\_anchor 把桶设为原点，航位推算按 distance 与 bearing 回锚点，视觉一旦捕获桶即抢占
+        \item 慢速轮速遥测移出控制回路，由后台线程 100\,ms 周期采样并更新位姿快照，控制回路每轮只取一次快照
+      \end{itemize}
+    \end{column}
+  \end{columns}
+  \advance{感知结果送入纯逻辑状态机}{六状态拾球闭环 + 里程计回桶，主机 dry-run 与板端同源}
+\end{frame}
+
 % ============================== 26 开发进度与完成情况 ==============================
 \begin{frame}
-  \navsegment{3}
+  \navsegment{0}
   \frametitle{开发进度与完成情况}
   \begin{columns}[T]
     \begin{column}{0.54\textwidth}
@@ -427,7 +487,7 @@
 
 % ============================== 25 队员分工 ==============================
 \begin{frame}
-  \navsegment{3}
+  \navsegment{0}
   \frametitle{队员分工（Team Posad，三名成员）}
   \footnotesize
   \begin{tabular}{@{}>{\raggedright\arraybackslash}p{2.3cm}>{\raggedright\arraybackslash}p{11.7cm}@{}}
@@ -440,75 +500,6 @@
     \bottomrule
   \end{tabular}
   \advance{三名成员按子系统分工}{队长承担内核主体，王乙凡与徐子航分担仿真板级，机器人应用共建}
-\end{frame}
-
-% ============================== 29 主要贡献与创新 ==============================
-\begin{frame}
-  \navsegment{3}
-  \frametitle{主要贡献与创新（呼应主要工作与结果）}
-  \begin{itemize}
-    \item \headline{观测从无到有}\ StarryOS 首套硬件 PMU perf，直接运行上游 perf 二进制，big.LITTLE 56/0
-    \item \headline{整 OS 对等}\ 跨核分发 + 占用放置 + PVTPLL 环长调节，cpu 八线程 \nCpuTEightBefore $\to$ \nCpuTEight\,ev/s（\nCpuTEightRatio× Linux），单核持平至小幅领先
-    \item \headline{少数领先}\ THP 首触快 Linux \nThpRatio×，TTFI \nTtfi\,s 优于 \nTtfiLin\,s
-    \item \headline{方法与产物}\ 闭源 RKNPU 的功能级 QEMU 模型（106 qtests），以及人掌架构、AI 闭环、机器可判定判定门的开发范式
-  \end{itemize}
-  \advance{开篇给出三条头条}{收束：观测从无到有、整 OS 对等、THP 与 TTFI 领先、QEMU NPU 模型加 AI 范式}
-\end{frame}
-
-% ============================== 28 AI 方法论与正确性保障 ==============================
-\begin{frame}
-  \navsegment{4}
-  \frametitle{AI 方法论与正确性保障}
-  \begin{itemize}
-    \item 四类机器可判定判定门：sysbench 对等回归门、schbench 延迟阈值门、板上无死锁的多智能体评审门、s\_frac 计时正确性 oracle
-    \item 触及 SMP 同步的改动先拆为单一关注点，再交 7 到 26 名独立评审 agent 对抗复核
-    \item 实例：cpufreq \texttt{apply\_opp} 静默吞掉电压写失败（高频欠压硬件风险），26 人评审查出，改 \texttt{\#[must\_use]} fail-closed
-    \item 测量否掉设想：DDR 带宽差经板测否定 THP/tick 假设，真因是 DDR 固件；fork EFAULT 定位到 COW u8 溢出
-  \end{itemize}
-  \advance{规模大、共享 crate 风险高}{四类判定门 + 7 到 26 人对抗评审，推断不越过数据}
-\end{frame}
-
-% ============================== 28b 真机自治测试台 ==============================
-\begin{frame}
-  \navsegment{4}
-  \frametitle{真机自治测试台：带外电源控制}
-  \begin{columns}[T]
-    \begin{column}{0.5\textwidth}
-      \includegraphics[width=\linewidth]{Fharness.png}
-    \end{column}
-    \begin{column}{0.47\textwidth}
-      \begin{itemize}
-        \item 暖重启只在被测系统仍响应软件命令时才恢复，但这条闭环恰用于验证会挂死内核的改动
-        \item 恢复原语须独立于被测软件状态，唯一如此者是电源：\ours{计量式智能插座（米家智能插座）}经 miIO 本地协议带外冷复位，不经云端
-        \item 分级恢复：L0 暖重启 $\to$ L1 插座硬断电冷启 $\to$ L2 U-Boot 金身回退 $\to$ L3 人工
-        \item 冷启动路径的上板点亮会话即在该测试台完成，插座硬断电保证挂死可无人值守恢复
-      \end{itemize}
-    \end{column}
-  \end{columns}
-  \advance{验证挂死的闭环不能靠被测系统自恢复}{智能插座带外冷复位使闭环无人值守，覆盖会挂死内核的改动}
-\end{frame}
-
-% ============================== T 后续工作与材料入口 ==============================
-\begin{frame}
-  \navsegment{4}
-  \frametitle{后续工作与材料入口}
-  \begin{itemize}
-    \item \headline{后续方向}\ 调度全量均衡（迁移代价门限与迟滞）、DVFS Phase 2 电压闭环加温控、DDR SIP 换 rkbin BL31、THP 通用化、NPU 三核上真机并上游化 QEMU 模型
-    \item \headline{可复现}\ 全部性能数为 RK3588 整机三次重复中位数，对照同机同频 Linux，两侧运行同一份 ELF；\texttt{scripts/board/boardctl.py} 暖重启回路，数字集中于 \texttt{numbers.tex}
-    \item \headline{材料}\ 代码见 rcore-os/tgoskits 与 processmission/qemu（\#19 / \#26），决赛报告与幻灯见 \texttt{docs/final-round/}
-    \item \headline{致谢}\ 感谢 rcore-os 社区评审与竞赛组委会
-  \end{itemize}
-  \vfill
-  \centering{\sffamily\color{teal}\large Team Posad\quad·\quad 清华大学}
-  \advance{全部结论可追溯}{后续方向明确；代码、报告与板级回路全链可复现}
-\end{frame}
-
-% ============================== A 附录扉页 ==============================
-\begin{frame}[plain]
-  \vfill\centering
-  {\sffamily\bfseries\color{teal}\LARGE 附录 · 备用材料}\\[8pt]
-  {\color{muted}\large 目标完成表 · 基准与口径 · 增量 PR 一览 · 与类似工作对比 · 机器人状态机 · 视觉推理链路 · AI 使用说明}
-  \vfill
 \end{frame}
 
 % ============================== 5 目标完成情况表 ==============================
@@ -566,12 +557,12 @@
       \begin{itemize}
         \item 基线冻结于 rcore-os/tgoskits 的 dev 分支 commit 73409e079，每处原子改动以此为起点派生为一个 PR
         \item 拆分至可独立回归的粒度，使每条改动可对照固定基线核对得失，评审仅需关注单一逻辑
-        \item 已合并覆盖观测、调度、DVFS、驱动与外设初始化；在审含多核 perf 四件与调度分布（\#1656，把八线程由平线 \nLadderFloor{} 抬到 \nLadderPlace{} ev/s）
-        \item 第三梯队三项（THP 首触、页表正确性、机器人应用）已在集成分支实现并经板级验证，待拆分为独立 PR
+        \item 累计 \nPRMerged{} 个 PR 已合并，覆盖观测、调度、内存、DVFS、网络、驱动与外设初始化；\nPRInflight{} 个在审，含多核 perf 四件与调度分布（\#1656，把八线程由平线 \nLadderFloor{} 抬到 \nLadderPlace{} ev/s）、COW 与 THP 一组
+        \item 每条改动可对照固定基线独立核对得失，评审仅需关注单一逻辑，触及 SMP 的改动另配多代理对抗审查
       \end{itemize}
     \end{column}
   \end{columns}
-  \advance{整机对等由许多小改动累积}{固定基线，两成员的原子 PR 覆盖其中七个子系统，多数已合并或板级验证}
+  \advance{整机对等由许多小改动累积}{固定基线，原子 PR 覆盖十余个子系统，累计 \nPRMerged{} 已合并、\nPRInflight{} 在审}
 \end{frame}
 
 % ============================== 24 与类似工作对比 ==============================
@@ -585,60 +576,6 @@
     \item 定调诚实：给出的是对等与少数领先，并如实标注外因（DDR 固件）与后续优化方向（系统调用入口、锁竞争）
   \end{itemize}
   \advance{Rust OS 常在 QEMU 自证}{本工作在 RK3588 真机以同一份 ELF 逐轴对照 Linux，另有可复用的 QEMU NPU 模型}
-\end{frame}
-
-% ============================== 20 机器人拾球应用 ==============================
-\begin{frame}
-  \navsegment{0}
-  \frametitle{机器人拾球应用：状态机与里程计回桶}
-  \begin{columns}[T]
-    \begin{column}{0.34\textwidth}
-      \gfxt[0.92\linewidth]{F20.png}\\[3pt]
-      \gfxt[0.72\linewidth]{F21.png}
-    \end{column}
-    \begin{column}{0.63\textwidth}
-      \begin{itemize}
-        \item 应用为一份 C++ 状态机，主机 dry-run 与板端同源，仅替换电机与机械臂后端
-        \item 六状态拾球闭环（追球、抓取、回桶、寻桶、趋近、投放）纯逻辑非阻塞，定时时相由单调时钟推进而与相机 FPS 解耦
-        \item 里程计引导回桶：投放时 reset\_anchor 把桶设为原点，航位推算按 distance 与 bearing 回锚点，视觉一旦捕获桶即抢占
-        \item 慢速轮速遥测移出控制回路，由后台线程 100\,ms 周期采样并更新位姿快照，控制回路每轮只取一次快照
-      \end{itemize}
-    \end{column}
-  \end{columns}
-  \advance{感知结果送入纯逻辑状态机}{六状态拾球闭环 + 里程计回桶，主机 dry-run 与板端同源}
-\end{frame}
-
-% ============================== 19b 视觉推理链路优化 ==============================
-\begin{frame}
-  \navsegment{0}
-  \frametitle{视觉推理链路：从落后 6.3 倍到对等}
-  \begin{columns}[T]
-    \begin{column}{0.52\textwidth}
-      \includegraphics[width=\linewidth]{Fvision.png}
-    \end{column}
-    \begin{column}{0.45\textwidth}
-      \begin{itemize}
-        \item 同一份 ELF 两侧对测，StarryOS 起点端到端落后 Linux 约 6.3 倍，热点散在链路各阶段
-        \item 绑定 A76 大核：640×640 端到端 \nEteDefault$\to$\nEteBig\,ms，三大 CPU 阶段各降约 3 到 5 倍
-        \item 整数取回路径（\texttt{want\_float=0}）使 \texttt{outputs\_get} 约 12$\to$1\,ms，285 张测图逐张一致
-        \item 原生 ReLU 模型将 480×640 p50 30.6$\to$\nInferTennis\,ms 追平 Linux，再加 RGA 零拷贝逐帧命令降到约 9.65\,ms
-      \end{itemize}
-    \end{column}
-  \end{columns}
-  \advance{小模型上曾落后 Linux 约 6.3 倍}{绑核 + 整数取回 + 原生 ReLU 模型 $\to$ \nInferTennis\,ms 与 Linux 持平}
-\end{frame}
-
-% ============================== 27 AI 使用说明 ==============================
-\begin{frame}
-  \navsegment{0}
-  \frametitle{AI 使用说明}
-  \begin{itemize}
-    \item 本月工作量超出同等时间手写代码所能覆盖的规模，方法为人掌架构、AI 执行闭环的分工
-    \item 人一侧确定方向、划定原子改动的边界、制定验收标准；AI 一侧在真机与 QEMU 上迭代实现，运行至判定门
-    \item 全部验收标准落实为机器可判定的判定门，一次运行产出一个可比对数值，取代肉眼读取日志得出结论
-    \item 边界清晰：架构决策与最终验收由人负责；三名队员能在无 AI 在场时口头阐明每处关键设计，并当场修改对应内核代码
-  \end{itemize}
-  \advance{工作量超出手写规模}{人掌架构与验收，AI 在真机闭环迭代至机器可判定的判定门}
 \end{frame}
 
 \end{document}

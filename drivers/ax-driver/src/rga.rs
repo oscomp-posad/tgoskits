@@ -119,9 +119,12 @@ fn enable_power(config: RgaCoreConfig) {
 /// rk3588-cru.h values; their gate positions (CLKGATE_CON45 bits 7/8/9) live in the rockchip-soc
 /// CRU gate table.
 fn enable_rga2_clocks() -> Result<(), OnProbeError> {
-    // HCLK_RGA2 = 438, ACLK_RGA2 = 439, CLK_RGA2_CORE = 440 (rk3588-cru.h).
-    for &clk_id in &[438u32, 439, 440] {
-        crate::soc::rk3588_enable_clock(clk_id)?;
+    // HCLK_RGA2 = 438, ACLK_RGA2 = 439, CLK_RGA2_CORE = 440 (rockchip-soc CRU ids,
+    // gate positions CLKGATE_CON45 bits 7/8/9 — see the CRU gate table).
+    for &clk_id in &[438usize, 439, 440] {
+        if !crate::soc::rockchip::cru::clk_enable(clk_id) {
+            return Err(OnProbeError::other("RGA2 clk_enable failed"));
+        }
     }
     Ok(())
 }
@@ -134,9 +137,9 @@ fn enable_rga2_clocks() -> Result<(), OnProbeError> {
 /// offset = id%16, so those would hit the wrong register. Symmetric with the RGA2 clock gates at
 /// CLKGATE_CON45 bits 7/8/9.
 fn deassert_rga2_resets() {
-    for &rst_id in &[727u64, 728, 729] {
-        if let Err(e) = crate::soc::rk3588_reset_deassert(rst_id) {
-            warn!("RGA2 reset_deassert({rst_id}) failed: {e:?}");
+    for &rst_id in &[727usize, 728, 729] {
+        if !crate::soc::rockchip::cru::reset_deassert(rst_id) {
+            warn!("RGA2 reset_deassert({rst_id}) failed");
         }
     }
 }

@@ -44,6 +44,7 @@ ax-log
 ax-net
 ax-runtime
 ax-api
+rockchip-rga
 rockchip-jpeg
 rockchip-npu
 rockchip-vop2

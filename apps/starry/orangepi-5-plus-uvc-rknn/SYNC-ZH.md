@@ -95,25 +95,25 @@ http://<StarryOS-IP>:8080/snapshot.jpg
 如果构建配置文件中显式设置了 `AX_IP` 和 `AX_GW`：
 
 ```toml
-env = { AX_IP = "10.30.12.53", AX_GW = "10.30.12.254" }
+env = { AX_IP = "<BOARD-IP>", AX_GW = "<GATEWAY-IP>" }
 ```
 
 则 StarryOS 会使用静态 IP。此时浏览器打开：
 
 ```text
-http://10.30.12.53:8080/
+http://<BOARD-IP>:8080/
 ```
 
 这种方式适合固定使用同一块板，或者给每块板分配不同固定 IP。例如：
 
 ```toml
-env = { AX_IP = "10.30.12.54", AX_GW = "10.30.12.254" }
+env = { AX_IP = "<BOARD-IP>", AX_GW = "<GATEWAY-IP>" }
 ```
 
 则对应网页地址为：
 
 ```text
-http://10.30.12.54:8080/
+http://<BOARD-IP>:8080/
 ```
 
 注意：多块板不能共用同一个静态 IP，否则网络会冲突，表现为网页偶尔打不开、连接到错误设备，或 ARP 表混乱。
@@ -145,20 +145,20 @@ http://<DHCP分配到的IP>:8080/
 Interacting with U-Boot shell...
 dhcp ostool/sessions/.../boot/image.fit && bootm
 BOOTP broadcast 1
-DHCP client bound to address 10.30.12.53
-TFTP from server 10.30.12.60; our IP address is 10.30.12.53
+DHCP client bound to address <BOARD-IP>
+TFTP from server <SERVER-IP>; our IP address is <BOARD-IP>
 ```
 
 这里的含义是：
 
-- `10.30.12.60` 是 TFTP 服务器地址。
-- `DHCP client bound to address 10.30.12.53` 是 U-Boot 阶段拿到的板子 IP。
-- `our IP address is 10.30.12.53` 也是 U-Boot 当前用于 TFTP 下载的板子 IP。
+- `<SERVER-IP>` 是 TFTP 服务器地址。
+- `DHCP client bound to address <BOARD-IP>` 是 U-Boot 阶段拿到的板子 IP。
+- `our IP address is <BOARD-IP>` 也是 U-Boot 当前用于 TFTP 下载的板子 IP。
 
 如果 StarryOS 后续也使用 DHCP，通常会继续拿到同一个地址。此时可以尝试打开：
 
 ```text
-http://10.30.12.53:8080/
+http://<BOARD-IP>:8080/
 ```
 
 但 U-Boot 的地址只代表启动加载阶段，最终网页地址仍应以 StarryOS 启动后的网络地址为准。
@@ -168,20 +168,20 @@ http://10.30.12.53:8080/
 如果 StarryOS 配置为 DHCP，即 `env = {}`，StarryOS 网络初始化完成后会在串口日志中打印类似：
 
 ```text
-eth0: DHCP acquired address 10.30.12.53/24
-eth0: DHCP router 10.3.10.254
+eth0: DHCP acquired address <BOARD-IP>/24
+eth0: DHCP router <GATEWAY-IP>
 ```
 
 这是 StarryOS 发布 HTTP 服务时应使用的地址。此时网页地址为：
 
 ```text
-http://10.30.12.53:8080/
+http://<BOARD-IP>:8080/
 ```
 
 如果当前构建配置仍是静态 IP：
 
 ```toml
-env = { AX_IP = "10.30.12.53", AX_GW = "10.3.10.254" }
+env = { AX_IP = "<BOARD-IP>", AX_GW = "<GATEWAY-IP>" }
 ```
 
 则不会出现 `eth0: DHCP acquired address ...` 这条 StarryOS DHCP 日志，因为 StarryOS 没有走 DHCP。
@@ -198,14 +198,14 @@ env = { AX_IP = "10.30.12.53", AX_GW = "10.3.10.254" }
 例如当前日志中有：
 
 ```text
-DHCP client bound to address 10.30.12.53
-TFTP from server 10.30.12.60; our IP address is 10.30.12.53
+DHCP client bound to address <BOARD-IP>
+TFTP from server <SERVER-IP>; our IP address is <BOARD-IP>
 ```
 
 并且 StarryOS 启动后没有显示其他地址，则可打开：
 
 ```text
-http://10.30.12.53:8080/
+http://<BOARD-IP>:8080/
 ```
 
 ## Starry Shell 中手动启动

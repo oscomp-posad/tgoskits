@@ -22,11 +22,12 @@
 - 虚拟差速电机 + 夹爪机械臂指令
 - `TENNIS_BENCH_RESULT` 基准测试
 
-后续（需要实体小车 / 受硬件限制 / 默认禁用）：
+真实硬件后端（**默认启用**，`--motor-backend uart --arm-backend uart`）：
 
-- 真实 UART 差速电机后端（ESP32-C3，`0xAA 0x55` 帧协议 @115200）
-- 真实 UART 夹爪机械臂后端（ZP10D 总线舵机，ASCII `#IDPpulseTtime!` @115200）
-- 将预处理切换到 RGA（待 `/dev/rga` 可用）
+- 真实 UART 差速电机后端（ESP32-C3，`0xAA 0x55` 帧协议 @115200；或 `--motor-backend pwm` 走 RK3588 PWM/DRV8833）
+- 真实 UART 夹爪机械臂后端（ZP10S 总线舵机，ASCII `#IDPpulseTtime!` @115200，`aka00v4-rk3588` 标定动作序列）
+- 基准测试可用 `--virtual-actuators` 切回非阻塞的虚拟后端；`dry-run` 始终强制虚拟后端
+- 将预处理切换到 RGA（`/dev/rga` 已恢复启用）
 - 拆分独立控制线程 + 多个 `rknn_dup_context` NPU worker，实现真正的三核并行（多核多上下文 NPU）
 - 增加 Linux 与 Starry 的基准对比
 
@@ -73,14 +74,14 @@ tennis_app --mode test-bucket --device 0
 tennis_app --mode dry-run --duration-sec 10 --virtual-actuators
 ```
 
-## 仍依赖实体小车的部分
+## 执行器后端选择
 
-以下两个真实后端是「为之而设计但已禁用」（future、硬件限制 hardware-gated），**不是默认路径**：
+电机与机械臂后端相互独立，**默认走真实 UART 硬件**（`--motor-backend uart --arm-backend uart`）：
 
-- 真实 UART 差速电机后端：ESP32-C3，`0xAA 0x55` 帧协议，波特率 115200。
-- 真实 UART 夹爪机械臂后端：ZP10D 总线舵机，ASCII 协议 `#IDPpulseTtime!`，波特率 115200。
+- 真实 UART 差速电机后端：ESP32-C3，`0xAA 0x55` 帧协议，波特率 115200（或 `--motor-backend pwm` 走 RK3588 PWM/DRV8833）。
+- 真实 UART 夹爪机械臂后端：ZP10S 总线舵机，ASCII 协议 `#IDPpulseTtime!`，波特率 115200，`aka00v4-rk3588` 标定动作序列。
 
-默认且唯一启用的执行器路径是虚拟执行器（`--virtual-actuators`，默认开启）。
+真实后端初始化失败为**致命错误**，绝不静默回退到虚拟输出。基准测试可用 `--virtual-actuators` 切回非阻塞的虚拟执行器；`dry-run` 始终强制虚拟后端，合成场景不会误动实体硬件。
 
 ## 产生的指标
 
