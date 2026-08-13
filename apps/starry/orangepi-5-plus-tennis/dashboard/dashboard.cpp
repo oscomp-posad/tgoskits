@@ -800,18 +800,32 @@ int main(int argc, char **argv) {
         d->resize(fbw, fbh);
         QString dumpPath = ::getenv("STARRY_GRAB_DUMP") ? QString(::getenv("STARRY_GRAB_DUMP")) : QString();
         auto *dumped = new bool(false);
+        auto *canvas = new QImage(fbw, fbh, QImage::Format_ARGB32);  // fixed-size render target (grab() size can vary by QPA)
+        long fbsize = stride * fbh;
+        bool contiguous = (long(canvas->bytesPerLine()) == stride);  // no row padding -> one sequential stream
         auto present = [=]() {
-            QImage img = d->grab().toImage().convertToFormat(QImage::Format_ARGB32);  // little-endian bytes = B,G,R,A = fb order
-            // Present via the kernel write() path (write_at), NOT an mmap memcpy:
-            // on StarryOS a userspace fb-mmap write is not coherent with the kernel
-            // read/scanout, whereas write() is (proven by the 0xA5 round-trip probe).
-            for (int y = 0; y < fbh && y < img.height(); y++) {
-                long n = std::min<long>(stride, long(img.bytesPerLine()));
-                ::pwrite(fbfd, img.constScanLine(y), size_t(n), off_t(y) * stride);
+            canvas->fill(0xff000000);
+            d->render(canvas);  // raster-engine render at the exact fb size, independent of the QScreen
+            // Present with a SEQUENTIAL write() from offset 0 (position auto-advances),
+            // NOT pwrite: StarryOS's fb device doesn't honor an explicit pwrite offset
+            // (writes land at 0), while a streaming write() works (proven by the 0xA5
+            // round-trip and the in-process self-check).
+            ::lseek(fbfd, 0, SEEK_SET);
+            if (contiguous) {
+                long total = std::min<long>(fbsize, long(canvas->sizeInBytes())), off = 0;
+                const uchar *bits = canvas->constBits();
+                while (off < total) { ssize_t w = ::write(fbfd, bits + off, size_t(total - off)); if (w <= 0) break; off += w; }
+            } else {
+                for (int y = 0; y < fbh; y++) ::write(fbfd, canvas->constScanLine(y), size_t(std::min<long>(stride, long(canvas->bytesPerLine()))));
             }
-            if (!dumpPath.isEmpty() && !*dumped) {  // one-shot: proves the offscreen render has content, independent of the fb
-                FILE *f = ::fopen(dumpPath.toUtf8().constData(), "wb");
-                if (f) { for (int y = 0; y < img.height(); y++) std::fwrite(img.constScanLine(y), 1, img.bytesPerLine(), f); std::fclose(f); }
+            if (!*dumped) {  // one-shot self-check: does OUR write actually stick in the fb we read back?
+                long rbright = 0;
+                for (int y = 0; y < fbh; y++) { const uchar *s = canvas->constScanLine(y); for (int x = 0; x < fbw * 4; x += 4) if (s[x] >= 0x40 || s[x + 1] >= 0x40 || s[x + 2] >= 0x40) rbright++; }
+                unsigned char *back = (unsigned char *)::malloc(size_t(fbsize)); long got = 0, fbright = 0;
+                if (back) { ::lseek(fbfd, 0, SEEK_SET); while (got < fbsize) { ssize_t r = ::read(fbfd, back + got, size_t(fbsize - got)); if (r <= 0) break; got += r; }
+                    for (long i = 0; i + 3 < got; i += 4) if (back[i] >= 0x40 || back[i + 1] >= 0x40 || back[i + 2] >= 0x40) fbright++; ::free(back); }
+                std::fprintf(stderr, "DIRECTFB_SELFCHECK render_bright=%ld fbread_bright=%ld fbread_got=%ld contiguous=%d\n", rbright, fbright, got, int(contiguous)); std::fflush(stderr);
+                if (!dumpPath.isEmpty()) { FILE *f = ::fopen(dumpPath.toUtf8().constData(), "wb"); if (f) { for (int y = 0; y < fbh; y++) std::fwrite(canvas->constScanLine(y), 1, canvas->bytesPerLine(), f); std::fclose(f); } }
                 *dumped = true;
             }
         };
