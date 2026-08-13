@@ -381,10 +381,11 @@ protected:
         QPainter p(this); p.setRenderHint(QPainter::Antialiasing);
         const int W = width(), H = height();
         background(p, W, H); dbg("bg");
-        int m = std::max(14, W / 100);
+        int m = std::max(16, W / 84);
         int hh = std::max(52, H / 16);
         topbar(p, m, m, W - 2 * m, hh); dbg("topbar");
-        int top = m + hh + m, gap = m, bh = H - top - m;
+        int gap = std::max(26, W / 50);              // generous gutter between the three panels
+        int top = m + hh + int(gap * 0.9), bh = H - top - m;
         // three columns: 系统 (system) | 机器人视角 (vision) | 场地雷达 (nav)
         int avail = W - 2 * m - 2 * gap;
         int wA = int(avail * 0.30), wB = int(avail * 0.40), wC = avail - wA - wB;
@@ -454,16 +455,17 @@ private:
         p.drawLine(r.right(), r.bottom(), r.right() - b, r.bottom()); p.drawLine(r.right(), r.bottom(), r.right(), r.bottom() - b);
         // faint full edge
         p.setPen(QPen(T::withA(accent, 40), 1)); p.drawRect(r);
-        // header label
-        int y = r.top() + int(fs(30));
-        p.setFont(mono(12, QFont::Bold)); p.setPen(accent);
-        p.drawText(r.left() + int(fs(20)), y, idx);
-        QRect ib = p.boundingRect(r.left() + int(fs(20)), y, r.width(), int(fs(20)), Qt::AlignLeft, idx);
+        // header: a small accent tab + the title (no index number)
+        (void)idx;
+        int y = r.top() + int(fs(32));
+        double tabX = r.left() + fs(22);
+        p.setBrush(accent); p.setPen(Qt::NoPen);
+        p.drawRect(QRectF(tabX, y - fs(13), fs(4), fs(15)));  // accent tab replaces the index
         p.setFont(cjk(15, QFont::Bold, 3)); p.setPen(T::ink);
-        p.drawText(ib.right() + int(fs(14)), y, title);
+        p.drawText(int(tabX + fs(16)), y, title);
         // right-side tick ruler
         p.setPen(QPen(T::line, 1));
-        for (int i = 0; i < 6; i++) { int tx = r.right() - int(fs(20)) - i * int(fs(12)); p.drawLine(tx, r.top() + int(fs(14)), tx, r.top() + int(fs(14)) + (i % 2 ? int(fs(6)) : int(fs(10)))); }
+        for (int i = 0; i < 6; i++) { int tx = r.right() - int(fs(20)) - i * int(fs(12)); p.drawLine(tx, r.top() + int(fs(16)), tx, r.top() + int(fs(16)) + (i % 2 ? int(fs(6)) : int(fs(10)))); }
     }
 
     // ---- segmented bargraph ----
@@ -583,7 +585,7 @@ private:
         stat(p, ix, cy, tw, th, "SoC 温度", sys.temp_ok ? QString::asprintf("%.1f", sys.temp) : "—", sys.temp_ok ? "°C" : "", !sys.temp_ok ? T::dim : sys.temp > 80 ? T::coral : sys.temp > 65 ? T::amber : T::green);
         stat(p, ix + tw + tgap, cy, tw, th, "负载·1分", sys.load_ok ? QString::asprintf("%.2f", sys.load1) : "—", "", sys.load_ok ? T::cyan : T::dim);
         stat(p, ix + 2 * (tw + tgap), cy, tw, th, "负载·15分", sys.load_ok ? QString::asprintf("%.2f", sys.load15) : "—", "", T::dim);
-        cy += th + fs(14);
+        cy += th + fs(20);
         const char *fn[3] = {"A55", "A76-0", "A76-1"};
         for (int i = 0; i < 3; i++)
             stat(p, ix + i * (tw + tgap), cy, tw, th, fn[i], sys.freq_ok[i] ? QString::asprintf("%d", sys.freq[i]) : "—", sys.freq_ok[i] ? "MHz" : "", !sys.freq_ok[i] ? T::dim : i == 0 ? T::green : T::cyan);
@@ -736,12 +738,12 @@ private:
         QRect R(x, y, w, h); frame(p, R, "02", "机器人视角", T::amber);
         int ix = x + int(fs(24)), iw = w - int(fs(48));
         if (!tn.seen) { noSignal(p, R); return; }
-        int cy = y + int(fs(56));
-        double vpH = h * 0.46;
+        int cy = y + int(fs(68));
+        double vpH = h * 0.44;
         viewport(p, QRectF(ix, cy, iw, vpH));
-        cy += int(vpH + fs(22));
+        cy += int(vpH + fs(30));
         p.setFont(cjk(11, QFont::Bold, 2)); p.setPen(T::dim); p.drawText(ix, cy, "差速驱动");
-        cy += int(fs(12));
+        cy += int(fs(14));
         double mh = h * 0.05;
         p.setFont(cjk(11, QFont::Bold)); p.setPen(T::ink); p.drawText(QPointF(ix, cy + mh * 0.72), "左");
         motor(p, QRectF(ix + fs(24), cy, iw - fs(24) - fs(64), mh), tn.mL);
@@ -750,7 +752,7 @@ private:
         p.setFont(cjk(11, QFont::Bold)); p.setPen(T::ink); p.drawText(QPointF(ix, cy + mh * 0.72), "右");
         motor(p, QRectF(ix + fs(24), cy, iw - fs(24) - fs(64), mh), tn.mR);
         p.setFont(mono(12, QFont::Bold)); p.setPen(tn.mR >= 0 ? T::green : T::coral); p.drawText(QRectF(ix + iw - fs(58), cy, fs(58), mh), Qt::AlignRight | Qt::AlignVCenter, QString::asprintf("%+d", tn.mR));
-        cy += int(mh + fs(18));
+        cy += int(mh + fs(28));
         double tgap = fs(12), tw = (iw - tgap * 2) / 3, th = h * 0.115;
         stat(p, ix, cy, tw, th, "机械臂", armCN(tn.arm), "", T::amber);
         stat(p, ix + tw + tgap, cy, tw, th, "帧率", QString::asprintf("%.1f", tn.done ? tn.res_fps : tn.fps), "", T::green);
@@ -762,10 +764,10 @@ private:
         QRect R(x, y, w, h); frame(p, R, "03", "场地雷达", T::violet);
         int ix = x + int(fs(24)), iw = w - int(fs(48));
         if (!tn.seen) { noSignal(p, R); return; }
-        int cy = y + int(fs(56));
-        double rdH = std::min(iw * 0.92, h * 0.40);
+        int cy = y + int(fs(68));
+        double rdH = std::min(iw * 0.9, h * 0.38);
         radar(p, QRectF(ix, cy, iw, rdH));
-        cy += int(rdH + fs(22));
+        cy += int(rdH + fs(30));
         double cgap = fs(12), cw = (iw - cgap * 2) / 3;
         auto od = [&](double cxp, const QString &label, const QString &val, QColor vc) {
             p.setFont(cjk(9)); p.setPen(T::dim); p.drawText(QPointF(cxp, cy), label);
@@ -775,7 +777,7 @@ private:
         od(ix + cw + cgap, "航向", tn.odom_valid ? QString::asprintf("%+.0f°", tn.odom_heading * 180.0 / M_PI) : "—", T::violet);
         od(ix + 2 * (cw + cgap), "坐标", tn.odom_valid ? QString::asprintf("%+.1f,%+.1f", tn.odom_x, tn.odom_y) : "—", T::cyan);
         if (!tn.odom_valid) { p.setFont(cjk(9)); p.setPen(T::withA(T::dim, 170)); p.drawText(QRectF(ix, cy - fs(30), iw, fs(14)), Qt::AlignRight, "锚点未初始化"); }
-        cy += int(fs(42));
+        cy += int(fs(52));
         double tgap = fs(12), tw = (iw - tgap * 2) / 3, th = h * 0.115;
         stat(p, ix, cy, tw, th, "首帧推理", tn.ttfi < 0 ? "—" : QString::asprintf("%.0f", tn.ttfi), tn.ttfi < 0 ? "" : "ms", T::amber);
         stat(p, ix + tw + tgap, cy, tw, th, "检测数", QString::asprintf("%llu", (unsigned long long)tn.detections), "", T::cyan);
