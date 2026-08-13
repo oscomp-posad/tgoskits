@@ -32,6 +32,7 @@
 #include <QWidget>
 #include <QPainter>
 #include <QPainterPath>
+#include <QImage>
 #include <QLinearGradient>
 #include <QRadialGradient>
 #include <QTimer>
@@ -175,7 +176,9 @@ struct TennisStats {
     std::string state = "STANDBY";
     bool ball = false, bucket = false;
     double frame_age = 0;
-    double ball_area = 0, ball_cx = -1;                 // perception detail (latest app)
+    double ball_area = 0, ball_cx = -1, ball_cy = -1;   // perception detail (latest app; cy for the camera overlay)
+    double frame_w = 640, frame_h = 480;                // capture dims (for cx/cy normalization)
+    std::deque<QPointF> ball_hist;                       // normalized (x,y) ball trail for the motion bridge
     bool odom_valid = false;                            // odometry (latest app)
     double odom_x = 0, odom_y = 0, odom_heading = 0, odom_distance = 0;
     bool anchor_reset = false; double anchor_reset_w = 0;
@@ -192,7 +195,12 @@ struct TennisStats {
         if (l.rfind("TENNIS_STATE", 0) == 0) {
             seen = true; state = kv(l, "state");
             ball = kvl(l, "detections"); bucket = kvl(l, "bucket_visible");
-            ball_area = kvd(l, "ball_area"); ball_cx = kvd(l, "ball_cx", -1);
+            ball_area = kvd(l, "ball_area"); ball_cx = kvd(l, "ball_cx", -1); ball_cy = kvd(l, "ball_cy", -1);
+            if (ball && ball_cx >= 0) {  // normalized ball trail (frame coords -> 0..1); cy falls back to mid if not emitted
+                double nx = ball_cx / frame_w, ny = (ball_cy >= 0 ? ball_cy : frame_h * 0.5) / frame_h;
+                ball_hist.push_back(QPointF(nx, ny));
+                while (ball_hist.size() > 16) ball_hist.pop_front();
+            }
             odom_valid = kvl(l, "odom_valid");
             odom_x = kvd(l, "odom_x"); odom_y = kvd(l, "odom_y");
             odom_heading = kvd(l, "odom_heading"); odom_distance = kvd(l, "odom_distance");
@@ -256,6 +264,35 @@ static QString armCN(const std::string &a) {
     return QString::fromStdString(a);
 }
 
+// ------------------------------ camera feed ---------------------------------
+// Live camera frames the tennis app publishes to a tmpfs file (atomic rename), at
+// low fps. Format: 8-byte header 'C','F', u16 seq, u16 w, u16 h (little-endian),
+// then w*h*4 RGBA8888. We keep the current + previous frame so a new arrival can
+// crossfade in — the low-fps feed then reads as fluid next to the realtime
+// detection overlay (which updates at telemetry rate). Zero cost to the app
+// beyond the small downscaled frame it already chose to publish.
+struct CameraFeed {
+    std::string path;
+    QImage cur, prev;
+    double curArrival = 0;
+    int seq = -1;
+    bool have() const { return !cur.isNull(); }
+    void set(const QImage &img) { prev = cur; cur = img; curArrival = nowSec(); }
+    void poll() {
+        if (path.empty()) return;
+        std::string d = slurp(path.c_str());
+        if (d.size() < 8) return;
+        const unsigned char *p = (const unsigned char *)d.data();
+        if (p[0] != 'C' || p[1] != 'F') return;
+        int s = p[2] | (p[3] << 8), w = p[4] | (p[5] << 8), h = p[6] | (p[7] << 8);
+        if (s == seq || w <= 0 || h <= 0 || d.size() < size_t(8) + size_t(w) * h * 4) return;
+        QImage img((const uchar *)(p + 8), w, h, QImage::Format_RGBA8888);
+        set(img.copy());  // detach from the slurped buffer
+        seq = s;
+    }
+    double fade() const { double dt = nowSec() - curArrival; return std::min(1.0, dt / 0.12); }  // 120 ms crossfade
+};
+
 // ------------------------------ dashboard -----------------------------------
 class Dashboard : public QWidget {
 public:
@@ -300,9 +337,10 @@ public:
         // 8 fps is already low enough for the non-interference budget.
         (void)dirty_; (void)lastPaint_;
         auto *rt = new QTimer(this);
-        connect(rt, &QTimer::timeout, this, [this] { update(); });
+        connect(rt, &QTimer::timeout, this, [this] { cam.poll(); update(); });
         rt->start(std::max(30, 1000 / std::max(1, renderFps_)));
     }
+    void setCameraPath(const std::string &p) { cam.path = p; }
     void injectDemo() {
         double v[8] = {22, 14, 9, 31, 88, 74, 61, 45};
         for (int i = 0; i < 8; i++) sys.cpu[i] = v[i];
@@ -314,7 +352,19 @@ public:
         tn.seen = true; tn.state = "CHASE_BALL"; tn.ball = true; tn.bucket = false; tn.frame_age = 11.4;
         tn.mL = 42; tn.mR = -42; tn.arm = "None"; tn.f2c = 23.7; tn.ttfi = 8420; tn.rss_kb = 41216;
         tn.frames = 1873; tn.detections = 512; tn.fps = 29.6;
-        tn.ball_area = 0.038; tn.ball_cx = 366;
+        tn.ball_area = 0.038; tn.ball_cx = 366; tn.ball_cy = 300;
+        for (int i = 0; i <= 8; i++) { double t = i / 8.0; tn.ball_hist.push_back(QPointF(0.50 + 0.072 * t, 0.58 + 0.045 * t)); }  // trail tail(stale)→head(now)
+        // synthetic camera frame for the demo: a court scene + the tennis ball
+        QImage frame(320, 240, QImage::Format_RGBA8888);
+        { QPainter cp(&frame); cp.setRenderHint(QPainter::Antialiasing);
+          QLinearGradient g(0, 0, 0, 240); g.setColorAt(0, QColor(46, 78, 60)); g.setColorAt(1, QColor(16, 30, 25)); cp.fillRect(frame.rect(), g);
+          cp.setPen(QPen(QColor(130, 190, 160, 80), 1));
+          for (int i = 1; i < 6; i++) { int y = 240 * i / 6; cp.drawLine(0, y, 320, y); }
+          for (int i = 0; i <= 8; i++) { double x = 320.0 * i / 8; cp.drawLine(160 + (x - 160) * 0.35, 70, x, 240); }
+          double bx = 0.50 * 320, by = 0.58 * 240;  // camera ball = trail tail (slightly behind the live overlay)
+          QRadialGradient bg(bx, by, 15); bg.setColorAt(0, QColor(225, 245, 95)); bg.setColorAt(1, QColor(150, 180, 40));
+          cp.setBrush(bg); cp.setPen(Qt::NoPen); cp.drawEllipse(QPointF(bx, by), 15, 15); }
+        cam.cur = frame;
         tn.odom_valid = true; tn.odom_x = 1.24; tn.odom_y = -0.42; tn.odom_heading = -0.62; tn.odom_distance = 1.31;
         for (int i = 0; i <= 60; i++) {  // curved path from the anchor out to the robot
             double t = i / 60.0, a = t * 1.9;
@@ -345,7 +395,7 @@ protected:
     }
 
 private:
-    SystemStats sys; TennisStats tn; std::string buf;
+    SystemStats sys; TennisStats tn; std::string buf; CameraFeed cam;
     QElapsedTimer phase;
     int fd_ = 0, renderFps_ = 8; bool dirty_ = true; qint64 lastPaint_ = 0;
     bool paintDbg_ = false; mutable bool dbgActive_ = false; int paintN_ = 0;  // STARRY_PAINT_DEBUG hang-locator
@@ -584,32 +634,54 @@ private:
         p.drawText(R.adjusted(0, int(R.height() * 0.56), 0, 0), Qt::AlignHCenter | Qt::AlignTop, "接入遥测：  tennis-app … | dashboard");
     }
 
-    // Reconstructed robot's-eye view — a synthetic camera frame drawn purely from
-    // detection telemetry (ball_cx/ball_area, bucket_visible, state). NOT a real
-    // camera feed (watermarked 重建 so it is never mistaken for one); zero app cost.
+    // Robot's-eye viewport. With a live camera feed it shows the real (low-fps,
+    // crossfaded) frame; without one it falls back to a synthetic reconstruction.
+    // Either way the detection overlay (aim, ball box at cx/cy, motion-bridge
+    // trail, state) runs at telemetry rate, so the fast overlay reads coherently
+    // over the slow image — the trail bridges the stale frame to the live target.
     void viewport(QPainter &p, QRectF r) {
         p.save();
         p.setPen(QPen(T::withA(T::line, 200), std::max(1, int(fs(1))))); p.setBrush(QColor(3, 6, 8)); p.drawRect(r);
         p.setClipRect(r);
-        double gx = std::max(fs(20), r.width() / 14.0);
-        p.setPen(QPen(T::withA(T::cyan, 12), 1));
-        for (double x = r.left(); x <= r.right(); x += gx) p.drawLine(QPointF(x, r.top()), QPointF(x, r.bottom()));
-        for (double yy = r.top(); yy <= r.bottom(); yy += gx) p.drawLine(QPointF(r.left(), yy), QPointF(r.right(), yy));
-        double cxp = r.center().x(), midY = r.center().y();
-        p.setPen(QPen(T::withA(T::amber, 55), 1)); p.drawLine(QPointF(r.left(), midY), QPointF(r.right(), midY));
-        p.setPen(QPen(T::withA(T::amber, 90), std::max(1, int(fs(1))), Qt::DashLine)); p.drawLine(QPointF(cxp, r.top()), QPointF(cxp, r.bottom()));
-        for (int k = 1; k <= 3; k++) { p.setPen(QPen(T::withA(T::green, 48 - k * 8), 1)); p.setBrush(Qt::NoBrush); p.drawEllipse(QPointF(cxp, midY), r.width() * 0.06 * k, r.height() * 0.075 * k); }
+        bool live = cam.have();
+        QRectF ir = r;  // rect the image/scene occupies (camera image is letterboxed)
+        if (live) {
+            const QImage &img = cam.cur;
+            double ar = img.height() ? double(img.width()) / img.height() : 16.0 / 9.0, rar = r.width() / r.height();
+            double iw = ar > rar ? r.width() : r.height() * ar, ih = ar > rar ? r.width() / ar : r.height();
+            ir = QRectF(r.center().x() - iw / 2, r.center().y() - ih / 2, iw, ih);
+            double f = cam.fade();
+            if (!cam.prev.isNull() && f < 1.0) p.drawImage(ir, cam.prev);         // crossfade the low-fps feed in
+            p.setOpacity(f < 1.0 ? f : 1.0); p.drawImage(ir, img); p.setOpacity(1.0);
+            p.fillRect(r, QColor(0, 0, 8, 70));                                   // darken for HUD legibility
+        } else {
+            double gx = std::max(fs(20), r.width() / 14.0);
+            p.setPen(QPen(T::withA(T::cyan, 12), 1));
+            for (double x = r.left(); x <= r.right(); x += gx) p.drawLine(QPointF(x, r.top()), QPointF(x, r.bottom()));
+            for (double yy = r.top(); yy <= r.bottom(); yy += gx) p.drawLine(QPointF(r.left(), yy), QPointF(r.right(), yy));
+        }
+        double cxp = ir.center().x(), midY = ir.center().y();
+        p.setPen(QPen(T::withA(T::amber, 90), std::max(1, int(fs(1))), Qt::DashLine)); p.drawLine(QPointF(cxp, ir.top()), QPointF(cxp, ir.bottom()));
+        for (int k = 1; k <= 3; k++) { p.setPen(QPen(T::withA(T::green, 48 - k * 8), 1)); p.setBrush(Qt::NoBrush); p.drawEllipse(QPointF(cxp, midY), ir.width() * 0.06 * k, ir.height() * 0.075 * k); }
         double rr = fs(7); p.setPen(QPen(T::withA(T::amber, 160), std::max(1, int(fs(1.2)))));
         p.drawLine(QPointF(cxp - rr, midY), QPointF(cxp + rr, midY)); p.drawLine(QPointF(cxp, midY - rr), QPointF(cxp, midY + rr));
-        if (tn.ball && tn.ball_cx >= 0) {  // detection box: x = cx/640, size ∝ √area, y on sight line (cy not emitted)
-            double bx = r.left() + std::max(0.0, std::min(1.0, tn.ball_cx / 640.0)) * r.width();
-            double side = std::max(fs(14), std::min(r.height() * 0.72, std::sqrt(std::max(0.0006, tn.ball_area)) * r.width() * 0.95));
-            for (int k = 3; k >= 1; k--) { p.setPen(Qt::NoPen); p.setBrush(T::withA(T::green, 13 * k)); p.drawEllipse(QPointF(bx, midY), side * 0.5 + k * fs(2.2), side * 0.5 + k * fs(2.2)); }
-            p.setBrush(T::withA(T::green, 42)); p.setPen(QPen(T::green, std::max(1, int(fs(1.6)))));
-            p.drawRect(QRectF(bx - side / 2, midY - side / 2, side, side));
-            p.setBrush(T::green); p.setPen(Qt::NoPen); p.drawEllipse(QPointF(bx, midY), fs(3.2), fs(3.2));
+        if (tn.ball && tn.ball_cx >= 0) {
+            double nx = tn.ball_cx / tn.frame_w, ny = (tn.ball_cy >= 0 ? tn.ball_cy : tn.frame_h * 0.5) / tn.frame_h;
+            double bx = ir.left() + std::max(0.0, std::min(1.0, nx)) * ir.width();
+            double by = ir.top() + std::max(0.0, std::min(1.0, ny)) * ir.height();
+            double side = std::max(fs(14), std::min(ir.height() * 0.6, std::sqrt(std::max(0.0006, tn.ball_area)) * ir.width() * 0.95));
+            for (size_t i = 1; i < tn.ball_hist.size(); i++) {  // motion-bridge trail: stale-frame position (tail) -> now (head)
+                double a = double(i) / tn.ball_hist.size();
+                QPointF p0(ir.left() + tn.ball_hist[i - 1].x() * ir.width(), ir.top() + tn.ball_hist[i - 1].y() * ir.height());
+                QPointF p1(ir.left() + tn.ball_hist[i].x() * ir.width(), ir.top() + tn.ball_hist[i].y() * ir.height());
+                p.setPen(QPen(T::withA(T::green, int(150 * a)), std::max(1, int(fs(1.2) * (0.4 + a))))); p.drawLine(p0, p1);
+            }
+            for (int k = 3; k >= 1; k--) { p.setPen(Qt::NoPen); p.setBrush(T::withA(T::green, 13 * k)); p.drawEllipse(QPointF(bx, by), side * 0.5 + k * fs(2.2), side * 0.5 + k * fs(2.2)); }
+            p.setBrush(T::withA(T::green, live ? 24 : 42)); p.setPen(QPen(T::green, std::max(1, int(fs(1.6)))));
+            p.drawRect(QRectF(bx - side / 2, by - side / 2, side, side));
+            p.setBrush(T::green); p.setPen(Qt::NoPen); p.drawEllipse(QPointF(bx, by), fs(3.2), fs(3.2));
             p.setFont(mono(9, QFont::Bold)); p.setPen(T::green);
-            p.drawText(QPointF(bx - side / 2, midY - side / 2 - fs(5)), QString::asprintf("球 %.1f%%", tn.ball_area * 100.0));
+            p.drawText(QPointF(bx - side / 2, by - side / 2 - fs(5)), QString::asprintf("球 %.1f%%", tn.ball_area * 100.0));
         }
         p.restore();
         QColor sc = stateColor(tn.state);
@@ -619,9 +691,9 @@ private:
             p.setFont(f); p.setPen(T::amber); p.drawText(QPointF(r.right() - tw - fs(12), r.top() + fs(23)), t);
         }
         p.setFont(mono(10)); p.setPen(T::withA(T::ink, 220));
-        p.drawText(QPointF(r.left() + fs(12), r.bottom() - fs(12)), tn.ball ? QString::asprintf("偏移 %+.0f px", tn.ball_cx - 320.0) : QString("未见目标"));
-        QFont wf = cjk(8); QString wm = "重建 · 遥测"; int ww = QFontMetrics(wf).horizontalAdvance(wm);
-        p.setFont(wf); p.setPen(T::withA(T::dim, 150)); p.drawText(QPointF(r.right() - ww - fs(12), r.bottom() - fs(12)), wm);
+        p.drawText(QPointF(r.left() + fs(12), r.bottom() - fs(12)), tn.ball ? QString::asprintf("偏移 %+.0f px", tn.ball_cx - tn.frame_w * 0.5) : QString("未见目标"));
+        QFont wf = cjk(8); QString wm = live ? "摄像头 · 实时叠加" : "重建 · 遥测"; int ww = QFontMetrics(wf).horizontalAdvance(wm);
+        p.setFont(wf); p.setPen(T::withA(live ? T::green : T::dim, 175)); p.drawText(QPointF(r.right() - ww - fs(12), r.bottom() - fs(12)), wm);
     }
 
     // Top-down field map from odometry: robot pose + trail + anchor + ball bearing.
@@ -752,14 +824,15 @@ static void applyIsolation(const QString &cpulist, bool isolate) {
 }
 
 int main(int argc, char **argv) {
-    QString shot, telemetry, cpulist = "0-3"; bool demo = false, isolate = true, directfb = false; int sw = 1920, sh = 1080, fps = 8;
+    QString shot, telemetry, camera, cpulist = "0-3"; bool demo = false, isolate = true, directfb = false; int sw = 1920, sh = 1080, fps = 8;
     for (int i = 1; i < argc; i++) {
         if (!std::strcmp(argv[i], "--shot") && i + 1 < argc) { shot = argv[++i]; demo = true; }
         else if (!std::strcmp(argv[i], "--size") && i + 1 < argc) { std::sscanf(argv[++i], "%dx%d", &sw, &sh); }  // responsive test: --size 1280x720
         else if (!std::strcmp(argv[i], "--telemetry") && i + 1 < argc) { telemetry = argv[++i]; }  // tail a file instead of stdin
+        else if (!std::strcmp(argv[i], "--camera") && i + 1 < argc) { camera = argv[++i]; }         // tmpfs file the app publishes frames to
         else if (!std::strcmp(argv[i], "--cpu") && i + 1 < argc) { cpulist = argv[++i]; }           // affinity list, default A55 0-3
         else if (!std::strcmp(argv[i], "--fps") && i + 1 < argc) { fps = std::atoi(argv[++i]); }    // repaint cap, default 8
-        else if (!std::strcmp(argv[i], "--directfb")) { directfb = true; }                          // present via /dev/fb0 mmap (StarryOS)
+        else if (!std::strcmp(argv[i], "--directfb")) { directfb = true; }                          // present via /dev/fb0 (StarryOS)
         else if (!std::strcmp(argv[i], "--no-isolate")) { isolate = false; }
         else if (!std::strcmp(argv[i], "--demo")) demo = true;
     }
@@ -783,11 +856,12 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (directfb) {
-        // Standard fbdev presentation. Render the widget OFFSCREEN through the
-        // raster engine (QWidget::grab — the exact path --shot uses on the host),
-        // then blit it to the Linux framebuffer via the canonical /dev/fb0 mmap.
-        // This deliberately bypasses Qt's linuxfb window-compositor flush, which
-        // on StarryOS only pushed the background rectangle to the scanout.
+        // Present to the VOP2 scanout via the UNCACHED /dev/fb0 mmap — NOT write()/read().
+        // On StarryOS the read_at/write_at path is a CACHED alias that is incoherent with the
+        // DRAM the VOP2 scans (proven in-process: an mmap read shows content while read() shows
+        // 0 — the "mismatched-cacheability alias" the VOP2 driver warns about). So we memcpy the
+        // offscreen render straight into the uncached mmap, and read the SAME mmap back to verify
+        // exactly what the panel receives. Bypasses Qt's linuxfb compositor entirely.
         int fbfd = ::open("/dev/fb0", O_RDWR);
         if (fbfd < 0) { std::fprintf(stderr, "directfb: open /dev/fb0 failed\n"); return 1; }
         struct fb_var_screeninfo vi; struct fb_fix_screeninfo fi;
@@ -795,37 +869,28 @@ int main(int argc, char **argv) {
         int fbw = vi.xres ? int(vi.xres) : sw, fbh = vi.yres ? int(vi.yres) : sh;
         int bpp = vi.bits_per_pixel ? int(vi.bits_per_pixel) / 8 : 4;
         long stride = fi.line_length ? long(fi.line_length) : long(fbw) * bpp;
+        long fbsize = stride * fbh;
+        unsigned char *fbmap = (unsigned char *)::mmap(nullptr, size_t(fbsize), PROT_READ | PROT_WRITE, MAP_SHARED, fbfd, 0);
+        if (fbmap == MAP_FAILED) { std::fprintf(stderr, "directfb: mmap /dev/fb0 failed\n"); return 1; }
         applyIsolation(cpulist, isolate);
         auto *d = new Dashboard(demo, telemetry, fps);
+        if (!camera.isEmpty()) d->setCameraPath(camera.toStdString());
         d->resize(fbw, fbh);
         QString dumpPath = ::getenv("STARRY_GRAB_DUMP") ? QString(::getenv("STARRY_GRAB_DUMP")) : QString();
         auto *dumped = new bool(false);
-        auto *canvas = new QImage(fbw, fbh, QImage::Format_ARGB32);  // fixed-size render target (grab() size can vary by QPA)
-        long fbsize = stride * fbh;
-        bool contiguous = (long(canvas->bytesPerLine()) == stride);  // no row padding -> one sequential stream
+        auto *canvas = new QImage(fbw, fbh, QImage::Format_RGB32);  // opaque RGB32; bytesPerLine == stride at 1920 (no padding)
         auto present = [=]() {
             canvas->fill(0xff000000);
             d->render(canvas);  // raster-engine render at the exact fb size, independent of the QScreen
-            // Present with a SEQUENTIAL write() from offset 0 (position auto-advances),
-            // NOT pwrite: StarryOS's fb device doesn't honor an explicit pwrite offset
-            // (writes land at 0), while a streaming write() works (proven by the 0xA5
-            // round-trip and the in-process self-check).
-            ::lseek(fbfd, 0, SEEK_SET);
-            if (contiguous) {
-                long total = std::min<long>(fbsize, long(canvas->sizeInBytes())), off = 0;
-                const uchar *bits = canvas->constBits();
-                while (off < total) { ssize_t w = ::write(fbfd, bits + off, size_t(total - off)); if (w <= 0) break; off += w; }
-            } else {
-                for (int y = 0; y < fbh; y++) ::write(fbfd, canvas->constScanLine(y), size_t(std::min<long>(stride, long(canvas->bytesPerLine()))));
-            }
-            if (!*dumped) {  // one-shot self-check: does OUR write actually stick in the fb we read back?
-                long rbright = 0;
+            long total = std::min<long>(fbsize, long(canvas->sizeInBytes()));
+            if (long(canvas->bytesPerLine()) == stride) std::memcpy(fbmap, canvas->constBits(), size_t(total));
+            else for (int y = 0; y < fbh; y++) std::memcpy(fbmap + size_t(y) * stride, canvas->constScanLine(y), size_t(std::min<long>(stride, long(canvas->bytesPerLine()))));
+            if (!*dumped) {  // verify via the SAME uncached mmap (the truthful DRAM / VOP2 oracle)
+                long rbright = 0, mmbright = 0;
                 for (int y = 0; y < fbh; y++) { const uchar *s = canvas->constScanLine(y); for (int x = 0; x < fbw * 4; x += 4) if (s[x] >= 0x40 || s[x + 1] >= 0x40 || s[x + 2] >= 0x40) rbright++; }
-                unsigned char *back = (unsigned char *)::malloc(size_t(fbsize)); long got = 0, fbright = 0;
-                if (back) { ::lseek(fbfd, 0, SEEK_SET); while (got < fbsize) { ssize_t r = ::read(fbfd, back + got, size_t(fbsize - got)); if (r <= 0) break; got += r; }
-                    for (long i = 0; i + 3 < got; i += 4) if (back[i] >= 0x40 || back[i + 1] >= 0x40 || back[i + 2] >= 0x40) fbright++; ::free(back); }
-                std::fprintf(stderr, "DIRECTFB_SELFCHECK render_bright=%ld fbread_bright=%ld fbread_got=%ld contiguous=%d\n", rbright, fbright, got, int(contiguous)); std::fflush(stderr);
-                if (!dumpPath.isEmpty()) { FILE *f = ::fopen(dumpPath.toUtf8().constData(), "wb"); if (f) { for (int y = 0; y < fbh; y++) std::fwrite(canvas->constScanLine(y), 1, canvas->bytesPerLine(), f); std::fclose(f); } }
+                for (long i = 0; i + 3 < fbsize; i += 4) if (fbmap[i] >= 0x40 || fbmap[i + 1] >= 0x40 || fbmap[i + 2] >= 0x40) mmbright++;
+                std::fprintf(stderr, "DIRECTFB_SELFCHECK render_bright=%ld mmapread_bright=%ld\n", rbright, mmbright); std::fflush(stderr);
+                if (!dumpPath.isEmpty()) { FILE *f = ::fopen(dumpPath.toUtf8().constData(), "wb"); if (f) { std::fwrite(fbmap, 1, size_t(fbsize), f); std::fclose(f); } }  // dump the DRAM = exactly what the panel scans
                 *dumped = true;
             }
         };
@@ -833,11 +898,12 @@ int main(int argc, char **argv) {
         QObject::connect(t, &QTimer::timeout, present);
         t->start(std::max(30, 1000 / std::max(1, fps)));
         present();  // first frame immediately
-        std::printf("DASHBOARD_DIRECTFB %dx%d bpp=%d stride=%ld\n", fbw, fbh, bpp, stride); std::fflush(stdout);
+        std::printf("DASHBOARD_DIRECTFB %dx%d bpp=%d stride=%ld (mmap present)\n", fbw, fbh, bpp, stride); std::fflush(stdout);
         return app.exec();
     }
     applyIsolation(cpulist, isolate);
     Dashboard d(demo, telemetry, fps);
+    if (!camera.isEmpty()) d.setCameraPath(camera.toStdString());
     d.showFullScreen();
     std::printf("DASHBOARD_STARTED\n"); std::fflush(stdout);
     return app.exec();
