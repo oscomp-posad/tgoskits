@@ -96,29 +96,32 @@ bool Controller::dispatch(const ControlOutput &out) {
         return false;
     }
 
-    if (out.arm == ArmAction::None) return true;
-    bool succeeded = false;
-    switch (out.arm) {
-    case ArmAction::Grab: {
-        const GrabResult result = arm_.grab();
-        if (result == GrabResult::Empty) {
-            metrics_.on_arm_command();
-            sm_.on_grab_empty();
-            std::fprintf(stderr, "TENNIS_WARN arm grab empty; resuming ball search\n");
-            return true;
+    if (out.arm != ArmAction::None) {
+        bool succeeded = false;
+        switch (out.arm) {
+        case ArmAction::Grab: {
+            const GrabResult result = arm_.grab();
+            if (result == GrabResult::Empty) {
+                metrics_.on_arm_command();
+                sm_.on_grab_empty();
+                std::fprintf(
+                    stderr,
+                    "TENNIS_WARN arm grab empty; resuming ball search\n");
+                return true;
+            }
+            succeeded = result == GrabResult::Captured;
+            break;
         }
-        succeeded = result == GrabResult::Captured;
-        break;
+        case ArmAction::Release: succeeded = arm_.release(); break;
+        case ArmAction::Ready: succeeded = arm_.ready(); break;
+        case ArmAction::None: succeeded = true; break;
+        }
+        if (!succeeded) {
+            std::fprintf(stderr, "TENNIS_ERROR arm command failed\n");
+            return false;
+        }
+        metrics_.on_arm_command();
     }
-    case ArmAction::Release: succeeded = arm_.release(); break;
-    case ArmAction::Ready: succeeded = arm_.ready(); break;
-    case ArmAction::None: succeeded = true; break;
-    }
-    if (!succeeded) {
-        std::fprintf(stderr, "TENNIS_ERROR arm command failed\n");
-        return false;
-    }
-    metrics_.on_arm_command();
     if (out.reset_odometry) {
         odometry_.reset_anchor();
         sm_.set_odometry(odometry_.estimate(monotonic_ns()));

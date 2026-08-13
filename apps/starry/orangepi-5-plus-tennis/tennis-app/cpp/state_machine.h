@@ -56,16 +56,20 @@ private:
         Normal,
         BrakeForGrab,
         BrakeForDeposit,
+        ReverseAfterDeposit,
     };
 
     ControlOutput chase_ball(const BallObs &ball, int64_t now_ns);
     ControlOutput grab(int64_t now_ns);
     ControlOutput return_to_bucket(const BucketObs &bucket, int64_t now_ns);
-    ControlOutput find_bucket(const BucketObs &bucket);
+    ControlOutput find_bucket(const BucketObs &bucket, int64_t now_ns);
     ControlOutput approach_bucket(const BucketObs &bucket, int64_t now_ns);
     ControlOutput deposit(int64_t now_ns);
 
     void enter(GameState s);
+    void reset_search_rotation();
+    int search_rotation_direction(int initial_direction, int speed,
+                                  int64_t now_ns);
     bool run_timed_phase(int64_t now_ns, ControlOutput &out);
     void start_timed_phase(TimedPhase phase, int64_t now_ns, int duration_ms);
 
@@ -76,6 +80,9 @@ private:
     // CHASE_BALL bookkeeping.
     int last_offset_ = 0;
     int stop_confirm_ = 0;
+    bool search_rotation_active_ = false;
+    int search_rotation_direction_ = 1;
+    int64_t search_rotation_deadline_ns_ = 0;
 
     TimedPhase timed_phase_ = Normal;
     int64_t timed_deadline_ns_ = 0;

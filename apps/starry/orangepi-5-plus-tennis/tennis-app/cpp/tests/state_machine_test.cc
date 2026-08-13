@@ -110,23 +110,25 @@ bool empty_grab_resumes_ball_search() {
                   "an empty grasp must restore ball perception");
 }
 
-bool ball_search_keeps_one_way_scan() {
+bool ball_search_reverses_after_estimated_two_turns() {
     tennis::Config config;
     config.search_pivot_spd = 30;
+    config.search_reverse_turns = 2.0;
     tennis::StateMachine machine(config);
     auto output = machine.step(tennis::Detection{}, ms(0));
     if (!expect(output.left == config.search_pivot_spd &&
                     output.right == -config.search_pivot_spd,
                 "ball search must rotate in the initial direction"))
         return false;
-    for (int frame = 1; frame <= 180; ++frame) {
-        output = machine.step(tennis::Detection{}, ms(frame * 33));
-        if (!expect(output.left == config.search_pivot_spd &&
-                        output.right == -config.search_pivot_spd,
-                    "ball search must keep rotating in one direction"))
-            return false;
-    }
-    return true;
+    output = machine.step(tennis::Detection{}, ms(11999));
+    if (!expect(output.left == config.search_pivot_spd &&
+                    output.right == -config.search_pivot_spd,
+                "ball search must keep direction before two estimated turns"))
+        return false;
+    output = machine.step(tennis::Detection{}, ms(12000));
+    return expect(output.left == -config.search_pivot_spd &&
+                      output.right == config.search_pivot_spd,
+                  "ball search must reverse after two estimated turns");
 }
 
 bool chase_uses_proportional_executable_steering() {
@@ -270,6 +272,31 @@ bool bucket_search_uses_configured_in_place_speed() {
                   "bucket search must use the configured in-place speed");
 }
 
+bool bucket_search_reverses_after_estimated_two_turns() {
+    tennis::Config config;
+    config.stop_confirm_cnt = 1;
+    config.brake_hold_ms = 0;
+    config.grab_settle_ms = 0;
+    config.bucket_search_spd = 30;
+    config.search_reverse_turns = 2.0;
+    tennis::StateMachine machine(config);
+    const float target = static_cast<float>(
+        config.frame_w / 2 + config.stop_center_offset);
+
+    machine.step(ball_detection(config.area_stop + 0.01f, target), ms(0));
+    machine.tick(ms(0));
+    machine.tick(ms(0));
+    auto output = machine.step(tennis::Detection{}, ms(0));
+    if (!expect(output.left == config.bucket_search_spd &&
+                    output.right == -config.bucket_search_spd,
+                "bucket search must rotate in the initial direction"))
+        return false;
+    output = machine.step(tennis::Detection{}, ms(12000));
+    return expect(output.left == -config.bucket_search_spd &&
+                      output.right == config.bucket_search_spd,
+                  "bucket search must reverse after two estimated turns");
+}
+
 bool captured_ball_uses_odom_return_and_visual_takeover() {
     tennis::Config config;
     config.stop_confirm_cnt = 1;
@@ -277,6 +304,7 @@ bool captured_ball_uses_odom_return_and_visual_takeover() {
     config.brake_hold_ms = 0;
     config.grab_settle_ms = 0;
     config.release_settle_ms = 0;
+    config.deposit_reverse_ms = 0;
     tennis::StateMachine machine(config);
     const float target = static_cast<float>(
         config.frame_w / 2 + config.stop_center_offset);
@@ -296,9 +324,10 @@ bool captured_ball_uses_odom_return_and_visual_takeover() {
     machine.step(bucket_detection(1.0f), ms(0));
     machine.tick(ms(0));
     output = *machine.tick(ms(0));
-    if (!expect(output.arm == tennis::ArmAction::Ready &&
+    if (!expect(output.arm == tennis::ArmAction::None &&
+                    output.reset_odometry &&
                     machine.state() == tennis::GameState::CHASE_BALL,
-                "deposit completion must return to ball chase"))
+                "deposit completion must reset odometry and chase the ball"))
         return false;
 
     tennis::OdometryEstimate estimate;
@@ -328,13 +357,15 @@ bool captured_ball_uses_odom_return_and_visual_takeover() {
                   "visual bucket detection must immediately take over");
 }
 
-bool deposit_waits_for_brake_and_release() {
+bool deposit_waits_for_brake_release_and_reverse() {
     tennis::Config config;
     config.stop_confirm_cnt = 1;
     config.bucket_confirm_cnt = 1;
     config.brake_hold_ms = 350;
     config.grab_settle_ms = 0;
     config.release_settle_ms = 500;
+    config.deposit_reverse_speed = 30;
+    config.deposit_reverse_ms = 500;
     tennis::StateMachine machine(config);
     const auto ball = ball_detection(
         config.area_stop + 0.01f,
@@ -365,9 +396,26 @@ bool deposit_waits_for_brake_and_release() {
                 "deposit must wait for the release deadline"))
         return false;
     output = *machine.tick(ms(1200));
-    return expect(output.arm == tennis::ArmAction::Ready &&
-                      machine.state() == tennis::GameState::CHASE_BALL,
-                  "arm must return home after the release deadline");
+    if (!expect(output.arm == tennis::ArmAction::None &&
+                    output.motor_op == tennis::MotorOp::Drive &&
+                    output.left == -30 && output.right == -30 &&
+                    !output.reset_odometry &&
+                    machine.state() == tennis::GameState::DEPOSIT &&
+                    machine.perception_mode() == tennis::PerceptionMode::BUCKET,
+                "release completion must reverse without a redundant ready pose"))
+        return false;
+    output = *machine.tick(ms(1699));
+    if (!expect(output.motor_op == tennis::MotorOp::Drive &&
+                    output.left == -30 && output.right == -30 &&
+                    machine.state() == tennis::GameState::DEPOSIT,
+                "deposit reverse must continue until its elapsed-time deadline"))
+        return false;
+    output = *machine.tick(ms(1700));
+    return expect(output.motor_op == tennis::MotorOp::Standby &&
+                      output.reset_odometry &&
+                      machine.state() == tennis::GameState::CHASE_BALL &&
+                      machine.perception_mode() == tennis::PerceptionMode::BALL,
+                  "reverse completion must stop, reset odometry, then search");
 }
 
 } // namespace
@@ -376,13 +424,14 @@ int main() {
     if (!reverse_takes_priority_over_grab()) return 1;
     if (!grab_brake_uses_elapsed_time()) return 1;
     if (!empty_grab_resumes_ball_search()) return 1;
-    if (!ball_search_keeps_one_way_scan()) return 1;
+    if (!ball_search_reverses_after_estimated_two_turns()) return 1;
     if (!chase_uses_proportional_executable_steering()) return 1;
     if (!motor_dead_zone_maps_each_wheel_independently()) return 1;
     if (!bucket_approach_uses_configured_speed_bands()) return 1;
     if (!bucket_search_uses_configured_in_place_speed()) return 1;
+    if (!bucket_search_reverses_after_estimated_two_turns()) return 1;
     if (!captured_ball_uses_odom_return_and_visual_takeover()) return 1;
-    if (!deposit_waits_for_brake_and_release()) return 1;
+    if (!deposit_waits_for_brake_release_and_reverse()) return 1;
     std::puts("tennis_state_machine_test: OK");
     return 0;
 }

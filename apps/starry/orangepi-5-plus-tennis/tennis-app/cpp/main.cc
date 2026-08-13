@@ -258,7 +258,10 @@ static void usage(const char *prog) {
         "  --chase-max-bias <n>    maximum ball steering wheel bias\n"
         "  --chase-close-pivot-speed <n> fixed close-ball alignment speed\n"
         "  --reverse-speed <n>      too-close reverse speed\n"
+        "  --deposit-reverse-speed <n> speed after releasing into bucket\n"
+        "  --deposit-reverse-ms <n> reverse duration after release (0 disables)\n"
         "  --search-pivot-speed <n> ball search rotation speed\n"
+        "  --search-reverse-turns <f> estimated turns before reversing search\n"
         "  --odometry-enabled <bool> enable RPM odometry return guidance\n"
         "  --odometry-sample-ms <n> RPM sampling interval\n"
         "  --return-timeout-ms <n>  odometry return timeout\n"
@@ -377,8 +380,14 @@ static bool apply_config_value(Options &o, std::string key,
         o.cfg.chase_close_pivot_spd = std::atoi(value.c_str());
     else if (key == "reverse-speed")
         o.cfg.reverse_speed = std::atoi(value.c_str());
+    else if (key == "deposit-reverse-speed")
+        o.cfg.deposit_reverse_speed = std::atoi(value.c_str());
+    else if (key == "deposit-reverse-ms")
+        o.cfg.deposit_reverse_ms = std::atoi(value.c_str());
     else if (key == "search-pivot-speed")
         o.cfg.search_pivot_spd = std::atoi(value.c_str());
+    else if (key == "search-reverse-turns")
+        o.cfg.search_reverse_turns = std::atof(value.c_str());
     else if (key == "odometry-enabled") {
         if (!parse_config_bool(value, o.cfg.odometry_enabled)) return false;
     } else if (key == "odometry-wheel-radius-m")
@@ -539,7 +548,10 @@ static int parse_options(int argc, char **argv, Options &o) {
         if (arg_val(argc, argv, i, "--chase-max-bias", v)) { o.cfg.chase_max_bias = std::atoi(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--chase-close-pivot-speed", v)) { o.cfg.chase_close_pivot_spd = std::atoi(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--reverse-speed", v)) { o.cfg.reverse_speed = std::atoi(v.c_str()); continue; }
+        if (arg_val(argc, argv, i, "--deposit-reverse-speed", v)) { o.cfg.deposit_reverse_speed = std::atoi(v.c_str()); continue; }
+        if (arg_val(argc, argv, i, "--deposit-reverse-ms", v)) { o.cfg.deposit_reverse_ms = std::atoi(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--search-pivot-speed", v)) { o.cfg.search_pivot_spd = std::atoi(v.c_str()); continue; }
+        if (arg_val(argc, argv, i, "--search-reverse-turns", v)) { o.cfg.search_reverse_turns = std::atof(v.c_str()); continue; }
         if (arg_val(argc, argv, i, "--odometry-enabled", v)) {
             if (!parse_config_bool(v, o.cfg.odometry_enabled)) {
                 std::fprintf(stderr, "TENNIS_ERROR invalid --odometry-enabled\n");
@@ -600,8 +612,13 @@ static int parse_options(int argc, char **argv, Options &o) {
         o.cfg.chase_close_pivot_spd > 100 ||
         o.cfg.reverse_speed < o.cfg.motor_min_speed ||
         o.cfg.reverse_speed > 100 ||
+        o.cfg.deposit_reverse_speed < o.cfg.motor_min_speed ||
+        o.cfg.deposit_reverse_speed > 100 ||
+        o.cfg.deposit_reverse_ms < 0 ||
         o.cfg.search_pivot_spd < o.cfg.motor_min_speed ||
-        o.cfg.search_pivot_spd > 100) {
+        o.cfg.search_pivot_spd > 100 ||
+        !std::isfinite(o.cfg.search_reverse_turns) ||
+        o.cfg.search_reverse_turns <= 0.0) {
         std::fprintf(stderr,
                      "TENNIS_ERROR invalid ball pursuit values\n");
         return 2;

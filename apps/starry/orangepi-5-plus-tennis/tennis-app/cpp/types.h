@@ -107,6 +107,7 @@ struct Config {
 
     // Ball lost search.
     int search_pivot_spd = 35;
+    double search_reverse_turns = 2.0;
 
     // Optional wheel-RPM odometry. The generic default remains off; the
     // calibrated Orange Pi live configuration enables it explicitly.
@@ -153,6 +154,8 @@ struct Config {
     int brake_hold_ms = 200;
     int grab_settle_ms = 100;
     int release_settle_ms = 500;
+    int deposit_reverse_speed = 30;
+    int deposit_reverse_ms = 500;
 
     // Drop a detection whose source frame is older than this (0 = never). Keeps
     // control acting on fresh perception under load.

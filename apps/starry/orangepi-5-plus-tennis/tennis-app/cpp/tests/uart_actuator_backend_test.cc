@@ -293,12 +293,12 @@ bool arm_protocol_matches_calibrated_sequence() {
     if (!expect(pty.master >= 0, "open arm PTY")) return false;
 
     const std::string expected =
-        "#000P1685T0500!#001P1314T0500!#002P1981T0500!"
+        "#000P1648T0500!#001P1351T0500!#002P1981T0500!"
         "#002P1981T0500!"
-        "#000P2255T0500!#001P1166T0500!#002P1981T0500!"
+        "#000P2203T0500!#001P1166T0500!#002P1981T0500!"
         "#002P1403T0500!"
         "#002PRAD!"
-        "#000P1685T0500!#001P1314T0500!#002P1403T0500!"
+        "#000P1648T0500!#001P1351T0500!#002P1403T0500!"
         "#002PRAD!"
         "#002P1981T0500!";
     const std::string query = "#002PRAD!";
@@ -350,10 +350,10 @@ bool arm_ball_lost_after_lift_is_reported() {
 
     const std::string expected =
         "#002P1981T0500!"
-        "#000P2255T0500!#001P1166T0500!#002P1981T0500!"
+        "#000P2203T0500!#001P1166T0500!#002P1981T0500!"
         "#002P1403T0500!"
         "#002PRAD!"
-        "#000P1685T0500!#001P1314T0500!#002P1403T0500!"
+        "#000P1648T0500!#001P1351T0500!#002P1403T0500!"
         "#002PRAD!"
         "#002P1981T0500!";
     const std::string query = "#002PRAD!";

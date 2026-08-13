@@ -11,6 +11,7 @@ namespace {
 
 constexpr int64_t kNsPerMs = 1000000;
 constexpr double kPi = 3.14159265358979323846;
+constexpr double kEstimatedDegreesPerSecondPerSpeedUnit = 2.0;
 
 double normalize_angle(double angle) {
     return std::remainder(angle, 2.0 * kPi);
@@ -59,6 +60,35 @@ void StateMachine::enter(GameState s) {
     state_deadline_ns_ = 0;
     bucket_confirm_ = 0;
     bucket_lost_ = 0;
+    reset_search_rotation();
+}
+
+void StateMachine::reset_search_rotation() {
+    search_rotation_active_ = false;
+    search_rotation_deadline_ns_ = 0;
+}
+
+int StateMachine::search_rotation_direction(int initial_direction, int speed,
+                                            int64_t now_ns) {
+    // Estimate rotation from elapsed time and the requested wheel speed only;
+    // no encoder sample, odometry estimate, or odometry configuration is used.
+    const double duration_ms =
+        cfg_.search_reverse_turns * 360.0 * 1000.0 /
+        (std::max(speed, 1) * kEstimatedDegreesPerSecondPerSpeedUnit);
+    const int64_t duration_ns =
+        std::max<int64_t>(1, static_cast<int64_t>(std::llround(duration_ms))) *
+        kNsPerMs;
+    if (!search_rotation_active_) {
+        search_rotation_active_ = true;
+        search_rotation_direction_ = initial_direction >= 0 ? 1 : -1;
+        search_rotation_deadline_ns_ = now_ns + duration_ns;
+    } else {
+        while (now_ns >= search_rotation_deadline_ns_) {
+            search_rotation_direction_ = -search_rotation_direction_;
+            search_rotation_deadline_ns_ += duration_ns;
+        }
+    }
+    return search_rotation_direction_;
 }
 
 void StateMachine::on_grab_empty() {
@@ -94,6 +124,18 @@ bool StateMachine::run_timed_phase(int64_t now_ns, ControlOutput &out) {
         enter(GameState::DEPOSIT);
         out = deposit(now_ns);
         return true;
+    case ReverseAfterDeposit:
+        if (now_ns < timed_deadline_ns_) {
+            out.motor_op = MotorOp::Drive;
+            out.left = -cfg_.deposit_reverse_speed;
+            out.right = -cfg_.deposit_reverse_speed;
+            return true;
+        }
+        timed_phase_ = Normal;
+        enter(GameState::CHASE_BALL);
+        out.motor_op = MotorOp::Standby;
+        out.reset_odometry = true;
+        return true;
     }
     return false;
 }
@@ -107,7 +149,7 @@ ControlOutput StateMachine::step(const Detection &det, int64_t now_ns) {
     case GameState::GRAB: return grab(now_ns);
     case GameState::RETURN_TO_BUCKET:
         return return_to_bucket(det.bucket, now_ns);
-    case GameState::FIND_BUCKET: return find_bucket(det.bucket);
+    case GameState::FIND_BUCKET: return find_bucket(det.bucket, now_ns);
     case GameState::APPROACH_BUCKET:
         return approach_bucket(det.bucket, now_ns);
     case GameState::DEPOSIT: return deposit(now_ns);
@@ -127,16 +169,16 @@ ControlOutput StateMachine::chase_ball(const BallObs &ball, int64_t now_ns) {
     ControlOutput out;
 
     if (!ball.found) {
-        // Ball lost: keep rotating toward the last seen side. A continuous
-        // one-way scan covers the full field of view instead of oscillating
-        // inside a small sector when the chassis turns slowly.
         stop_confirm_ = 0;
         out.motor_op = MotorOp::Drive;
-        int dir = last_offset_ >= 0 ? 1 : -1;
+        const int dir = search_rotation_direction(
+            last_offset_ >= 0 ? 1 : -1, cfg_.search_pivot_spd, now_ns);
         out.left = dir * cfg_.search_pivot_spd;
         out.right = -dir * cfg_.search_pivot_spd;
         return out;
     }
+
+    reset_search_rotation();
 
     const float area = ball.area_ratio;
     const int offset = static_cast<int>(ball.cx) - half_w_;
@@ -257,9 +299,11 @@ ControlOutput StateMachine::return_to_bucket(const BucketObs &bucket,
     return out;
 }
 
-ControlOutput StateMachine::find_bucket(const BucketObs &bucket) {
+ControlOutput StateMachine::find_bucket(const BucketObs &bucket,
+                                        int64_t now_ns) {
     ControlOutput out;
     if (bucket.found) {
+        reset_search_rotation();
         bucket_lost_ = 0;
         if (++bucket_confirm_ >= cfg_.bucket_confirm_cnt) {
             enter(GameState::APPROACH_BUCKET);
@@ -268,8 +312,10 @@ ControlOutput StateMachine::find_bucket(const BucketObs &bucket) {
     } else {
         bucket_confirm_ = 0;
         out.motor_op = MotorOp::Drive; // rotate-in-place search
-        out.left = cfg_.bucket_search_spd;
-        out.right = -cfg_.bucket_search_spd;
+        const int dir = search_rotation_direction(
+            1, cfg_.bucket_search_spd, now_ns);
+        out.left = dir * cfg_.bucket_search_spd;
+        out.right = -dir * cfg_.bucket_search_spd;
     }
     return out;
 }
@@ -328,9 +374,16 @@ ControlOutput StateMachine::deposit(int64_t now_ns) {
                                  std::max(cfg_.release_settle_ms, 0)) *
                                  kNsPerMs;
     } else if (now_ns >= state_deadline_ns_) {
-        out.arm = ArmAction::Ready;
-        enter(GameState::CHASE_BALL);
-        out.reset_odometry = true;
+        if (cfg_.deposit_reverse_ms > 0) {
+            start_timed_phase(ReverseAfterDeposit, now_ns,
+                              cfg_.deposit_reverse_ms);
+            out.motor_op = MotorOp::Drive;
+            out.left = -cfg_.deposit_reverse_speed;
+            out.right = -cfg_.deposit_reverse_speed;
+        } else {
+            enter(GameState::CHASE_BALL);
+            out.reset_odometry = true;
+        }
     }
     return out;
 }
