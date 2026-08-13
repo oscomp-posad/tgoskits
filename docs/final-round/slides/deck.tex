@@ -24,6 +24,8 @@
 \newcommand{\vmut}[1]{{\color{muted}#1}}       % 弱化
 \newcommand{\headline}[1]{{\sffamily\bfseries\color{teal}#1}}
 \newcommand{\ours}[1]{\textbf{#1}}
+\definecolor{skyblue}{HTML}{5B9BFF}
+\newcommand{\vport}[1]{{\color{skyblue}#1}}   % 移植·使能上游
 
 \begin{document}
 % ============================== 1 封面 ==============================
@@ -90,6 +92,14 @@
   \vspace{-0.5mm}
   {\color{muted}\footnotesize 覆盖系统调用/进程/信号、调度/大小核、内存/分页、观测 perf、RGA/JPU/NPU 与显示驱动、网络、虚拟化、板级；另自建 QEMU RKNPU 功能级模型，全部经 RK3588 真机验证。}
   \advance{初赛：机器人推理追平 Linux}{决赛：整个 OS 对 Linux 逐轴对等，全部成果回馈上游（累计 \nPRMerged{} 个 PR 已合并）}
+\end{frame}
+
+% ============================== KMAP 内核贡献全景 ==============================
+\begin{frame}
+  \navsegment{1}
+  \frametitle{自底向上：本队贡献贯穿整个软件栈}
+  \centering
+  \includegraphics[width=\linewidth,height=0.80\textheight,keepaspectratio]{Fkmap.png}
 \end{frame}
 
 % ============================== 19b 视觉推理链路优化 ==============================
@@ -316,8 +326,16 @@
 \begin{frame}[plain]
   \vfill\centering
   {\sffamily\bfseries\color{teal}\LARGE 附录 · 备用材料}\\[8pt]
-  {\color{muted}\large 目标完成表 · 基准与口径 · 增量 PR 一览 · 与类似工作对比 · 机器人状态机 · 视觉推理链路 · AI 使用说明}
+  {\color{muted}\large 内核贡献全景（完整清单）· 目标完成表 · 基准与口径 · 增量 PR 一览 · 与类似工作对比 · 机器人状态机 · 视觉推理链路 · AI 使用说明}
   \vfill
+\end{frame}
+
+% ============================== KMAPFULL 内核贡献全景完整清单 ==============================
+\begin{frame}
+  \navsegment{0}
+  \frametitle{内核贡献全景（完整清单）}
+  \centering
+  \includegraphics[height=0.84\textheight,keepaspectratio]{Fkmapfull.png}
 \end{frame}
 
 % ============================== 6 系统分层总览 ==============================
