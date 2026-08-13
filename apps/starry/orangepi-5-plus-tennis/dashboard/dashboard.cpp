@@ -19,9 +19,15 @@
 // Responsive: all geometry scales by min(W/1920, H/1080) so it fits any
 // resolution/aspect (16:9, 16:10, 4:3, 21:9) without overflow.
 //
-// Run fullscreen:  QT_QPA_PLATFORM=linuxfb ./dashboard
+// Non-interference (must not perturb the tennis app AT ALL): the dashboard reads
+// only telemetry + procfs, caps repaints to ~8 fps, runs SCHED_IDLE pinned to the
+// A55 cluster, and can tail a tmpfs file so the app never blocks on a full pipe.
+//   Recommended:  tennis_app … > /tmp/tt.log 2>&1 &
+//                 QT_QPA_PLATFORM=linuxfb ./dashboard --telemetry /tmp/tt.log
+//   Pipe (simple): tennis_app … | QT_QPA_PLATFORM=linuxfb ./dashboard
 // Screenshot (host, offscreen only — never offscreen on StarryOS):
 //   QT_QPA_PLATFORM=offscreen ./dashboard --shot out.png [--size 1600x1200]
+#define _GNU_SOURCE 1
 #include <QApplication>
 #include <QWidget>
 #include <QPainter>
@@ -44,6 +50,11 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <time.h>
+#include <sched.h>
+#include <sys/resource.h>
+#ifndef F_SETPIPE_SZ
+#define F_SETPIPE_SZ 1031
+#endif
 
 // ------------------------------ helpers -------------------------------------
 static std::string slurp(const char *path) {
@@ -164,6 +175,7 @@ struct TennisStats {
     bool odom_valid = false;                            // odometry (latest app)
     double odom_x = 0, odom_y = 0, odom_heading = 0, odom_distance = 0;
     bool anchor_reset = false; double anchor_reset_w = 0;
+    std::deque<QPointF> odom_hist;                       // (x,y) trail for the radar
     int mL = 0, mR = 0;
     std::string arm = "—";
     double f2c = 0, ttfi = -1;
@@ -180,6 +192,12 @@ struct TennisStats {
             odom_valid = kvl(l, "odom_valid");
             odom_x = kvd(l, "odom_x"); odom_y = kvd(l, "odom_y");
             odom_heading = kvd(l, "odom_heading"); odom_distance = kvd(l, "odom_distance");
+            if (odom_valid) {  // append to trail, thinned so it stays cheap
+                if (odom_hist.empty() ||
+                    std::hypot(odom_x - odom_hist.back().x(), odom_y - odom_hist.back().y()) > 0.02)
+                    odom_hist.push_back(QPointF(odom_x, odom_y));
+                while (odom_hist.size() > 240) odom_hist.pop_front();
+            }
             frame_age = kvd(l, "frame_age_ms");
             uint64_t f = kvl(l, "frame"); double w = nowSec();
             if (frames && f > last_f && w - last_w > 0.005) {
@@ -237,21 +255,44 @@ static QString armCN(const std::string &a) {
 // ------------------------------ dashboard -----------------------------------
 class Dashboard : public QWidget {
 public:
-    explicit Dashboard(bool demo = false) {
+    explicit Dashboard(bool demo = false, const QString &telePath = QString(), int renderFps = 8)
+        : renderFps_(renderFps) {
         sys.sampleCpu(); sys.sampleRest();
+        phase.start();
         if (demo) injectDemo();
-        else {
-            auto *t = new QTimer(this);
-            connect(t, &QTimer::timeout, this, [this] { sys.sampleCpu(); sys.sampleRest(); update(); });
-            t->start(1000);
-            ::fcntl(0, F_SETFL, ::fcntl(0, F_GETFL) | O_NONBLOCK);
-            auto *sn = new QSocketNotifier(0, QSocketNotifier::Read, this);
-            connect(sn, &QSocketNotifier::activated, this, [this] { drain(); });
-            phase.start();
-            auto *blink = new QTimer(this);
-            connect(blink, &QTimer::timeout, this, [this] { update(); });
-            blink->start(120);
+        if (!demo) {
+            auto *dt = new QTimer(this);  // system stats @ 1 Hz
+            connect(dt, &QTimer::timeout, this, [this] { sys.sampleCpu(); sys.sampleRest(); dirty_ = true; });
+            dt->start(1000);
+            if (!telePath.isEmpty()) {
+                // Tail a telemetry file (run the app as `tennis_app … > /tmp/tt.log`).
+                // Fully decoupled: the app writes to (tmpfs) page cache and never
+                // waits on us — unlike a pipe, whose full buffer would BLOCK the
+                // app's stdout write and stall its control loop.
+                fd_ = ::open(telePath.toUtf8().constData(), O_RDONLY | O_NONBLOCK);
+                if (fd_ >= 0) ::lseek(fd_, 0, SEEK_END);
+                auto *pt = new QTimer(this);
+                connect(pt, &QTimer::timeout, this, [this] { drain(); });
+                pt->start(40);
+            } else {
+                // stdin pipe: enlarge the pipe buffer so the app keeps a big write
+                // cushion and (with our prompt draining) never blocks on stdout.
+                fd_ = 0;
+                ::fcntl(0, F_SETFL, ::fcntl(0, F_GETFL) | O_NONBLOCK);
+                (void)::fcntl(0, F_SETPIPE_SZ, 1 << 20);
+                auto *sn = new QSocketNotifier(0, QSocketNotifier::Read, this);
+                connect(sn, &QSocketNotifier::activated, this, [this] { drain(); });
+            }
         }
+        // Render throttle: cap repaints at renderFps_ (default 8) no matter how
+        // fast telemetry arrives, forcing one at least every 500 ms for the clock.
+        // Keeps the dashboard's CPU + framebuffer-bandwidth footprint minimal.
+        auto *rt = new QTimer(this);
+        connect(rt, &QTimer::timeout, this, [this] {
+            qint64 now = phase.elapsed();
+            if (dirty_ || now - lastPaint_ >= 500) { dirty_ = false; lastPaint_ = now; update(); }
+        });
+        rt->start(std::max(30, 1000 / std::max(1, renderFps_)));
     }
     void injectDemo() {
         double v[8] = {22, 14, 9, 31, 88, 74, 61, 45};
@@ -266,6 +307,10 @@ public:
         tn.frames = 1873; tn.detections = 512; tn.fps = 29.6;
         tn.ball_area = 0.038; tn.ball_cx = 366;
         tn.odom_valid = true; tn.odom_x = 1.24; tn.odom_y = -0.42; tn.odom_heading = -0.62; tn.odom_distance = 1.31;
+        for (int i = 0; i <= 60; i++) {  // curved path from the anchor out to the robot
+            double t = i / 60.0, a = t * 1.9;
+            tn.odom_hist.push_back(QPointF(1.24 * t + 0.15 * std::sin(a * 3), -0.42 * t + 0.18 * std::sin(a * 2)));
+        }
         for (int i = 0; i < 120; i++) tn.f2c_hist.push_back(22 + 9 * std::sin(i * 0.28) + 5 * std::sin(i * 0.91) + (i % 5) * 0.8);
     }
 
@@ -274,21 +319,22 @@ protected:
         QPainter p(this); p.setRenderHint(QPainter::Antialiasing);
         const int W = width(), H = height();
         background(p, W, H);
-        int m = std::max(14, W / 80);
-        int hh = std::max(56, H / 15);
+        int m = std::max(14, W / 100);
+        int hh = std::max(52, H / 16);
         topbar(p, m, m, W - 2 * m, hh);
-        int top = m + hh + m;
-        int gap = m;
-        int lw = int((W - 3 * gap) * 0.505);
-        int rw = W - 3 * gap - lw;
-        int bh = H - top - m;
-        systemPanel(p, gap, top, lw, bh);
-        robotPanel(p, gap * 2 + lw, top, rw, bh);
+        int top = m + hh + m, gap = m, bh = H - top - m;
+        // three columns: 系统 (system) | 机器人视角 (vision) | 场地雷达 (nav)
+        int avail = W - 2 * m - 2 * gap;
+        int wA = int(avail * 0.30), wB = int(avail * 0.40), wC = avail - wA - wB;
+        systemPanel(p, m, top, wA, bh);
+        visionCol(p, m + wA + gap, top, wB, bh);
+        navCol(p, m + wA + gap + wB + gap, top, wC, bh);
     }
 
 private:
     SystemStats sys; TennisStats tn; std::string buf;
     QElapsedTimer phase;
+    int fd_ = 0, renderFps_ = 8; bool dirty_ = true; qint64 lastPaint_ = 0;
     // Responsive scale: driven by the tighter of the two axes so the HUD fits
     // any resolution/aspect (16:9, 16:10, 4:3, 21:9) without text overflow. On a
     // 16:9 panel W/1920 == H/1080, so this matches the 1080p reference exactly.
@@ -301,11 +347,12 @@ private:
     QFont cjk(double pt, int weight = QFont::Medium, double spacing = 1.0) const { QFont f(T::CJK); f.setPointSizeF(fs(pt)); f.setWeight(QFont::Weight(weight)); if (spacing) f.setLetterSpacing(QFont::AbsoluteSpacing, fs(spacing)); return f; }
 
     void drain() {
-        char b[8192]; ssize_t n;
-        while ((n = ::read(0, b, sizeof b)) > 0) buf.append(b, size_t(n));
+        char b[16384]; ssize_t n;
+        while ((n = ::read(fd_, b, sizeof b)) > 0) buf.append(b, size_t(n));
         size_t nl;
         while ((nl = buf.find('\n')) != std::string::npos) { tn.feed(buf.substr(0, nl)); buf.erase(0, nl + 1); }
-        update();
+        if (buf.size() > (1u << 20)) buf.clear();  // guard against an unbounded partial line
+        dirty_ = true;  // repaint happens on the throttled render tick, not here
     }
 
     // ---- atmosphere ----
@@ -418,7 +465,7 @@ private:
         double sx = x + fs(20) + wm + fs(34);
         p.setPen(QPen(T::withA(T::amber, 90), 1)); p.drawLine(QPointF(sx - fs(18), y + h * 0.30), QPointF(sx - fs(18), y + h * 0.72));
         p.setFont(cjk(11)); p.setPen(T::dim);
-        p.drawText(QPointF(sx, y + h * 0.64), "内核实时遥测 · RK3588 · 香橙派 5 Plus · AARCH64");
+        p.drawText(QPointF(sx, y + h * 0.64), "内核实时遥测 · RK3588 · 香橙派 5 Plus");
         // right cluster, laid out right-to-left: [clock] [uptime] [实时] [dot]
         double yb = y + h * 0.62;
         double cur = x + w - fs(24);
@@ -474,7 +521,6 @@ private:
         cy += h * 0.036 + fs(20);
         p.setFont(mono(12)); p.setPen(T::ink);
         p.drawText(QPointF(ix, cy), QString::asprintf("%.1f / %.1f GiB", sys.mem_used_gb, sys.mem_total_gb));
-        p.setFont(cjk(12)); p.setPen(T::dim); p.drawText(QRectF(ix, cy - fs(12), iw, fs(16)), Qt::AlignRight, QString::asprintf("已用 %.0f%%", sys.mem_pct));
         cy += fs(22);
         // stat tiles: temp / load / freqs
         double tgap = fs(14); double tw = (iw - tgap * 2) / 3, th = h * 0.115;
@@ -516,139 +562,190 @@ private:
         if (!unit.isEmpty()) { p.setFont(mono(11)); p.setPen(T::dim); p.drawText(QPointF(x + fs(12) + vw + fs(6), y + h - fs(12)), unit); }
     }
 
-    // ---- odometry heading dial (0 rad = initial forward, at top; needle rotates) ----
-    void compass(QPainter &p, double cx, double cy, double rad, double headingRad, bool valid) {
-        QColor c = valid ? T::violet : T::withA(T::dim, 150);
-        p.setPen(QPen(T::withA(c, valid ? 200 : 110), std::max(1, int(fs(1.4))))); p.setBrush(T::withA(T::bg0, 170));
-        p.drawEllipse(QPointF(cx, cy), rad, rad);
-        for (int i = 0; i < 12; i++) {  // tick ring
-            double a = i * M_PI / 6.0, r0 = rad * (i % 3 == 0 ? 0.76 : 0.88);
-            p.setPen(QPen(T::withA(c, i % 3 == 0 ? 190 : 80), 1));
-            p.drawLine(QPointF(cx + std::sin(a) * r0, cy - std::cos(a) * r0), QPointF(cx + std::sin(a) * rad, cy - std::cos(a) * rad));
-        }
-        // forward reference marker (initial heading) — small triangle at top
-        p.setBrush(T::withA(c, 200)); p.setPen(Qt::NoPen);
-        QPointF tri[3] = {QPointF(cx, cy - rad - fs(4)), QPointF(cx - fs(3.2), cy - rad + fs(3)), QPointF(cx + fs(3.2), cy - rad + fs(3))};
-        p.drawPolygon(tri, 3);
-        // heading needle
-        double hx = std::sin(headingRad), hy = -std::cos(headingRad);
-        if (valid) for (int k = 3; k >= 1; k--) { p.setPen(QPen(T::withA(c, 22 * k), fs(2.4))); p.drawLine(QPointF(cx, cy), QPointF(cx + hx * rad * 0.8, cy + hy * rad * 0.8)); }
-        p.setPen(QPen(c, std::max(1, int(fs(2))))); p.setBrush(Qt::NoBrush);
-        p.drawLine(QPointF(cx - hx * rad * 0.3, cy - hy * rad * 0.3), QPointF(cx + hx * rad * 0.8, cy + hy * rad * 0.8));
-        p.setBrush(c); p.setPen(Qt::NoPen); p.drawEllipse(QPointF(cx, cy), fs(2.6), fs(2.6));
+    void noSignal(QPainter &p, QRect R) {
+        reticle(p, R.center().x(), R.top() + R.height() * 0.42, fs(40), false, T::dim, "");
+        p.setFont(cjk(20, QFont::Bold, 3)); p.setPen(T::dim);
+        p.drawText(R.adjusted(0, int(R.height() * 0.5), 0, 0), Qt::AlignHCenter | Qt::AlignTop, "无 信 号");
+        p.setFont(cjk(11)); p.setPen(T::faint.lighter(160));
+        p.drawText(R.adjusted(0, int(R.height() * 0.56), 0, 0), Qt::AlignHCenter | Qt::AlignTop, "接入遥测：  tennis-app … | dashboard");
     }
 
-    // ---- ball horizontal-position strip: aim line at centre, marker at cx/frame_w ----
-    void ballBar(QPainter &p, QRectF r, double pos01, bool present) {
-        p.setPen(QPen(T::line, 1)); p.setBrush(T::withA(T::bg0, 160)); p.drawRect(r);
-        double midx = r.center().x();
-        p.setPen(QPen(T::withA(T::amber, 130), std::max(1, int(fs(1))), Qt::DashLine));
-        p.drawLine(QPointF(midx, r.top() - fs(3)), QPointF(midx, r.bottom() + fs(3)));
-        if (present) {
-            double bx = r.left() + std::max(0.0, std::min(1.0, pos01)) * r.width();
-            double rr = std::max(fs(3.0), r.height() * 0.34);
-            for (int k = 3; k >= 1; k--) { p.setPen(Qt::NoPen); p.setBrush(T::withA(T::green, 16 * k)); p.drawEllipse(QPointF(bx, r.center().y()), rr + k * fs(1.6), rr + k * fs(1.6)); }
-            p.setBrush(T::green); p.setPen(Qt::NoPen); p.drawEllipse(QPointF(bx, r.center().y()), rr, rr);
+    // Reconstructed robot's-eye view — a synthetic camera frame drawn purely from
+    // detection telemetry (ball_cx/ball_area, bucket_visible, state). NOT a real
+    // camera feed (watermarked 重建 so it is never mistaken for one); zero app cost.
+    void viewport(QPainter &p, QRectF r) {
+        p.save();
+        p.setPen(QPen(T::withA(T::line, 200), std::max(1, int(fs(1))))); p.setBrush(QColor(3, 6, 8)); p.drawRect(r);
+        p.setClipRect(r);
+        double gx = std::max(fs(20), r.width() / 14.0);
+        p.setPen(QPen(T::withA(T::cyan, 12), 1));
+        for (double x = r.left(); x <= r.right(); x += gx) p.drawLine(QPointF(x, r.top()), QPointF(x, r.bottom()));
+        for (double yy = r.top(); yy <= r.bottom(); yy += gx) p.drawLine(QPointF(r.left(), yy), QPointF(r.right(), yy));
+        double cxp = r.center().x(), midY = r.center().y();
+        p.setPen(QPen(T::withA(T::amber, 55), 1)); p.drawLine(QPointF(r.left(), midY), QPointF(r.right(), midY));
+        p.setPen(QPen(T::withA(T::amber, 90), std::max(1, int(fs(1))), Qt::DashLine)); p.drawLine(QPointF(cxp, r.top()), QPointF(cxp, r.bottom()));
+        for (int k = 1; k <= 3; k++) { p.setPen(QPen(T::withA(T::green, 48 - k * 8), 1)); p.setBrush(Qt::NoBrush); p.drawEllipse(QPointF(cxp, midY), r.width() * 0.06 * k, r.height() * 0.075 * k); }
+        double rr = fs(7); p.setPen(QPen(T::withA(T::amber, 160), std::max(1, int(fs(1.2)))));
+        p.drawLine(QPointF(cxp - rr, midY), QPointF(cxp + rr, midY)); p.drawLine(QPointF(cxp, midY - rr), QPointF(cxp, midY + rr));
+        if (tn.ball && tn.ball_cx >= 0) {  // detection box: x = cx/640, size ∝ √area, y on sight line (cy not emitted)
+            double bx = r.left() + std::max(0.0, std::min(1.0, tn.ball_cx / 640.0)) * r.width();
+            double side = std::max(fs(14), std::min(r.height() * 0.72, std::sqrt(std::max(0.0006, tn.ball_area)) * r.width() * 0.95));
+            for (int k = 3; k >= 1; k--) { p.setPen(Qt::NoPen); p.setBrush(T::withA(T::green, 13 * k)); p.drawEllipse(QPointF(bx, midY), side * 0.5 + k * fs(2.2), side * 0.5 + k * fs(2.2)); }
+            p.setBrush(T::withA(T::green, 42)); p.setPen(QPen(T::green, std::max(1, int(fs(1.6)))));
+            p.drawRect(QRectF(bx - side / 2, midY - side / 2, side, side));
+            p.setBrush(T::green); p.setPen(Qt::NoPen); p.drawEllipse(QPointF(bx, midY), fs(3.2), fs(3.2));
+            p.setFont(mono(9, QFont::Bold)); p.setPen(T::green);
+            p.drawText(QPointF(bx - side / 2, midY - side / 2 - fs(5)), QString::asprintf("球 %.1f%%", tn.ball_area * 100.0));
         }
-    }
-
-    void robotPanel(QPainter &p, int x, int y, int w, int h) {
-        QRect R(x, y, w, h);
-        frame(p, R, "02", "网球机器人", T::amber);
-        int ix = x + int(fs(26)), iw = w - int(fs(52));
-        if (!tn.seen) {
-            reticle(p, x + w / 2.0, y + h * 0.42, fs(40), false, T::dim, "");
-            p.setFont(cjk(20, QFont::Bold, 3)); p.setPen(T::dim);
-            p.drawText(R.adjusted(0, int(h * 0.5), 0, 0), Qt::AlignHCenter | Qt::AlignTop, "无 信 号");
-            p.setFont(cjk(11)); p.setPen(T::faint.lighter(160));
-            p.drawText(R.adjusted(0, int(h * 0.56), 0, 0), Qt::AlignHCenter | Qt::AlignTop, "接入遥测：  tennis-app … | dashboard");
-            return;
-        }
-        int cy = y + int(fs(62));
-        // STATE — big Chinese readout + small raw enum
+        p.restore();
         QColor sc = stateColor(tn.state);
-        p.setFont(cjk(10)); p.setPen(T::dim); p.drawText(QPointF(ix, cy), "状态机");
-        cy += int(fs(56));
-        QFont bigf = cjk(44, QFont::Bold, 2);
-        glow(p, bigf, sc, ix, cy, stateCN(tn.state), 80);
-        int sw = QFontMetrics(bigf).horizontalAdvance(stateCN(tn.state));
-        p.setFont(mono(11)); p.setPen(T::withA(sc, 160));
-        p.drawText(QPointF(ix + sw + fs(18), cy - fs(3)), QString::fromStdString(tn.state));
-        cy += int(fs(16));
-        p.setPen(QPen(T::withA(sc, 120), 1)); p.drawLine(QPointF(ix, cy), QPointF(ix + iw, cy));
-        cy += int(fs(26));
-        // detection reticles
-        reticle(p, ix + fs(20), cy, fs(18), tn.ball, T::green, "检测到球");
-        reticle(p, ix + iw * 0.54 + fs(20), cy, fs(18), tn.bucket, T::amber, "球桶可见");
-        cy += int(fs(44));
-        // vision: ball area % + horizontal position strip (aim = frame centre)
-        p.setFont(cjk(10)); p.setPen(T::dim); p.drawText(QPointF(ix, cy), "视觉感知");
-        p.setFont(mono(11, QFont::Bold)); p.setPen(tn.ball ? T::green : T::dim);
-        p.drawText(QRectF(ix, cy - fs(12), iw, fs(16)), Qt::AlignRight | Qt::AlignVCenter, QString::asprintf("目标面积 %.1f%%", tn.ball_area * 100.0));
-        cy += int(fs(8));
-        ballBar(p, QRectF(ix + fs(16), cy, iw - fs(32), fs(13)), tn.ball_cx / 640.0, tn.ball && tn.ball_cx >= 0);
-        p.setFont(cjk(8)); p.setPen(T::withA(T::dim, 190));
-        p.drawText(QPointF(ix, cy + fs(11)), "左");
-        p.drawText(QPointF(ix + iw - fs(10), cy + fs(11)), "右");
-        cy += int(fs(13) + fs(20));
-        // motors
-        p.setFont(cjk(12, QFont::Bold, 2)); p.setPen(T::dim); p.drawText(ix, cy, "差速驱动  ·  −100 … +100");
+        glow(p, cjk(17, QFont::Bold, 1), sc, r.left() + fs(12), r.top() + fs(25), stateCN(tn.state), 70);
+        if (tn.bucket) {
+            QFont f = cjk(10, QFont::Bold); QString t = "● 球桶可见"; int tw = QFontMetrics(f).horizontalAdvance(t);
+            p.setFont(f); p.setPen(T::amber); p.drawText(QPointF(r.right() - tw - fs(12), r.top() + fs(23)), t);
+        }
+        p.setFont(mono(10)); p.setPen(T::withA(T::ink, 220));
+        p.drawText(QPointF(r.left() + fs(12), r.bottom() - fs(12)), tn.ball ? QString::asprintf("偏移 %+.0f px", tn.ball_cx - 320.0) : QString("未见目标"));
+        QFont wf = cjk(8); QString wm = "重建 · 遥测"; int ww = QFontMetrics(wf).horizontalAdvance(wm);
+        p.setFont(wf); p.setPen(T::withA(T::dim, 150)); p.drawText(QPointF(r.right() - ww - fs(12), r.bottom() - fs(12)), wm);
+    }
+
+    // Top-down field map from odometry: robot pose + trail + anchor + ball bearing.
+    void radar(QPainter &p, QRectF box) {
+        double cx = box.center().x(), cy = box.center().y(), R = std::min(box.width(), box.height()) * 0.47;
+        p.setBrush(QColor(3, 6, 8)); p.setPen(QPen(T::withA(T::violet, 120), std::max(1, int(fs(1.2))))); p.drawEllipse(QPointF(cx, cy), R, R);
+        p.save(); QPainterPath clip; clip.addEllipse(QPointF(cx, cy), R, R); p.setClipPath(clip);
+        for (int k = 1; k <= 3; k++) { p.setPen(QPen(T::withA(T::violet, 45), 1)); p.setBrush(Qt::NoBrush); p.drawEllipse(QPointF(cx, cy), R * k / 3.0, R * k / 3.0); }
+        p.setPen(QPen(T::withA(T::violet, 40), 1)); p.drawLine(QPointF(cx - R, cy), QPointF(cx + R, cy)); p.drawLine(QPointF(cx, cy - R), QPointF(cx, cy + R));
+        double maxr = 0.6;
+        if (tn.odom_valid) {
+            for (auto &pt : tn.odom_hist) maxr = std::max(maxr, std::hypot(pt.x(), pt.y()));
+            maxr = std::max(maxr, tn.odom_distance) * 1.18;
+            auto S = [&](double x, double y) { return QPointF(cx - y / maxr * R, cy - x / maxr * R); };  // x fwd→up, y left→left
+            QPointF a = S(0, 0); double ar = fs(6);  // anchor (odometry origin)
+            p.setPen(QPen(T::withA(T::amber, 210), std::max(1, int(fs(1.4))))); p.setBrush(Qt::NoBrush);
+            p.drawLine(QPointF(a.x() - ar, a.y()), QPointF(a.x() + ar, a.y())); p.drawLine(QPointF(a.x(), a.y() - ar), QPointF(a.x(), a.y() + ar));
+            p.drawEllipse(a, ar * 0.66, ar * 0.66);
+            if (tn.odom_hist.size() > 1) {  // trail
+                QPainterPath tp;
+                for (size_t i = 0; i < tn.odom_hist.size(); i++) { QPointF s = S(tn.odom_hist[i].x(), tn.odom_hist[i].y()); if (i == 0) tp.moveTo(s); else tp.lineTo(s); }
+                p.setPen(QPen(T::withA(T::cyan, 130), std::max(1, int(fs(1.4))))); p.setBrush(Qt::NoBrush); p.drawPath(tp);
+            }
+            QPointF rb = S(tn.odom_x, tn.odom_y);
+            double sx = -std::sin(tn.odom_heading), sy = -std::cos(tn.odom_heading), al = fs(13);
+            if (tn.ball && tn.ball_cx >= 0) {  // ball bearing ray (from cx, ≈±30° HFOV; range unknown → dashed)
+                double bth = tn.odom_heading - (tn.ball_cx - 320.0) / 320.0 * (M_PI / 6.0);
+                double bx = -std::sin(bth), by = -std::cos(bth);
+                p.setPen(QPen(T::withA(T::green, 150), std::max(1, int(fs(1.2))), Qt::DashLine));
+                p.drawLine(rb, QPointF(rb.x() + bx * R * 0.85, rb.y() + by * R * 0.85));
+                p.setBrush(T::green); p.setPen(Qt::NoPen); p.drawEllipse(QPointF(rb.x() + bx * R * 0.72, rb.y() + by * R * 0.72), fs(3.4), fs(3.4));
+            }
+            double px = -sy, py = sx;  // robot arrow (points at heading)
+            QPointF tip(rb.x() + sx * al, rb.y() + sy * al), base(rb.x() - sx * al * 0.5, rb.y() - sy * al * 0.5);
+            for (int k = 3; k >= 1; k--) { p.setPen(Qt::NoPen); p.setBrush(T::withA(T::violet, 20 * k)); p.drawEllipse(rb, al * 0.5 + k * fs(1.5), al * 0.5 + k * fs(1.5)); }
+            QPointF tri[3] = {tip, QPointF(base.x() + px * al * 0.5, base.y() + py * al * 0.5), QPointF(base.x() - px * al * 0.5, base.y() - py * al * 0.5)};
+            p.setBrush(T::violet); p.setPen(Qt::NoPen); p.drawPolygon(tri, 3);
+        }
+        p.restore();
+        p.setBrush(T::withA(T::violet, 220)); p.setPen(Qt::NoPen);  // forward marker
+        QPointF nt[3] = {QPointF(cx, cy - R - fs(5)), QPointF(cx - fs(3.4), cy - R + fs(3)), QPointF(cx + fs(3.4), cy - R + fs(3))}; p.drawPolygon(nt, 3);
+        p.setFont(cjk(8, QFont::Bold)); p.setPen(T::withA(T::violet, 210)); p.drawText(QRectF(cx - R, cy - R - fs(18), R * 2, fs(12)), Qt::AlignHCenter, "前");
+        if (tn.odom_valid) { p.setFont(mono(8)); p.setPen(T::withA(T::dim, 200)); p.drawText(QRectF(cx - R, cy + R + fs(2), R * 2, fs(12)), Qt::AlignHCenter, QString::asprintf("量程 %.1f m", maxr)); }
+    }
+
+    // Column 02 — 机器人视角: reconstructed viewport (hero) + differential drive + control tiles.
+    void visionCol(QPainter &p, int x, int y, int w, int h) {
+        QRect R(x, y, w, h); frame(p, R, "02", "机器人视角", T::amber);
+        int ix = x + int(fs(24)), iw = w - int(fs(48));
+        if (!tn.seen) { noSignal(p, R); return; }
+        int cy = y + int(fs(56));
+        double vpH = h * 0.46;
+        viewport(p, QRectF(ix, cy, iw, vpH));
+        cy += int(vpH + fs(22));
+        p.setFont(cjk(11, QFont::Bold, 2)); p.setPen(T::dim); p.drawText(ix, cy, "差速驱动");
         cy += int(fs(12));
-        double mh = h * 0.045;
+        double mh = h * 0.05;
         p.setFont(cjk(11, QFont::Bold)); p.setPen(T::ink); p.drawText(QPointF(ix, cy + mh * 0.72), "左");
-        motor(p, QRectF(ix + fs(26), cy, iw - fs(26) - fs(70), mh), tn.mL);
-        p.setFont(mono(12, QFont::Bold)); p.setPen(tn.mL >= 0 ? T::green : T::coral); p.drawText(QRectF(ix + iw - fs(64), cy, fs(64), mh), Qt::AlignRight | Qt::AlignVCenter, QString::asprintf("%+d", tn.mL));
-        cy += mh + fs(9);
+        motor(p, QRectF(ix + fs(24), cy, iw - fs(24) - fs(64), mh), tn.mL);
+        p.setFont(mono(12, QFont::Bold)); p.setPen(tn.mL >= 0 ? T::green : T::coral); p.drawText(QRectF(ix + iw - fs(58), cy, fs(58), mh), Qt::AlignRight | Qt::AlignVCenter, QString::asprintf("%+d", tn.mL));
+        cy += int(mh + fs(9));
         p.setFont(cjk(11, QFont::Bold)); p.setPen(T::ink); p.drawText(QPointF(ix, cy + mh * 0.72), "右");
-        motor(p, QRectF(ix + fs(26), cy, iw - fs(26) - fs(70), mh), tn.mR);
-        p.setFont(mono(12, QFont::Bold)); p.setPen(tn.mR >= 0 ? T::green : T::coral); p.drawText(QRectF(ix + iw - fs(64), cy, fs(64), mh), Qt::AlignRight | Qt::AlignVCenter, QString::asprintf("%+d", tn.mR));
-        cy += mh + fs(18);
-        // odometry: heading dial + distance/coordinate readouts
-        p.setFont(cjk(12, QFont::Bold, 2)); p.setPen(T::dim); p.drawText(ix, cy, "里程计");
-        if (!tn.odom_valid) { p.setFont(cjk(9)); p.setPen(T::withA(T::dim, 170)); p.drawText(QRectF(ix, cy - fs(12), iw, fs(16)), Qt::AlignRight | Qt::AlignVCenter, "锚点未初始化"); }
-        double odoTop = cy + fs(6), dialR = fs(33), dialCx = ix + dialR + fs(4), dialCy = odoTop + dialR + fs(3);
-        compass(p, dialCx, dialCy, dialR, tn.odom_heading, tn.odom_valid);
-        p.setFont(mono(9)); p.setPen(tn.odom_valid ? T::violet : T::dim);
-        p.drawText(QRectF(dialCx - dialR, dialCy + dialR + fs(3), dialR * 2, fs(12)), Qt::AlignHCenter, tn.odom_valid ? QString::asprintf("%+.0f°", tn.odom_heading * 180.0 / M_PI) : "—");
-        double ox = dialCx + dialR + fs(22), ow = (ix + iw) - ox;
-        auto odoRow = [&](double ry, const QString &label, const QString &val, QColor vc) {
-            p.setFont(cjk(9)); p.setPen(T::dim); p.drawText(QPointF(ox, ry), label);
-            p.setFont(mono(15, QFont::Bold)); p.setPen(tn.odom_valid ? vc : T::dim);
-            p.drawText(QRectF(ox, ry - fs(15), ow, fs(18)), Qt::AlignRight | Qt::AlignVCenter, val);
-        };
-        double ob = odoTop + fs(18);
-        odoRow(ob, "距锚点", tn.odom_valid ? QString::asprintf("%.2f m", tn.odom_distance) : "—", T::amber);
-        odoRow(ob + fs(24), "坐标 X", tn.odom_valid ? QString::asprintf("%+.2f m", tn.odom_x) : "—", T::cyan);
-        odoRow(ob + fs(48), "坐标 Y", tn.odom_valid ? QString::asprintf("%+.2f m", tn.odom_y) : "—", T::cyan);
-        cy = dialCy + dialR + fs(20);
-        // metric tiles
-        double tgap = fs(14); double tw = (iw - tgap * 2) / 3, th = h * 0.10;
+        motor(p, QRectF(ix + fs(24), cy, iw - fs(24) - fs(64), mh), tn.mR);
+        p.setFont(mono(12, QFont::Bold)); p.setPen(tn.mR >= 0 ? T::green : T::coral); p.drawText(QRectF(ix + iw - fs(58), cy, fs(58), mh), Qt::AlignRight | Qt::AlignVCenter, QString::asprintf("%+d", tn.mR));
+        cy += int(mh + fs(18));
+        double tgap = fs(12), tw = (iw - tgap * 2) / 3, th = h * 0.115;
         stat(p, ix, cy, tw, th, "机械臂", armCN(tn.arm), "", T::amber);
         stat(p, ix + tw + tgap, cy, tw, th, "帧率", QString::asprintf("%.1f", tn.done ? tn.res_fps : tn.fps), "", T::green);
         stat(p, ix + 2 * (tw + tgap), cy, tw, th, "帧→指令", QString::asprintf("%.1f", tn.f2c), "ms", tn.f2c > 40 ? T::amber : T::cyan);
-        cy += th + fs(12);
+    }
+
+    // Column 03 — 场地雷达: odometry radar + pose readouts + status tiles + latency trend.
+    void navCol(QPainter &p, int x, int y, int w, int h) {
+        QRect R(x, y, w, h); frame(p, R, "03", "场地雷达", T::violet);
+        int ix = x + int(fs(24)), iw = w - int(fs(48));
+        if (!tn.seen) { noSignal(p, R); return; }
+        int cy = y + int(fs(56));
+        double rdH = std::min(iw * 0.92, h * 0.40);
+        radar(p, QRectF(ix, cy, iw, rdH));
+        cy += int(rdH + fs(22));
+        double cgap = fs(12), cw = (iw - cgap * 2) / 3;
+        auto od = [&](double cxp, const QString &label, const QString &val, QColor vc) {
+            p.setFont(cjk(9)); p.setPen(T::dim); p.drawText(QPointF(cxp, cy), label);
+            p.setFont(mono(16, QFont::Bold)); p.setPen(tn.odom_valid ? vc : T::dim); p.drawText(QPointF(cxp, cy + fs(22)), val);
+        };
+        od(ix, "距锚点", tn.odom_valid ? QString::asprintf("%.2f", tn.odom_distance) : "—", T::amber);
+        od(ix + cw + cgap, "航向", tn.odom_valid ? QString::asprintf("%+.0f°", tn.odom_heading * 180.0 / M_PI) : "—", T::violet);
+        od(ix + 2 * (cw + cgap), "坐标", tn.odom_valid ? QString::asprintf("%+.1f,%+.1f", tn.odom_x, tn.odom_y) : "—", T::cyan);
+        if (!tn.odom_valid) { p.setFont(cjk(9)); p.setPen(T::withA(T::dim, 170)); p.drawText(QRectF(ix, cy - fs(30), iw, fs(14)), Qt::AlignRight, "锚点未初始化"); }
+        cy += int(fs(42));
+        double tgap = fs(12), tw = (iw - tgap * 2) / 3, th = h * 0.115;
         stat(p, ix, cy, tw, th, "首帧推理", tn.ttfi < 0 ? "—" : QString::asprintf("%.0f", tn.ttfi), tn.ttfi < 0 ? "" : "ms", T::amber);
         stat(p, ix + tw + tgap, cy, tw, th, "检测数", QString::asprintf("%llu", (unsigned long long)tn.detections), "", T::cyan);
         stat(p, ix + 2 * (tw + tgap), cy, tw, th, "应用内存", tn.rss_kb ? QString::asprintf("%.0f", tn.rss_kb / 1024.0) : "—", tn.rss_kb ? "MB" : "", T::dim);
-        cy += th + fs(16);
-        p.setFont(cjk(10)); p.setPen(T::dim);
-        p.drawText(QPointF(ix, cy), QString::asprintf("帧延迟 %.1f ms   ·   帧数 %llu%s", tn.frame_age, (unsigned long long)tn.frames, tn.done ? "   ·   运行结束" : ""));
-        cy += int(fs(18));
-        // frame->command latency history fills the remaining space
-        p.setFont(cjk(12, QFont::Bold, 2)); p.setPen(T::dim); p.drawText(ix, cy, "帧 → 指令延迟  ·  ms");
-        p.setFont(mono(11, QFont::Bold)); p.setPen(T::amber);
-        p.drawText(QRectF(ix, cy - fs(12), iw, fs(16)), Qt::AlignRight, QString::asprintf("%.1f", tn.f2c));
+        cy += int(th + fs(20));
+        p.setFont(cjk(11, QFont::Bold, 2)); p.setPen(T::dim); p.drawText(ix, cy, "帧→指令延迟");
+        p.setFont(mono(10)); p.setPen(T::withA(T::dim, 200)); p.drawText(QRectF(ix, cy - fs(11), iw, fs(14)), Qt::AlignRight, "ms");
         cy += int(fs(8));
-        double rem = (y + h - int(fs(20))) - cy;
-        if (rem > fs(36)) sparkline(p, QRectF(ix, cy, iw, std::min(rem, h * 0.11)), tn.f2c_hist, T::amber, 60.0);
+        double rem = (y + h - int(fs(18))) - cy;
+        if (rem > fs(30)) sparkline(p, QRectF(ix, cy, iw, std::min(rem, h * 0.14)), tn.f2c_hist, T::amber, 60.0);
     }
 };
 
+// Keep the dashboard from ever stealing cycles the tennis app needs. Best-effort;
+// each step is optional and silently skipped where unsupported (parts of StarryOS):
+//   1. pin to the little (A55) cluster so it never lands on the A76 cores the
+//      inference thread uses (--infer-affinity 4-7);
+//   2. run SCHED_IDLE so it executes only when a CPU would otherwise be idle — any
+//      tennis-app thread preempts it instantly; fall back to nice(19).
+static void applyIsolation(const QString &cpulist, bool isolate) {
+    if (!isolate) return;
+    QString applied;
+#ifdef __linux__
+    if (!cpulist.isEmpty()) {
+        cpu_set_t set; CPU_ZERO(&set); int lo, hi; bool any = false;
+        for (const QString &tok : cpulist.split(',', Qt::SkipEmptyParts)) {
+            if (std::sscanf(tok.toUtf8().constData(), "%d-%d", &lo, &hi) == 2) { for (int c = lo; c <= hi; c++) { CPU_SET(c, &set); any = true; } }
+            else if (std::sscanf(tok.toUtf8().constData(), "%d", &lo) == 1) { CPU_SET(lo, &set); any = true; }
+        }
+        if (any && sched_setaffinity(0, sizeof set, &set) == 0) applied += " affinity=" + cpulist;
+    }
+    struct sched_param sp; sp.sched_priority = 0;
+    if (sched_setscheduler(0, SCHED_IDLE, &sp) == 0) applied += " sched=IDLE";
+    else if (setpriority(PRIO_PROCESS, 0, 19) == 0) applied += " nice=19";
+#endif
+    std::printf("DASHBOARD_ISOLATION%s\n", applied.isEmpty() ? " (none)" : applied.toUtf8().constData());
+    std::fflush(stdout);
+}
+
 int main(int argc, char **argv) {
-    QString shot; bool demo = false; int sw = 1920, sh = 1080;
+    QString shot, telemetry, cpulist = "0-3"; bool demo = false, isolate = true; int sw = 1920, sh = 1080, fps = 8;
     for (int i = 1; i < argc; i++) {
         if (!std::strcmp(argv[i], "--shot") && i + 1 < argc) { shot = argv[++i]; demo = true; }
         else if (!std::strcmp(argv[i], "--size") && i + 1 < argc) { std::sscanf(argv[++i], "%dx%d", &sw, &sh); }  // responsive test: --size 1280x720
+        else if (!std::strcmp(argv[i], "--telemetry") && i + 1 < argc) { telemetry = argv[++i]; }  // tail a file instead of stdin
+        else if (!std::strcmp(argv[i], "--cpu") && i + 1 < argc) { cpulist = argv[++i]; }           // affinity list, default A55 0-3
+        else if (!std::strcmp(argv[i], "--fps") && i + 1 < argc) { fps = std::atoi(argv[++i]); }    // repaint cap, default 8
+        else if (!std::strcmp(argv[i], "--no-isolate")) { isolate = false; }
         else if (!std::strcmp(argv[i], "--demo")) demo = true;
     }
     QApplication app(argc, argv);
@@ -670,7 +767,8 @@ int main(int argc, char **argv) {
         std::printf("DASHBOARD_SHOT %s %dx%d\n", shot.toUtf8().constData(), sw, sh);
         return 0;
     }
-    Dashboard d(demo);
+    applyIsolation(cpulist, isolate);
+    Dashboard d(demo, telemetry, fps);
     d.showFullScreen();
     std::printf("DASHBOARD_STARTED\n"); std::fflush(stdout);
     return app.exec();

@@ -9,7 +9,11 @@
 # On the board (shared ext4), run under StarryOS:
 #   cd <dir> && LD_LIBRARY_PATH=$PWD/lib QT_QPA_PLATFORM=linuxfb \
 #     QT_QPA_PLATFORM_PLUGIN_PATH=$PWD/plugins/platforms XDG_RUNTIME_DIR=/tmp ./dashboard
-#   # with the robot:  tennis-app --mode live … | (…env…) ./dashboard
+#   # with the robot (non-interfering: app writes tmpfs, dashboard tails + SCHED_IDLE
+#   # pinned to A55 so it never steals cycles from the tennis app):
+#   #   tennis_app --mode live … > /tmp/tt.log 2>&1 &
+#   #   (…env…) ./dashboard --telemetry /tmp/tt.log --cpu 0-3
+#   # or the simple pipe:  tennis_app … | (…env…) ./dashboard
 set -euo pipefail
 app_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 out_dir="${1:-$app_dir/../../../../target/dashboard-board}"
