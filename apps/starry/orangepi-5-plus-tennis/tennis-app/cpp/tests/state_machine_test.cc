@@ -418,6 +418,53 @@ bool deposit_waits_for_brake_release_and_reverse() {
                   "reverse completion must stop, reset odometry, then search");
 }
 
+bool single_dropout_coasts_not_spin() {
+    tennis::Config config;
+    tennis::StateMachine machine(config);
+    // Ball far, right of centre -> forward drive with a steering bias.
+    const auto out1 = machine.step(
+        ball_detection(0.10f, static_cast<float>(config.frame_w / 2 + 30)),
+        ms(0));
+    if (!expect(out1.motor_op == tennis::MotorOp::Drive && out1.left > 0 &&
+                    out1.right > 0,
+                "a found ball must drive forward (both wheels positive)"))
+        return false;
+    // One dropped frame must coast the exact last command, not flip to a spin.
+    const auto out2 = machine.step(tennis::Detection{}, ms(33));
+    return expect(out2.motor_op == out1.motor_op && out2.left == out1.left &&
+                      out2.right == out1.right,
+                  "a single dropped frame must coast the last pursuit command");
+}
+
+bool sustained_loss_falls_to_scan() {
+    tennis::Config config;
+    config.chase_lost_coast_frames = 2;
+    config.search_pivot_spd = 35;
+    tennis::StateMachine machine(config);
+    machine.step(
+        ball_detection(0.10f, static_cast<float>(config.frame_w / 2 + 30)),
+        ms(0));                                     // seen once (offset > 0)
+    machine.step(tennis::Detection{}, ms(33));      // coast 1
+    machine.step(tennis::Detection{}, ms(66));      // coast 2
+    const auto out = machine.step(tennis::Detection{}, ms(99)); // budget spent
+    return expect(out.motor_op == tennis::MotorOp::Drive &&
+                      out.left == config.search_pivot_spd &&
+                      out.right == -config.search_pivot_spd,
+                  "after the coast budget a sustained loss falls to one-way scan");
+}
+
+bool fresh_chase_never_coasts_stale() {
+    tennis::Config config;
+    config.search_pivot_spd = 35;
+    tennis::StateMachine machine(config);
+    // No ball seen this episode -> a lost frame scans immediately, no coast.
+    const auto out = machine.step(tennis::Detection{}, ms(0));
+    return expect(out.motor_op == tennis::MotorOp::Drive &&
+                      out.left == config.search_pivot_spd &&
+                      out.right == -config.search_pivot_spd,
+                  "with no prior sighting a lost frame scans at once");
+}
+
 } // namespace
 
 int main() {
@@ -432,6 +479,9 @@ int main() {
     if (!bucket_search_reverses_after_estimated_two_turns()) return 1;
     if (!captured_ball_uses_odom_return_and_visual_takeover()) return 1;
     if (!deposit_waits_for_brake_release_and_reverse()) return 1;
+    if (!single_dropout_coasts_not_spin()) return 1;
+    if (!sustained_loss_falls_to_scan()) return 1;
+    if (!fresh_chase_never_coasts_stale()) return 1;
     std::puts("tennis_state_machine_test: OK");
     return 0;
 }

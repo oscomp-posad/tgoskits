@@ -80,9 +80,16 @@ private:
     // CHASE_BALL bookkeeping.
     int last_offset_ = 0;
     int stop_confirm_ = 0;
+    // Time-based back-and-forth search sweep (Ivans' refine-search).
     bool search_rotation_active_ = false;
     int search_rotation_direction_ = 1;
     int64_t search_rotation_deadline_ns_ = 0;
+    // Lost-frame coast: hold the last pursuit command across brief detection
+    // dropouts (up to cfg_.chase_lost_coast_frames) instead of immediately
+    // scanning, so a single missed frame does not flip pursuit into a spin.
+    int frames_since_ball_ = 0;
+    ControlOutput last_chase_out_{};
+    bool last_chase_valid_ = false;
 
     TimedPhase timed_phase_ = Normal;
     int64_t timed_deadline_ns_ = 0;

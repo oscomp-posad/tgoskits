@@ -56,6 +56,8 @@ void StateMachine::enter(GameState s) {
     state_ = s;
     // Reset per-state bookkeeping on entry.
     stop_confirm_ = 0;
+    frames_since_ball_ = 0;
+    last_chase_valid_ = false;
     state_action_started_ = false;
     state_deadline_ns_ = 0;
     bucket_confirm_ = 0;
@@ -145,7 +147,26 @@ ControlOutput StateMachine::step(const Detection &det, int64_t now_ns) {
     if (run_timed_phase(now_ns, timed_output)) return timed_output;
 
     switch (state_) {
-    case GameState::CHASE_BALL: return chase_ball(det.ball, now_ns);
+    case GameState::CHASE_BALL: {
+        // Coast the last pursuit command through a brief detection dropout
+        // before letting chase_ball fall back to the one-way scan. A single
+        // missed frame must not flip a forward pursuit into an opposing-wheel
+        // spin (and last_offset_ is stale on a lost frame, so the scan could
+        // even pivot the wrong way). Only coasts after the ball has been seen
+        // this episode; chase_ball stays the sole owner of the active steering.
+        if (!det.ball.found && last_chase_valid_ &&
+            frames_since_ball_ < cfg_.chase_lost_coast_frames) {
+            ++frames_since_ball_;
+            return last_chase_out_;
+        }
+        const ControlOutput out = chase_ball(det.ball, now_ns);
+        if (det.ball.found) {
+            last_chase_out_ = out;
+            last_chase_valid_ = true;
+            frames_since_ball_ = 0;
+        }
+        return out;
+    }
     case GameState::GRAB: return grab(now_ns);
     case GameState::RETURN_TO_BUCKET:
         return return_to_bucket(det.bucket, now_ns);

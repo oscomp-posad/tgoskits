@@ -107,7 +107,14 @@ struct Config {
 
     // Ball lost search.
     int search_pivot_spd = 35;
+    // Time-based search sweep: reverse direction after this many estimated
+    // turns (Ivans' refine-search).
     double search_reverse_turns = 2.0;
+    // Coast the last pursuit command for this many consecutive missed frames
+    // before falling back to the one-way scan, so a single dropped detection
+    // (routine at the high confidence threshold) cannot flip a forward pursuit
+    // into an opposing-wheel spin. Mirrors bucket_lost_frames. 0 = scan at once.
+    int chase_lost_coast_frames = 3;
 
     // Optional wheel-RPM odometry. The generic default remains off; the
     // calibrated Orange Pi live configuration enables it explicitly.
