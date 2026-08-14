@@ -97,7 +97,7 @@ struct Config {
     int chase_max_bias = 24;
     int chase_close_pivot_spd = 30;
     int reverse_speed = 30;
-    int center_dead_zone = 15;
+    int center_dead_zone = 10;
 
     // Stop / grab gate. The ball is centred under a gripper mounted right of the
     // optical centre, hence the off-centre stop target.

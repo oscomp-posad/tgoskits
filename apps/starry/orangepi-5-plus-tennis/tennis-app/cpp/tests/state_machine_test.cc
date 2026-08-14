@@ -248,9 +248,15 @@ bool bucket_approach_uses_configured_speed_bands() {
         return false;
 
     output = machine.step(bucket_detection(0.1f, 448.0f), ms(99));
+    if (!expect(output.motor_op == tennis::MotorOp::Drive &&
+                    output.left == 53 && output.right == 37,
+                "far bucket pursuit must steer around base speed 45"))
+        return false;
+
+    output = machine.step(bucket_detection(0.1f, 331.0f), ms(132));
     return expect(output.motor_op == tennis::MotorOp::Drive &&
-                      output.left == 53 && output.right == 37,
-                  "far bucket pursuit must steer around base speed 45");
+                      output.left == 46 && output.right == 44,
+                  "bucket bias above half a step must round away from zero");
 }
 
 bool bucket_search_uses_configured_in_place_speed() {
