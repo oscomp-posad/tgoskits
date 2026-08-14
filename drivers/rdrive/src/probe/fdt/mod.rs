@@ -1352,8 +1352,20 @@ impl System {
                 let send_node = SendNode(node);
                 jobs.push(Box::new(move || {
                     let SendNode(node) = send_node;
-                    let res = apply_assigned_clocks(node)
-                        .and_then(|()| apply_power_domains(node))
+                    // `assigned-clocks`/`assigned-clock-rates` defaults are best-effort,
+                    // matching Linux `of_clk_set_defaults`: a rate the clock provider
+                    // can't set (e.g. a VOP root clock the CRU doesn't implement) must
+                    // not abort the device's probe. Power domains and pinctrl remain
+                    // required; a driver that truly needs a rate applies it strictly
+                    // in its own probe.
+                    if let Err(err) = apply_assigned_clocks(node) {
+                        warn!(
+                            "[{}] assigned-clocks apply failed (best-effort, continuing \
+                             to probe): {err}",
+                            node.name()
+                        );
+                    }
+                    let res = apply_power_domains(node)
                         .and_then(|()| apply_default_pinctrl(node))
                         .and_then(|()| {
                             let descriptor = Descriptor {
