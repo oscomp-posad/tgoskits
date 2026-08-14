@@ -188,5 +188,106 @@ pub fn cold_init_hdmi0_1080p60(vop_mmio: &mut VopMmio, fb_phys: u64) -> Result<(
     );
     info!("coldinit: HDMI-QP TX enabled -> 1080p60 RGB should be live");
 
+    // 8. Monitor-free liveness readback: prove the raster is actually scanning
+    //    (frame-start interrupts advancing), the window is fetching our fb, and
+    //    the PHY is still locked — everything verifiable short of a physical sink.
+    probe_pipeline_liveness(vop_mmio, fb_phys, &KEnv);
+
     Ok(())
+}
+
+/// Read back live hardware state to prove the display pipeline is running
+/// **without a monitor**. Reports: PHY still locked (HDPTX-GRF STATUS), VP0 out
+/// of standby, the Esmart0 window enabled and fetching our `fb_phys`, and — the
+/// decisive dynamic signal — VOP2 frame-start interrupts advancing, which means
+/// the VP is scanning a raster off the live PHY pixel clock (not merely
+/// configured). A physical sink is the only thing this cannot confirm.
+pub fn probe_pipeline_liveness<E: PhyEnv>(vop_mmio: &mut VopMmio, fb_phys: u64, env: &E) {
+    use rockchip_vop2::{
+        mmio::Regs,
+        regs::{esmart, intr, vp, win_base},
+    };
+
+    // PHY lock bits (HDPTX-GRF STATUS @ +0x80): bit3 PLL_LOCK_DONE, bit2 CLK_RDY,
+    // bit1 PHY_RDY.
+    if let Ok(p) = iomap(HDPTX_GRF_BASE, GRF_SIZE) {
+        // SAFETY: freshly-mapped device page; STATUS is a 32-bit reg at 0x80.
+        let s = unsafe { core::ptr::read_volatile(p.as_ptr().add(0x80) as *const u32) };
+        info!(
+            "liveness: HDPTX-GRF STATUS={s:#010x} pll_lock={} clk_rdy={} phy_rdy={}",
+            s & (1 << 3) != 0,
+            s & (1 << 2) != 0,
+            s & (1 << 1) != 0
+        );
+    }
+
+    // VP0 active (not in standby) + window enabled + fetching our fb.
+    let dsp_ctrl = vop_mmio.read32(vp::base(0) + vp::DSP_CTRL);
+    let win_ctrl = vop_mmio.read32(win_base::ESMART0 + esmart::REGION0_CTRL);
+    let mst = vop_mmio.read32(win_base::ESMART0 + esmart::REGION0_YRGB_MST);
+    info!(
+        "liveness: VP0 DSP_CTRL={dsp_ctrl:#010x} standby={} | Esmart0 win_en={} \
+         YRGB_MST={mst:#010x} (fb={:#010x} match={})",
+        dsp_ctrl & vp::DSP_CTRL_STANDBY != 0,
+        win_ctrl & esmart::REGION0_CTRL_WIN_EN != 0,
+        fb_phys as u32,
+        mst == fb_phys as u32
+    );
+
+    // Dynamic proof: enable + clear the VP0 frame-start latch, then poll the raw
+    // status for ~50 ms (>3 frames @60Hz). If FS pulses/latches, the VOP is
+    // actively scanning — the pixel clock is live and the timing is running.
+    let en = vop_mmio.read32(intr::vp_int_en(0));
+    vop_mmio.write32(intr::vp_int_en(0), en | intr::FS_NEW_INTR);
+    vop_mmio.write32(intr::vp_int_clr(0), intr::FS_NEW_INTR);
+    let mut seen_pulse = false;
+    for _ in 0..500 {
+        if vop_mmio.read32(intr::vp_int_raw_status(0)) & intr::FS_NEW_INTR != 0 {
+            seen_pulse = true;
+        }
+        env.delay_us(100);
+    }
+    let latched = vop_mmio.read32(intr::vp_int_status(0)) & intr::FS_NEW_INTR != 0;
+    let live = seen_pulse || latched;
+    info!(
+        "liveness: frame-start pulse={seen_pulse} latched={latched} => raster {}",
+        if live {
+            "RUNNING — VOP scanning off a live pixel clock (valid HDMI timing generated)"
+        } else {
+            "NOT advancing — no dclk / VOP idle (check PHY->CRU dclk mux)"
+        }
+    );
+}
+
+/// Paint eight vertical SMPTE-style color bars into an XRGB8888 framebuffer.
+///
+/// Bring-up **visual oracle** only: a freshly-allocated scanout buffer is zeroed
+/// (solid black on the panel), which is ambiguous — "black" could mean "no
+/// signal", "wrong fb address", or "working but empty". Color bars are an
+/// unmistakable, self-generated pattern, so a correct end-to-end chain
+/// (PHY lock -> CRU mux -> GRF -> VOP2 scanout -> TX) shows *our* image with no
+/// userspace involved. `stride` is the row stride in bytes.
+pub fn fill_color_bars(fb: *mut u8, width: u32, height: u32, stride: usize) {
+    // 0x00RRGGBB — white, yellow, cyan, green, magenta, red, blue, black.
+    const BARS: [u32; 8] = [
+        0x00FF_FFFF,
+        0x00FF_FF00,
+        0x0000_FFFF,
+        0x0000_FF00,
+        0x00FF_00FF,
+        0x00FF_0000,
+        0x0000_00FF,
+        0x0000_0000,
+    ];
+    let (w, h) = (width as usize, height as usize);
+    let bar_w = (w / 8).max(1);
+    for y in 0..h {
+        // SAFETY: caller guarantees `fb` is a `height*stride`-byte XRGB8888
+        // buffer; each row write stays within `w*4 <= stride` bytes.
+        let row = unsafe { fb.add(y * stride) } as *mut u32;
+        for x in 0..w {
+            let c = BARS[(x / bar_w).min(7)];
+            unsafe { core::ptr::write_volatile(row.add(x), c) };
+        }
+    }
 }

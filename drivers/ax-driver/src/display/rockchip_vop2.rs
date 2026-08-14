@@ -110,9 +110,20 @@ fn probe(probe: ProbeFdt<'_>) -> Result<(), OnProbeError> {
     //  - adopt (default): reuse U-Boot's clock/TX/PHY, dump the golden state, and
     //    own only the VP + window via a full modeset.
     #[cfg(feature = "rockchip-vop2-coldinit")]
-    match crate::display::hdmi_coldinit::cold_init_hdmi0_1080p60(&mut mmio, fb_phys) {
-        Ok(()) => info!("vop2: HDMI0 cold-init complete -> fb {fb_phys:#x}"),
-        Err(e) => warn!("vop2: HDMI0 cold-init failed: {e} (registering fb anyway)"),
+    {
+        match crate::display::hdmi_coldinit::cold_init_hdmi0_1080p60(&mut mmio, fb_phys) {
+            Ok(()) => info!("vop2: HDMI0 cold-init complete -> fb {fb_phys:#x}"),
+            Err(e) => warn!("vop2: HDMI0 cold-init failed: {e} (registering fb anyway)"),
+        }
+        // Bring-up visual oracle: paint color bars into the scanout buffer so a
+        // working chain shows an unmistakable pattern instead of ambiguous black.
+        crate::display::hdmi_coldinit::fill_color_bars(
+            fb.as_ptr().as_ptr(),
+            mode.width,
+            mode.height,
+            mode.stride_bytes() as usize,
+        );
+        info!("vop2: painted color-bar test pattern into fb");
     }
     #[cfg(not(feature = "rockchip-vop2-coldinit"))]
     {

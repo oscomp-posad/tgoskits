@@ -1,0 +1,22 @@
+# Board build config for a WATCHED HDMI cold-init bring-up on Orange Pi 5 Plus.
+# Same as orangepi-5-plus.toml plus the native VOP2 + from-scratch HDMI cold-init
+# driver (rockchip-vop2-coldinit). Opt-in only: it owns the VOP power domain,
+# HDPTX PHY, CRU dclk, GRF muxes and HDMI-QP TX, then paints a color-bar test
+# pattern into /dev/fb0. Board-validation pending — run under serial supervision.
+# Runtime U-Boot settings live in `orangepi-5-plus-uboot.toml`.
+target = "aarch64-unknown-none-softfloat"
+features = [
+  "ax-driver/list-pci-devices",
+  "ax-driver/rk3588-pcie",
+  "ax-driver/realtek-rtl8125",
+  "ax-driver/rockchip-soc",
+  "ax-driver/rockchip-dwc-xhci",
+  "ax-driver/rockchip-ehci",
+  "ax-driver/rockchip-sdhci",
+  "ax-driver/rockchip-dwmmc",
+  "rknpu",
+  "rk3588-pwm",
+  "rockchip-vop2-coldinit",
+]
+log = "Info"
+max_cpu_num = 8
