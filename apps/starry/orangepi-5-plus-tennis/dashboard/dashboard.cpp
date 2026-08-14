@@ -341,6 +341,10 @@ public:
         rt->start(std::max(30, 1000 / std::max(1, renderFps_)));
     }
     void setCameraPath(const std::string &p) { cam.path = p; }
+    // Timer-independent tick for the --directfb manual present loop (StarryOS Qt
+    // timers don't reliably fire under linuxfb): poll the camera file + drain the
+    // telemetry tail, exactly what the rt/pt QTimers would have done.
+    void pump() { cam.poll(); drain(); }
     void injectDemo() {
         double v[8] = {22, 14, 9, 31, 88, 74, 61, 45};
         for (int i = 0; i < 8; i++) sys.cpu[i] = v[i];
@@ -871,7 +875,15 @@ int main(int argc, char **argv) {
         if (!camera.isEmpty()) d->setCameraPath(camera.toStdString());
         d->resize(fbw, fbh);
         QString dumpPath = ::getenv("STARRY_GRAB_DUMP") ? QString(::getenv("STARRY_GRAB_DUMP")) : QString();
+        // STARRY_GRAB_AFTER_FRAMES delays the one-shot DRAM dump by N presents so a
+        // *live* feed (camera frames + telemetry that arrive after the first
+        // present) is captured, not just frame 0. Frame-counted, not time-based:
+        // StarryOS's clock/timers are unreliable under linuxfb. Default 1 = dump on
+        // the first present (unchanged one-shot behavior).
+        const long grabAfterFrames =
+            ::getenv("STARRY_GRAB_AFTER_FRAMES") ? std::atol(::getenv("STARRY_GRAB_AFTER_FRAMES")) : 1;
         auto *dumped = new bool(false);
+        auto *framec = new long(0);
         auto *canvas = new QImage(fbw, fbh, QImage::Format_RGB32);  // opaque RGB32; bytesPerLine == stride at 1920 (no padding)
         auto present = [=]() {
             canvas->fill(0xff000000);
@@ -879,7 +891,8 @@ int main(int argc, char **argv) {
             long total = std::min<long>(fbsize, long(canvas->sizeInBytes()));
             if (long(canvas->bytesPerLine()) == stride) std::memcpy(fbmap, canvas->constBits(), size_t(total));
             else for (int y = 0; y < fbh; y++) std::memcpy(fbmap + size_t(y) * stride, canvas->constScanLine(y), size_t(std::min<long>(stride, long(canvas->bytesPerLine()))));
-            if (!*dumped) {  // verify via the SAME uncached mmap (the truthful DRAM / VOP2 oracle)
+            ++*framec;
+            if (!*dumped && *framec >= grabAfterFrames) {  // verify via the SAME uncached mmap (the truthful DRAM / VOP2 oracle)
                 long rbright = 0, mmbright = 0;
                 for (int y = 0; y < fbh; y++) { const uchar *s = canvas->constScanLine(y); for (int x = 0; x < fbw * 4; x += 4) if (s[x] >= 0x40 || s[x + 1] >= 0x40 || s[x + 2] >= 0x40) rbright++; }
                 for (long i = 0; i + 3 < fbsize; i += 4) if (fbmap[i] >= 0x40 || fbmap[i + 1] >= 0x40 || fbmap[i + 2] >= 0x40) mmbright++;
@@ -888,12 +901,20 @@ int main(int argc, char **argv) {
                 *dumped = true;
             }
         };
-        auto *t = new QTimer();
-        QObject::connect(t, &QTimer::timeout, present);
-        t->start(std::max(30, 1000 / std::max(1, fps)));
-        present();  // first frame immediately
         std::printf("DASHBOARD_DIRECTFB %dx%d bpp=%d stride=%ld (mmap present)\n", fbw, fbh, bpp, stride); std::fflush(stdout);
-        return app.exec();
+        // Drive presents from a plain loop, NOT a QTimer: StarryOS's Qt event loop
+        // under linuxfb does not reliably fire timers, so the camera poll +
+        // telemetry drain (normally timer-driven) are pumped manually here. This is
+        // what makes the live feed (and its frame-gated capture) actually update on
+        // the board rather than freezing on frame 0.
+        const int usPeriod = 1000000 / std::max(1, fps);
+        for (;;) {
+            QCoreApplication::processEvents();  // service any real Qt events
+            d->pump();                          // poll /dev camera file + drain telemetry
+            present();                          // render + uncached-mmap present + frame-gated dump
+            std::fflush(stdout);
+            ::usleep(usPeriod);
+        }
     }
     applyIsolation(cpulist, isolate);
     Dashboard d(demo, telemetry, fps);
