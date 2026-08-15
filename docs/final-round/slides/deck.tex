@@ -102,13 +102,33 @@
   \includegraphics[width=\linewidth,height=0.80\textheight,keepaspectratio]{Fkmap.png}
 \end{frame}
 
+% ============================== 19a 感知加速器驱动 + 零拷贝 ==============================
+\begin{frame}
+  \navsegment{1}
+  \frametitle{感知流水线：三块自研加速器驱动 + dma-buf 零拷贝}
+  \begin{columns}[T]
+    \begin{column}{0.52\textwidth}
+      \includegraphics[width=\linewidth]{Fvision.png}
+    \end{column}
+    \begin{column}{0.45\textwidth}
+      \begin{itemize}
+        \item \headline{JPU}\ 硬件 JPEG 解码：新增 \texttt{/dev/mpp\_service}，对齐瑞芯微 MPP;单帧 1\,ms、与 Linux 逐字节一致（\#1456）
+        \item \headline{RGA}\ 缩放与色彩转换：新增 \texttt{/dev/rga} RGA2 驱动，对齐 librga，较 CPU 快 7.4 倍（\#1388）
+        \item \headline{NPU}\ 连续推理：修正 GEM 缓冲缺页与引用计数，逐帧稳定、首帧与 Linux 一致（\#1364）
+        \item \headline{零拷贝}\ 三块加速器经 dma-buf 共享物理内存，整条流水线全程零拷贝
+      \end{itemize}
+    \end{column}
+  \end{columns}
+  \advance{感知三级加速全部本队自研}{JPU 硬解 + RGA 预处理 + NPU 连续推理，经 dma-buf 零拷贝串联，均已合入上游}
+\end{frame}
+
 % ============================== 19b 视觉推理链路优化 ==============================
 \begin{frame}
   \navsegment{1}
   \frametitle{视觉推理链路：重型模型 6.3\texttimes\ 收窄至 2.1\texttimes，小模型追平 Linux}
   \begin{columns}[T]
     \begin{column}{0.52\textwidth}
-      \includegraphics[width=\linewidth]{Fvision.png}
+      \includegraphics[width=\linewidth]{Finfer.png}
     \end{column}
     \begin{column}{0.45\textwidth}
       \begin{itemize}
