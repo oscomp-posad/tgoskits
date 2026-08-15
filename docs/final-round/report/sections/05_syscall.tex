@@ -1,13 +1,13 @@
 % 05_syscall
 \section{系统调用入口开销}
 
-系统调用入口开销指用户态陷入内核、执行完毕再返回这条路径上，每次调用都要支付的固定成本，与调用具体做什么、是否触及调度或内存无关。一次系统调用无论是读一个字节还是取一个进程号，都要走同一段陷入与返回：用户态执行 \texttt{SVC} 指令触发同步异常陷入 EL1，内核保存现场、按调用号分发到处理函数、处理函数返回后再恢复现场、\texttt{eret} 返回用户态。这段路径的耗时是所有系统调用共同的底座，调用体本身越轻，它在总耗时中的占比越高。调度在结构与单核算力上追平 Linux 之后，剩余的 IPC 差距集中于此处。
+系统调用入口开销指用户态陷入内核、执行完毕再返回这条路径上，每次调用都要支付的固定成本，与调用具体做什么、是否触及调度或内存无关。一次系统调用无论是读一个字节还是取一个进程号，都要走同一段陷入与返回：用户态执行 \texttt{SVC} 指令触发同步异常陷入 EL1，内核保存现场、按调用号分发到处理函数、处理函数返回后再恢复现场、\texttt{eret} 返回用户态。这段路径的耗时是所有系统调用共同承担的固定成本，调用体本身越轻，它在总耗时中的占比越高。调度在结构与单核算力上追平 Linux 之后，剩余的 IPC 差距集中于此处。
 
-最纯粹的探针是空系统调用 getpid，其处理体只取回一个已在内存中的进程号，几乎不做任何工作，测得的时延近乎全部来自陷入与返回路径。\texttt{syscost.c} 测得 StarryOS 的 getpid 需 1200 ns，同机 Linux 仅 \nGetpidLin{} ns，相差约 7 倍。一个不涉及调度、不涉及内存、仅进出内核一趟的调用仍慢 7 倍，说明差距落在这条路径本身。窗口化的 pipe-pong（\texttt{ppong.c}）给出同一结论：两侧均以批处理摊薄单次开销，StarryOS 批处理后的地板仍为每条消息 13.4 µs，Linux 为 1.87 µs。本节先剖析这条路径的构成，指出每次调用都要支付而多数调用并不使用的三处成本，再说明各处的机制与对应优化，最后给出结果。
+最纯粹的探针是空系统调用 getpid，其处理体只取回一个已在内存中的进程号，几乎不做任何工作，测得的时延近乎全部来自陷入与返回路径。\texttt{syscost.c} 测得 StarryOS 的 getpid 需 \nGetpidBefore{} ns，同机 Linux 仅 \nGetpidLin{} ns，相差约 7 倍。一个不涉及调度、不涉及内存、仅进出内核一趟的调用仍慢 7 倍，说明差距落在这条路径本身。窗口化的 pipe-pong（\texttt{ppong.c}）给出同一结论：两侧均以批处理摊薄单次开销，StarryOS 批处理后的地板仍为每条消息 13.4 µs，Linux 为 1.87 µs。本节先剖析这条路径的构成，指出每次调用都要支付而多数调用并不使用的三处成本，再说明各处的机制与对应优化，最后给出结果。
 
 \subsection{陷入路径的构成}
 
-在 aarch64 上，一次系统调用的时延由两部分构成。第一部分是陷入往返本身，即 \texttt{uctx.run()} 一整趟：\texttt{SVC} 进入、保存通用寄存器现场、按调用号查表分发、处理函数执行、恢复现场、\texttt{eret} 返回。这一段由 axcpu 的架构代码实现，是 ArceOS、StarryOS、Axvisor 三套系统共用的底座；getpid 这类空调用的处理体只占其中极小一部分，其时延几乎全部是这趟往返。第二部分是返回路径上的一组固定记账，在处理函数返回之后、恢复用户态现场之前执行，用于维护跟踪、定时器与 CPU 时间等每进程状态。StarryOS 此前在这段返回路径上串接了三处工作，每次系统调用返回都完整执行一遍，而绝大多数调用并不需要其中任何一处。getpid 的 1200 ns 正是这两部分之和：陷入往返的架构地板，叠加三处每调用记账。三处记账构成架构地板之上唯一可摘除的冗余，后续优化集中于此。
+在 aarch64 上，一次系统调用的时延由两部分构成。第一部分是陷入往返本身，即 \texttt{uctx.run()} 一整趟：\texttt{SVC} 进入、保存通用寄存器现场、按调用号查表分发、处理函数执行、恢复现场、\texttt{eret} 返回。这一段由 axcpu 的架构代码实现，是 ArceOS、StarryOS、Axvisor 三套系统共用的底座；getpid 这类空调用的处理体只占其中极小一部分，其时延几乎全部是这趟往返。第二部分是返回路径上的一组固定记账，在处理函数返回之后、恢复用户态现场之前执行，用于维护跟踪、定时器与 CPU 时间等每进程状态。StarryOS 此前在这段返回路径上串接了三处工作，每次系统调用返回都完整执行一遍，而绝大多数调用并不需要其中任何一处。getpid 的 \nGetpidBefore{} ns 正是这两部分之和：陷入往返的架构地板，叠加三处每调用记账。三处记账构成架构地板之上唯一可摘除的冗余，后续优化集中于此。
 
 \subsection{每次调用固定支付的三处成本}
 
@@ -27,7 +27,7 @@ CPU 时间记账把每个线程消耗的时间区分为用户态（utime）与�
 针对上述三处成本各实现一处优化，每项上线前均经过一轮对抗评审。三者只移除冗余，不改变对外可见的语义。
 
 \paragraph{ptrace 快路径}
-将每次返回的停点判断\ours{收敛到一个预先算好的 \texttt{is\_ptraced} 标志}，对应 Linux 以 \texttt{TIF\_SYSCALL\_WORK} 位门控系统调用跟踪的做法：进程未被跟踪时整段 ptrace 停点逻辑不再进入，被跟踪时才照常执行。getpid 由 1200 ns 降至约 900 ns，降幅约 25\%。
+将每次返回的停点判断\ours{收敛到一个预先算好的 \texttt{is\_ptraced} 标志}，对应 Linux 以 \texttt{TIF\_SYSCALL\_WORK} 位门控系统调用跟踪的做法：进程未被跟踪时整段 ptrace 停点逻辑不再进入，被跟踪时才照常执行。getpid 由 \nGetpidBefore{} ns 降至约 900 ns，降幅约 25\%。
 
 \paragraph{poll\_process\_timer 跳过}
 在 \texttt{poll\_process\_timer} 之前\ours{引入一个无锁的 \texttt{PosixTimerTable::\allowbreak count} 计数作为门槛}。进程未装配任何 POSIX 定时器时该计数为零，前述的全局读锁、Arc 升级、Mutex 与 BTreeMap 遍历整段跳过，仅在确有定时器时才付出加锁与遍历的代价。此项在隔离测量下将 getpid 由 1026.5 ns 降至 853.3 ns，降幅约 17\%。
@@ -43,9 +43,9 @@ CPU 时间记账把每个线程消耗的时间区分为用户态（utime）与�
 
 \subsection{结果}
 
-三处优化叠加，\keyres{getpid 由 1200 ns 压至 \nGetpid{} ns，相对 Linux 由约 7 倍收敛至 \nGetpidRatio{} 倍}，已并入板级出厂配置。
+三处优化叠加，\keyres{getpid 由 \nGetpidBefore{} ns 压至 \nGetpid{} ns，相对 Linux 由约 7 倍收敛至 \nGetpidRatio{} 倍}，已并入板级出厂配置。
 
-\figph{../figures/out/F07.png}{getpid 三步累计从 1200 ns 降到 \nGetpid{} ns，为 Linux \nGetpidLin{} ns 的 \nGetpidRatio{} 倍，残余贴着 \texttt{uctx.run} 的陷入下限}
+\figph{../figures/out/F07.png}{getpid 三步累计从 \nGetpidBefore{} ns 降到 \nGetpid{} ns，为 Linux \nGetpidLin{} ns 的 \nGetpidRatio{} 倍，残余逼近 \texttt{uctx.run} 的陷入下限}
 
 \begin{table}[H]\centering\small
 \begin{tabular}{@{}lrr@{}}
@@ -53,7 +53,7 @@ CPU 时间记账把每个线程消耗的时间区分为用户态（utime）与�
 版本 & getpid (ns) & 相对 Linux \\
 \midrule
 Linux & \nGetpidLin{} & 1× \\
-StarryOS 基线 & 1200 & 7.2× \\
+StarryOS 基线 & \nGetpidBefore{} & 7.2× \\
 加 ptrace 快路径 & 900 & 5.4× \\
 加 poll\_process\_timer 跳过 & 853 & 5.1× \\
 二分参考（set\_timer\_state 空转） & 458 & 2.7× \\
@@ -61,7 +61,7 @@ StarryOS 基线 & 1200 & 7.2× \\
 精确记账回退（非 tickacct） & 975 & 5.8× \\
 \bottomrule
 \end{tabular}
-\caption{getpid 微基准逐层下降，板级 p50，二分参考行为定位记账成本的中间探测点（\texttt{set\_timer\_state} 空转），精确记账回退行给出需要精确记账时的可选口径，高于上线值，不属该下降序列}
+\caption{getpid 微基准逐层下降，板级 p50（中间两级为实现当期的单次测量），二分参考行为定位记账成本的中间探测点（\texttt{set\_timer\_state} 空转），精确记账回退行给出需要精确记账时的可选口径，高于上线值，不属该下降序列}
 \end{table}
 
 残余的 \nGetpid{} ns 已贴近前述陷入往返的架构地板，包含 \texttt{SVC} 进入、保存现场、按调用号分发、恢复现场与 \texttt{eret} 返回。该路径属架构层，由 ArceOS、StarryOS、Axvisor 三套系统共用，其中不存在可摘除的冗余，改动波及面大且无对应收益，故不触碰。pipe 数据路径是下一步的优化方向，\texttt{pipe\_wr} 约 5 µs 对应 Linux 的约 0.4 µs。

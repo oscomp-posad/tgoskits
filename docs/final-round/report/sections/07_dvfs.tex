@@ -30,7 +30,7 @@ SCMI 时钟（固定） & 供电轨压 & PMU 实测交付频率 \\
 
 \subsection{既有的 SCMI 时钟通路}
 
-既有的 SCMI 通路只能经 SMC 下发时钟频率，无 governor、无电压管理，沿用上电电压。它决定了 StarryOS 未调频时的默认表现：Linux 的 A55 OPP 扫描将 StarryOS 的默认 \nLadderBase{} 事件/秒钉定于 816 MHz 上电档（408 MHz 78 事件/秒、600 MHz 118、816 MHz 161、1008 MHz 202），即上电工作点、无 DVFS。第一版仅上调 SCMI 时钟的驱动（A55 至 1008 MHz、A76 至 1200 MHz，沿用上电电压）取得 A55 约 1.46 倍、A76 约 1.83 倍的真实提升，但因前述电压耦合，PMU 读出核心运行快于所设定值，一致过冲约 1.24 倍。取回精确频率、并向更高档位攀升，须补齐电压侧，这是 \#1657 所做的工作。
+既有的 SCMI 通路只能经 SMC 下发时钟频率，无 governor、无电压管理，沿用上电电压。它决定了 StarryOS 未调频时的默认表现：Linux 的 A55 OPP 扫描将 StarryOS 的默认 \nLadderBase{} 事件/秒定位于 816 MHz 上电档（408 MHz 78 事件/秒、600 MHz 118、816 MHz 161、1008 MHz 202），即上电工作点、无 DVFS。第一版仅上调 SCMI 时钟的驱动（A55 至 1008 MHz、A76 至 1200 MHz，沿用上电电压）取得 A55 约 1.46 倍、A76 约 1.83 倍的真实提升，但因前述电压耦合，PMU 读出核心运行快于所设定值，一致过冲约 1.24 倍。取回精确频率、并向更高档位攀升，须补齐电压侧，这是 \#1657 所做的工作。
 
 \subsection{ondemand 按簇调频（\#1657）}
 
@@ -56,7 +56,7 @@ A55 电压轨采用带上下限的开环写方式下发（\texttt{force\_write\_
 
 \subsection{PVTPLL 环长切换}
 
-补齐电压后，仅凭抬压将 A76 推至 1725 MHz、A55 至 1523 MHz 即达电压天花板，逐核吞吐（sysbench cpu 8 线程 \nLadderB{}）约为同型号 Linux 的 0.75 倍。AVS/PVTM 分箱曾作为抬高天花板的候选，经验证被排除：A76 顶档（2256、2304、2352、2400）全部硬锁于 1000 mV、无 AVS 箱，主线亦无 Rockchip AVS 驱动。
+补齐电压后，仅凭抬压将 A76 推至 1725 MHz、A55 至 1523 MHz 即达电压天花板，逐核吞吐（sysbench cpu 8 线程 \nLadderB{}）约为同型号 Linux 的 0.76 倍。AVS/PVTM 分箱曾作为抬高天花板的候选，经验证被排除：A76 顶档（2256、2304、2352、2400）全部硬锁于 1000 mV、无 AVS 箱，主线亦无 Rockchip AVS 驱动。
 
 真正决定同电压下主频的是 PVTPLL 的环长，其表见于 TF-A 的 \texttt{rk3588\_clk.c}。低档（约 600 MHz 以下）走整数 PLL，环长为 0；1608 至 2400 MHz 整段 A76 频带的环长恒为 11，各档之间只有电压不同。StarryOS 原先将 SCMI 固定于 1200（环长 17），凭抬高该长环的电压方达 1725；请求更高的 SCMI 速率会把环重编为长度 11，同等电压下交付频率随之提升。同电压对照可见此机制：850 mV 下 ring1200（环长 17）的 1592 转为 ring1416（环长 11）的 1830（+238），\keyres{925 mV 下 ring1200 的 1725 转为 ring1608 的 \nDvfsAseven{}（+401，约 +23\%）}。
 
@@ -76,14 +76,14 @@ A55 电压轨采用带上下限的开环写方式下发（\texttt{force\_write\_
 \caption{PVTPLL 环长切换的四步 OPP 提升，逐核吞吐 0.76 倍提升至 \nPerCoreRatio{} 倍，A55 \nDvfsAfive{} MHz 已超过 Linux 自身 A55 的 1800 MHz 上限}
 \end{table}
 
-board 上采纳进 \texttt{cpufreq.rs} 的 OPP 阶梯，两簇在 1608 MHz 处由长环切至 11 环：
+板上纳入 \texttt{cpufreq.rs} 的 OPP 阶梯，两簇在 1608 MHz 处由长环切至 11 环：
 
 \begin{itemize}
 \item \textbf{A76}：408@675 / 816@675 / 1189@675（上电）/ 1318@725 / 1491@800 / 1592@850 / 1830@850（ring1416）/ \textbf{\nDvfsAseven{}@925（ring1608，governor 默认上限）} / \nDvfsAsevenTop{}@1000（ring1608，顶档，默认封闭）。
 \item \textbf{A55}：408@675 / 816@675 / 1021@675（上电）/ 1212@762.5 / 1285@800 / 1372@850 / 1695@850（ring1416）/ \textbf{\nDvfsAfive{}@950（ring1608，顶档，可达）}。
 \end{itemize}
 
-此前将高频挂起归因于 925 mV 下超过 1700 MHz 的压降，经查为误判：每一次板上挂起均为工具链错配（分支锁定 \texttt{nightly-2026-05-28}，强用 \texttt{nightly-2026-07-15} 会误编译 axcpu/axio 而在启动处卡死）。\nDvfsAseven{} MHz 已在 925 mV 下稳定达成。
+此前将高频挂起归因于 925 mV 下超过 1700 MHz 的压降，经查为误判：每一次板上挂起均为工具链错配（分支锁定 \texttt{nightly-2026-05-28}，强制使用 \texttt{nightly-2026-07-15} 会误编译 axcpu/axio 而在启动处挂起）。\nDvfsAseven{} MHz 已在 925 mV 下稳定达成。
 
 \subsection{逐核对齐与 governor 上限}
 
@@ -111,4 +111,4 @@ sysbench memory 写入，8 线程（MiB/s） & \nMemBWWrite{} & \nMemBWWriteLin{
 
 为此已\ours{实现 DDR/DMC 变频驱动}（\texttt{drivers/ax-driver/src/soc/rockchip/ddr\_dvfs.rs}，特性 \texttt{rk3588-ddr-dvfs}），逻辑本身正确。RK3588 的 DDR 频率不由 SCMI 控制，SCMI 的 DDR 时钟在 TF-A 中仅为空操作桩；真正的接口是 Rockchip 的 SIP DRAM 接口（SMC \texttt{0x82000008} 加共享页 \texttt{0x82000009}）。驱动按 \texttt{GET\_VERSION}、\texttt{SHARE\_MEM}、\texttt{DRAM\_INIT}、\texttt{GET\_FREQ\_INFO}、\texttt{SET\_RATE}、\texttt{MCU\_START}、\texttt{POST\_SET\_RATE} 的顺序执行，DDR 步进 \{528, 1068, 1560, 2112\} MHz，电压先行（\texttt{vdd\_ddr\_s0} 经 RK806 BUCK5 至 0.875 V，\texttt{vdd\_log\_s0} 经 BUCK3 至 0.75 V）。
 
-该驱动在板上受主线固件限制，驱动已实现。板上验证中 \texttt{GET\_VERSION} 返回 $-1$（\texttt{SMC\_UNKNOWN}），而同机 SCMI 的 SMC（\texttt{0x82000010}）正常，此即主线 TF-A 缺少 DRAM SIP 处理器的特征。打通须更换一版将 DRAM SIP 置于 EL3 的 rkbin BL31 并重刷开发板。驱动因此仅停留于探测态（\texttt{ENABLE\_SET\_RATE}=false），约 \nMemBWMemcpyRatio{} 倍的单流 memcpy 带宽差距源于板级固件缺少 DDR 变频接口，属 StarryOS 侧实现之外的制约。
+该驱动在板上受主线固件限制，驱动已实现。板上验证中 \texttt{GET\_VERSION} 返回 $-1$（\texttt{SMC\_UNKNOWN}），而同机 SCMI 的 SMC（\texttt{0x82000010}）正常，此即主线 TF-A 缺少 DRAM SIP 处理器的特征。使其生效须更换一版将 DRAM SIP 置于 EL3 的 rkbin BL31 并重刷开发板。驱动因此仅停留于探测态（\texttt{ENABLE\_SET\_RATE}=false），约 \nMemBWMemcpyRatio{} 倍的单流 memcpy 带宽差距源于板级固件缺少 DDR 变频接口，属 StarryOS 侧实现之外的制约。

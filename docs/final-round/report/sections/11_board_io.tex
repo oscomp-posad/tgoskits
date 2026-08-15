@@ -48,10 +48,10 @@ USB 相机是整条视觉流水线的源头。UVC 是 USB 视频类标准，相�
 通路 & 用时 & 说明 \\
 \midrule
 网络 \texttt{scp} FIT 至 \texttt{/boot} & 约 1 s & md5 校验一致，替代失败的 ymodem \\
-串口 ymodem（1.5 Mbaud，约 14 MB FIT） & 90 s 以上，频繁失败 & 间歇 \texttt{Error: NAK}，一夜 8 次尝试全部失败 \\
+串口 ymodem（1.5 Mbaud，约 14 MB FIT） & 单次 90 s 以上，含重试约 5 分钟 & 间歇 \texttt{Error: NAK}，一夜 8 次尝试全部失败 \\
 U-Boot \texttt{fatload} 预置 FIT 后 \texttt{bootm} & 约 1.4 s & 相较 ymodem 的约 5 分钟 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-网络 \texttt{scp} 至 \texttt{/boot} 再经 \texttt{fatload} 与 \texttt{bootm} 启动的通路已在板上跑通：载入修复后的内核，md5 校验一致并完成自检。这一层不含对 Linux 的性能主张，其内容为板级与外设的 bring-up。相机取流（\#1924/\#1961）与 PWM 控制面共同构成机器人的感知与执行通路，感知前端的模型结构优化与首次推理时延各自单独成章。本层的定位是把 RK3588 开发板变为可 SSH、可暖重启的实用目标，其余章节相对 Linux 的持平与领先方由此得以在真机上被测得。
+网络 \texttt{scp} 至 \texttt{/boot} 再经 \texttt{fatload} 与 \texttt{bootm} 启动的通路已在板上验证可用：载入修复后的内核，md5 校验一致并完成自检。这一层不含对 Linux 的性能主张，其内容为板级与外设的 bring-up。相机取流（\#1924/\#1961）与 PWM 控制面共同构成机器人的感知与执行通路，感知前端的模型结构优化与首次推理时延各自单独成章。本层的定位是把 RK3588 开发板变为可 SSH、可暖重启的实用目标，其余章节相对 Linux 的持平与领先方由此得以在真机上被测得。

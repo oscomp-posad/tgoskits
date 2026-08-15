@@ -1,13 +1,13 @@
 % 17_timeline
 \section{开发过程与时间线}
 
-这一个月的工作自 2026 年 7 月初持续至 8 月中旬。此前在应用层于单线程侧追平 Linux 的工作已经完成，这一个月的目标是使 StarryOS 在 RK3588 上成为通用的对等系统。工作分两条线推进。系统内核侧负责 perf、调度器、DVFS 与 cpufreq、RGA/JPU 驱动、sysbench 与原生显示栈；仿真与板级侧负责 QEMU RKNPU 模拟、相机 UVC 与 UART/USB-serial/PWM 驱动、rtnetlink 转 SSH、RKNPU GEM 缓存与 reboot 系统调用。硬件平台为 OrangePi-5-Plus，cpu0 至 cpu3 为 A55 小核，cpu4 至 cpu7 为 A76 大核，配备三核 NPU、硬件 RGA/JPU 与 HDMI 输出。整体进度按周推进，各项改动均以开发板实测为准；本章仅列出时间线，各项工作的现象、根因与验证在对应章节展开。
+这一个半月的工作自 2026 年 7 月初持续至 8 月中旬。此前在应用层于单线程侧追平 Linux 的工作已经完成，这一个半月的目标是使 StarryOS 在 RK3588 上成为通用的对等系统。工作分两条线推进。系统内核侧负责 perf、调度器、DVFS 与 cpufreq、RGA/JPU 驱动、sysbench 与原生显示栈；仿真与板级侧负责 QEMU RKNPU 模拟、相机 UVC 与 UART/USB-serial/PWM 驱动、rtnetlink 转 SSH、RKNPU GEM 缓存与 reboot 系统调用。硬件平台为 OrangePi-5-Plus，cpu0 至 cpu3 为 A55 小核，cpu4 至 cpu7 为 A76 大核，配备三核 NPU、硬件 RGA/JPU 与 HDMI 输出。整体进度按周推进，各项改动均以开发板实测为准；本章仅列出时间线，各项工作的现象、根因与验证在对应章节展开。
 
-\figph{../figures/out/F17.png}{约一个月的按周里程碑，自 perf 多核历经调度器、DVFS、THP，至 sysbench 对等与 TTFI 领先}
+\figph{../figures/out/F17.png}{按周里程碑，自 perf 多核历经调度器、DVFS、THP、TTFI 与 sysbench 对等，止于跨内核页表正确性修复}
 
 第一周（约 07-01 至 07-14）以将硬件 PMU 的 perf 推进至多核为起点。单核 A55 首先通过 18 项检查，判定为 PARTIAL；随后 smp8 big.LITTLE 全量 39 项通过、0 项失败，判定为 FULL。开发板压力测试暴露出 axtask 跨核相互唤醒的死锁，改为延迟跨核唤醒，移除对远端 on\_cpu 的自旋等待，该修复并入 PR \#1495 已合并。多核与大小核的 PMU 支持落于 PR \#1577，依据 MIDR 区分 a55/a76 两类 cluster 身份，经 IPI 逐核扇出；在此基础上直接运行未经改动的上游 perf 6.x 与 PERF\_SAMPLE\_CALLCHAIN 火焰图。同周仿真与板级侧完成的 rtnetlink IPv4 与多网卡支持打通开发板 SSH 登录（PR \#1497 已合并），调试自此摆脱串口控制台的约束，显著提升了整段工作的效率。
 
-第二周（约 07-11 至 07-16）清空 perf 待办事项。软件事件、HW\_CACHE、真实 tid、PERF\_RECORD\_LOST、事件分组与 PERF\_SAMPLE\_READ 分列于 PR \#1601/\#1602/\#1603，DWARF 回溯与 kprobe/tracepoint 在 QEMU 上验证通过。TTFI 由提交版本的 19.22 s 降至 \nTtfi s（同机 Linux 为 \nTtfiLin s），并经开发板确认。仿真与板级侧完成的 QEMU RK3588 RKNPU 功能模拟合并（processmission/qemu \#19），附带 106 项 qtest，提供板外的 RKNN 开发与模型优化基准。原生显示栈 VOP2、HDMI-QP 与 HDPTX 同周启动，主机测试通过，板级点亮已完成（ROPLL 锁定）。
+第二周（约 07-11 至 07-16）清空 perf 待办事项。软件事件、HW\_CACHE、真实 tid、PERF\_RECORD\_LOST、事件分组与 PERF\_SAMPLE\_READ 分列于 PR \#1601/\#1602/\#1603，DWARF 回溯与 kprobe/tracepoint 在 QEMU 上验证通过。TTFI 由提交版本的 \nTtfiBefore{} s 降至 \nTtfi s（同机 Linux 为 \nTtfiLin s），并经开发板确认。仿真与板级侧完成的 QEMU RK3588 RKNPU 功能模拟合并（\texttt{processmission/qemu} \#19），附带 106 项 qtest，提供板外的 RKNN 开发与模型优化基准。原生显示栈 VOP2、HDMI-QP 与 HDPTX 同周启动，主机测试通过，板级点亮已完成（ROPLL 锁定）。
 
 第三周（约 07-14 至 07-22）建立 sysbench 度量与基线分解，将 StarryOS 落后 Linux 的约 24 至 33 倍差距拆解为 DVFS、A55 至 A76、SMP 分布三个可攻克的因子。RK3588 cpufreq 的 ondemand 治理与 PMIC 电压标定并入 PR \#1657 已合并，axtask 在 spawn 与 wake 处实现 SMP 分布并入 PR \#1656 在审，cpu 八线程吞吐由约 \nLadderBase 提升至 \nLadderA。前向移植的工作窃取负载均衡器在开发板 A/B 测试中呈无收益，因空闲拉取抖动而回退，收益集中于放置一侧，运行期迁移引入额外干扰。
 
@@ -15,8 +15,8 @@
 
 第五周（约 07-28 至 08-05）落地占用感知调度器，fork 与 wake 对齐 Linux CFS，占用改为单一原子量，按 tick 在锁下经 nr\_running 自愈，唤醒采用 select\_idle\_sibling 风格。\texttt{/proc/stat} 补充每核 BUSY\_TICKS 的真实计账，修正多线程聚簇导致的误读。THP 的 2 MB 私有匿名首触将内存 first-touch 由约 0.26 降至 \nThpFT s，相较同机 Linux 的 \nThpFTLin s 领先 \nThpRatio 倍。DDR/DMC 变频驱动已实现，但受固件所限，板上运行的主线 TF-A 缺少 SIP DRAM 接口；多线程写带宽经放置铺开回升至 \nMemBWWriteRatio 倍，单流 memcpy 仍约 \nMemBWMemcpyRatio 倍。仿真与板级侧的板级 I/O 驱动，包括 UART、USB-serial tty、PWM sysfs、reboot 系统调用与 UVC 相机生命周期，本周批量合并。
 
-第六周（约 08-05 至 08-10）攻克唤醒延迟与系统调用开销。wake\_affine 配合 GIC-SGI-WFI 根因分析与 poll-idle 将唤醒延迟压至 \nWake $\mu$s（同机 Linux 为 \nWakeLin），接近对等。CLONE\_VM 的 access\_ok 用户拷贝快路径在线程路径上开发板实测达 \nHackT 倍。系统调用入口成本沿 ptrace、poll\_process\_timer、tickacct 与无锁 timer\_state 逐层削减，getpid 由 1200 降至 \nGetpid ns，相较 Linux 由约 7 倍收窄至 \nGetpidRatio 倍。sysbench 的最终计分卡落于 PR \#1658，cpu 八线程 \nCpuTEight 对 Linux \nCpuTEightLin，比值 \nCpuTEightRatio 判定为持平。
+第六周（约 08-05 至 08-10）攻克唤醒延迟与系统调用开销。wake\_affine 配合 GIC-SGI-WFI 根因分析与 poll-idle 将唤醒延迟压至 \nWake $\mu$s（同机 Linux 为 \nWakeLin），接近对等。CLONE\_VM 的 access\_ok 用户拷贝快路径在线程路径上开发板实测达 \nHackT 倍。系统调用入口成本沿 ptrace、poll\_process\_timer、tickacct 与无锁 timer\_state 逐层削减，getpid 由 \nGetpidBefore{} 降至 \nGetpid ns，相较 Linux 由约 7 倍收窄至 \nGetpidRatio 倍。sysbench 的最终计分卡落于 PR \#1658，cpu 八线程 \nCpuTEight 对 Linux \nCpuTEightLin，比值 \nCpuTEightRatio 判定为持平。
 
 第七周（约 08-09 至 08-11）进行独立 PR 拆分与内核正确性专项工作。SD 卡本地加载的开发板 harness 将单次刷入由串口 ymodem 的约 90 s 缩短至约 1 s，profiling 循环因此加速。多架构页表中的一类 UAF 得到定位，未建立映射的大块被误判为页表而释放了一个 COW 数据帧，经 GenericPTE::is\_table() 修正；同期修复 aarch64 缺失 dsb ishst 与本地 vmalle1 误用非广播两处潜伏的 SMP 顺序 bug。cpufreq 电压安全经 26 组对抗式审计完成 fail-closed 加固。约 31 项改动已实现并按同一原则拆分为独立 PR 提交，正确性细节见对应章节。
 
-一个月内落地并验证的工作包括硬件 PMU perf 从单核到多核再到大小核、QEMU RKNPU 功能模拟、axtask SMP 分布、CPU DVFS 与 PVTPLL 电压调节、占用感知的 CFS 对等调度器、THP 首触、CLONE\_VM 快路径、系统调用成本下降与 TTFI 领先。原生显示栈主机测试通过，板级点亮已在上板会话中通过（ROPLL 锁定）。另有三项经板级验证在当前平台未见收益、已回退，各有其因：工作窃取负载均衡器因迁移抖动回退，early-MMU 启动重排在低频启动窗口无增益，DDR/DMC 变频受主线固件限制；后者是多线程写带宽这一项差距的根因。
+一个半月内落地并验证的工作包括硬件 PMU perf 从单核到多核再到大小核、QEMU RKNPU 功能模拟、axtask SMP 分布、CPU DVFS 与 PVTPLL 电压调节、占用感知的 CFS 对等调度器、THP 首触、CLONE\_VM 快路径、系统调用成本下降与 TTFI 领先。原生显示栈主机测试通过，板级点亮已在上板会话中通过（ROPLL 锁定）。另有三项经板级验证在当前平台未见收益、已回退，各有其因：工作窃取负载均衡器因迁移抖动回退，early-MMU 启动重排在低频启动窗口无增益，DDR/DMC 变频受主线固件限制；后者是多线程写带宽这一项差距的根因。

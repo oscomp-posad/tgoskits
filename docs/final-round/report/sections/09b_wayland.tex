@@ -1,13 +1,13 @@
 % 09b_wayland
 \section{图形合成器栈：Weston 于 StarryOS}
 
-Wayland 是取代 X 窗口系统的显示服务器协议，其中的合成器是介于内核与各图形应用之间、独占显示硬件的进程：它从各客户端收集绘制好的窗口缓冲，叠合为一帧整屏画面交给显示设备，同时把键盘、鼠标与触摸输入分发回对应窗口。让一个完整的合成器在一套新内核上启动并接入真实客户端，等于一次性把 Linux 图形与进程间通信栈的一大片纳入内核的支撑范围：它对内核的要求横跨显示输出、输入设备发现、套接字传递文件描述符与事件循环四个彼此独立的子系统，任一处不合规整套界面即无法立起。StarryOS 此前不具备承载这类合成器所需的内核接口，图形应用因而无从运行。现已\ours{在 StarryOS 上完整启用 Weston 14 图形合成器}，Weston 是 Wayland 的参考实现，它以 DRM 加 pixman 软件后端启动、接受客户端连接、经 GTK4 客户端与 VNC 呈现界面，并在四种体系结构上通过自动化判定。本节先结合图~\ref{fig:wayland} 说明合成器压在内核上的四个子系统及其机制，再说明逐层的内核启用与修复，最后给出验证。
+Wayland 是取代 X 窗口系统的显示服务器协议，其中的合成器是介于内核与各图形应用之间、独占显示硬件的进程：它从各客户端收集绘制好的窗口缓冲，叠合为一帧整屏画面交给显示设备，同时把键盘、鼠标与触摸输入分发回对应窗口。让一个完整的合成器在一套新内核上启动并接入真实客户端，等于一次性把 Linux 图形与进程间通信栈的一大部分纳入内核的支撑范围：它对内核的要求横跨显示输出、输入设备发现、套接字传递文件描述符与事件循环四个彼此独立的子系统，任一处不合规整套界面即无法正常运行。StarryOS 此前不具备承载这类合成器所需的内核接口，图形应用因而无从运行。现已\ours{在 StarryOS 上完整启用 Weston 14 图形合成器}，Weston 是 Wayland 的参考实现，它以 DRM 加 pixman 软件后端启动、接受客户端连接、经 GTK4 与 Xwayland（xeyes）客户端呈现界面并支持 VNC 远程查看，并在四种体系结构上通过自动化判定。本节先结合图~\ref{fig:wayland} 说明支撑合成器的四个内核子系统及其机制，再说明逐层的内核启用与修复，最后给出验证。
 
 \figphl{../figures/out/Fwayland.png}{Weston 于 StarryOS：客户端经 \texttt{AF\_UNIX} 套接字连入并提交窗口缓冲，输入沿 libinput 与 libudev 自 sysfs 与 evdev 发现，DRM/KMS 承载扫描输出，整套事件经 \texttt{epoll} 与 \texttt{timerfd} 汇聚轮转}{fig:wayland}
 
-\subsection{合成器压在内核上的四个子系统}
+\subsection{支撑合成器的四个内核子系统}
 
-Weston 的四个子系统各自对应一组内核接口，以下逐一说明其机制。
+这四个子系统各自对应一组内核接口，以下逐一说明其机制。
 
 \paragraph{显示输出 DRM/KMS}
 显示后端 \texttt{drm-backend} 经 libdrm 操作 \texttt{/dev/dri/card0}。它要协商设备能力、枚举 KMS（内核态显示模式设置）资源、分配显示缓冲，并以原子方式提交一次模式设置与翻页。模式设置须兼容传统的 \texttt{SETCRTC} 路径与原子化的 KMS 两种语义，承载像素的显示缓冲则由 GEM dumb 缓冲提供，合成器把叠合好的整屏画面写入这块缓冲后交由显示控制器扫出。
@@ -25,9 +25,9 @@ Weston 的四个子系统各自对应一组内核接口，以下逐一说明其�
 
 此次适配遇到的问题落在三个深浅不同的层次，内核改动据此逐层推进。最浅的一层是接口不存在，打开即以明确错误码回绝。系统内核侧补上了 \texttt{/dev/dri/card0} 节点，兼容 \texttt{SETCRTC} 与原子 KMS 两条模式设置路径（\href{https://github.com/rcore-os/tgoskits/pull/506}{\#506}），并以按缓冲粒度分配的 GEM dumb 缓冲与带引用计数的 mmap 承载像素（\href{https://github.com/rcore-os/tgoskits/pull/514}{\#514}）；输入侧如实暴露多个 \texttt{eventN} 设备并实现 \texttt{EVIOCGPROP} 与 \texttt{EVIOCGABS}（\href{https://github.com/rcore-os/tgoskits/pull/513}{\#513}），设备发现所依赖的 \texttt{AF\_NETLINK} 上 rtnetlink、uevent 与 genl 几路也一并补全（\href{https://github.com/rcore-os/tgoskits/pull/512}{\#512}），以上均已合并。
 
-第二层是接口看似齐备、编译与打开均成功而行为错误且不报任何错。sysfs 的 \texttt{/sys/\allowbreak class/\allowbreak input/} 须是指向真实设备路径的符号链接，libudev 靠 \texttt{realpath()} 与 \texttt{dirname()} 沿链接回溯，若做成普通目录回溯即中途断掉；\texttt{/dev/\allowbreak input/\allowbreak eventN} 的次设备号须从 \texttt{EVDEV\_MINOR\_BASE}（64）起编，若从 1 起编，libinput 以 \texttt{fstat()} 的 \texttt{st\_rdev} 反查 \texttt{/sys/\allowbreak dev/\allowbreak char/} 便对不上号。\ours{这些隐式约定集中在一处修订内补齐}：sysfs 类目录改为符号链接、evdev 次设备号改从 64 起编、并预先在 \texttt{/run/udev} 下播下 udev 的初始化种子文件，libudev 方肯认定设备已配置（\href{https://github.com/rcore-os/tgoskits/pull/508}{\#508}，已合并）。memfd 的密封检查被分布到截断、映射与写入各条路径，缺一处密封即形同虚设（\href{https://github.com/rcore-os/tgoskits/pull/507}{\#507} 与 \href{https://github.com/rcore-os/tgoskits/pull/515}{\#515}，已合并）。Weston 的整体启动收尾、把输入接到中断唤醒以压下延迟、以及让 \texttt{AF\_UNIX} 流式套接字按字节标记原子地携带控制消息送达文件描述符，同在一处合并完成（\href{https://github.com/rcore-os/tgoskits/pull/509}{\#509}，已合并）。这一层的失败是沉默的，libinput 只报一句跳过未配置的输入设备，要查出真因须回头去读用户态库的源码。
+第二层是接口看似齐备、编译与打开均成功而行为错误且不报任何错。sysfs 的 \texttt{/sys/\allowbreak class/\allowbreak input/} 须是指向真实设备路径的符号链接，libudev 靠 \texttt{realpath()} 与 \texttt{dirname()} 沿链接回溯，若做成普通目录回溯即中途断掉；\texttt{/dev/\allowbreak input/\allowbreak eventN} 的次设备号须从 \texttt{EVDEV\_MINOR\_BASE}（64）起编，若从 1 起编，libinput 以 \texttt{fstat()} 的 \texttt{st\_rdev} 反查 \texttt{/sys/\allowbreak dev/\allowbreak char/} 便对不上号。\ours{这些隐式约定集中在一处修订内补齐}：sysfs 类目录改为符号链接、evdev 次设备号改从 64 起编、并预先在 \texttt{/run/udev} 下写入 udev 的初始化种子文件，libudev 方肯认定设备已配置（\href{https://github.com/rcore-os/tgoskits/pull/508}{\#508}，已合并）。memfd 的密封检查被分布到截断、映射与写入各条路径，缺一处密封即形同虚设（\href{https://github.com/rcore-os/tgoskits/pull/507}{\#507} 与 \href{https://github.com/rcore-os/tgoskits/pull/515}{\#515}，已合并）。Weston 的整体启动收尾、把输入接到中断唤醒以降低延迟、以及让 \texttt{AF\_UNIX} 流式套接字按字节标记原子地携带控制消息送达文件描述符，同在一处合并完成（\href{https://github.com/rcore-os/tgoskits/pull/509}{\#509}，已合并）。这一层的失败是沉默的，libinput 只报一句跳过未配置的输入设备，要查出真因须转而阅读用户态库的源码。
 
-最深的一层是并发与性能，它不挡启动却使界面难以使用。\texttt{epoll} 的水平触发注册无条件唤醒等待方，造出每秒约 500 次的空转忙循环；输入若退回内核节拍驱动会带来约 16 毫秒的输入延迟，在单核上还叠加中断上下文中的锁争用。系统内核侧把 \texttt{epoll} 的水平触发改为如实排干就绪事件，收敛了那条 500 赫兹的空转（\href{https://github.com/rcore-os/tgoskits/pull/504}{\#504}），并补上 \texttt{timerfd} 这一计时事件源（\href{https://github.com/rcore-os/tgoskits/pull/503}{\#503}），二者均已合并。输入延迟已由中断唤醒压下（\href{https://github.com/rcore-os/tgoskits/pull/509}{\#509}），单核上中断上下文中的锁争用仍是有待优化的残留限制。
+最深的一层是并发与性能，它不挡启动却使界面难以使用。\texttt{epoll} 的水平触发注册无条件唤醒等待方，产生每秒约 500 次的空转忙循环；输入若退回内核节拍驱动会带来约 16 毫秒的输入延迟，在单核上还叠加中断上下文中的锁争用。系统内核侧把 \texttt{epoll} 的水平触发改为如实排干就绪事件，收敛了那条 500 赫兹的空转（\href{https://github.com/rcore-os/tgoskits/pull/504}{\#504}），并补上 \texttt{timerfd} 这一计时事件源（\href{https://github.com/rcore-os/tgoskits/pull/503}{\#503}），二者均已合并。输入延迟已由中断唤醒降低（\href{https://github.com/rcore-os/tgoskits/pull/509}{\#509}），单核上中断上下文中的锁争用仍是有待优化的残留限制。
 
 \subsection{验证}
 

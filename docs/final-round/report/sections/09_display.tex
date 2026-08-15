@@ -1,7 +1,7 @@
 % 09_display
 \section{原生显示栈 VOP2 / HDMI-QP / HDPTX}
 
-显示栈是从内存中的一帧像素到点亮一台物理显示器的整条驱动通路：一段帧缓冲经显示控制器按视频时序扫出、经发送器打包为传输协议、经物理层串化为差分信号，最终在连接器上驱动屏幕。StarryOS 在 OrangePi-5-Plus 上此前没有通向真实 HDMI 帧缓冲的路径。现有的 \texttt{card0}（starry-simpledrm）只是叠加在 \texttt{axdisplay} 之上的 KMS 前端，真正经 \texttt{rdif-display} 注册一块真实帧缓冲的后端仅有 virtio-gpu；因此在板端 \texttt{has\_display()} 返回 false，\texttt{/dev/fb0} 并不存在，任何依赖标准帧缓冲的图形程序都无从运行。现已\ours{从零实现一套 \texttt{\#![no\_std]} 的 RK3588 显示驱动栈}，覆盖 VOP2 显示控制器、HDMI-QP 发送器与 HDPTX 组合 PHY，目标是使一份标准的 Qt6 QtWidgets 指针时钟经 \texttt{/dev/fb0} 显示于物理显示器。此项工作属于驱动开发，其证据为 QEMU 渲染通过、主机寄存器级测试计数与逐字核对主线的寄存器数值，硬件点亮的时序已写就并推导完毕，并已在 RK3588 上点亮验证通过（HDPTX ROPLL 锁定）。本节先深入说明这条通路的四段链路及每一段的内部机制，再区分既有与新增，最后给出主机与板级的验证结果。
+显示栈是从内存中的一帧像素到点亮一台物理显示器的整条驱动通路：一段帧缓冲经显示控制器按视频时序扫出、经发送器打包为传输协议、经物理层串化为差分信号，最终在连接器上驱动屏幕。StarryOS 在 OrangePi-5-Plus 上此前没有通向真实 HDMI 帧缓冲的路径。现有的 \texttt{card0}（starry-simpledrm）只是叠加在 \texttt{axdisplay} 之上的 KMS 前端，真正经 \texttt{rdif-display} 注册一块真实帧缓冲的后端仅有 virtio-gpu；因此在板端 \texttt{has\_display()} 返回 false，\texttt{/dev/fb0} 并不存在，任何依赖标准帧缓冲的图形程序都无从运行。现已\ours{从零实现一套 \texttt{\#![no\_std]} 的 RK3588 显示驱动栈}，覆盖 VOP2 显示控制器、HDMI-QP 发送器与 HDPTX 组合 PHY，目标是使一份标准的 Qt6 QtWidgets 指针时钟经 \texttt{/dev/fb0} 显示于物理显示器。此项工作属于驱动开发，其证据为 QEMU 渲染通过、主机寄存器级测试计数与逐字核对主线的寄存器数值，并已在 RK3588 上点亮验证通过（HDPTX ROPLL 锁定）。本节先深入说明这条通路的四段链路及每一段的内部机制，再区分既有与新增，最后给出主机与板级的验证结果。
 
 \figphl{../figures/out/Fdisplay.png}{RK3588 四级显示链路：VOP2 输出显示时序，HDMI-QP 打包，HDPTX PHY 串化为 TMDS；148.5 MHz 像素时钟由 HDPTX 的 ROPLL 产生，该 ROPLL 像素时钟已在 RK3588 上板锁定验证通过}{fig:disp}
 

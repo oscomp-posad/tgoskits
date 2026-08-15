@@ -1,0 +1,54 @@
+% 19_compat: 面向真实负载的 Linux 兼容性
+\section{面向真实负载的 Linux 兼容性}
+
+性能对等衡量的是同一份负载在两侧运行的快慢，兼容性衡量的则是一份未经改动的 Linux 软件能否在 StarryOS 上原样运行。要让 PostgreSQL 关系数据库这类未经改动的上游软件正常运行，内核须系统性补齐 Linux 兼容的进程凭证、进程间通信、网络与文件系统语义，以及一批系统调用的边界行为（Weston 图形合成器所需的内核支撑另见图形合成器一节）。这类工作单独看多为一处语义修正，合起来则决定操作系统能否承载现实中的应用；其中相当一部分源于让 PostgreSQL 完成初始化、建库与事务这一目标。本节依次呈现进程凭证、进程间通信的并发正确性、网络协议族、文件系统语义与系统调用语义补齐五个方面，最后以 PostgreSQL 的十四阶段端到端验证收束。
+
+\subsection{进程凭证子系统}
+
+进程凭证记录一个进程的真实、有效、保存与文件系统身份及其补充组，是文件权限、信号投递与进程间通信权限判定的共同依据。StarryOS 此前的相关接口一律硬编码返回零，权限检查形同虚设，依赖 \texttt{chown}、\texttt{chmod} 与信号权限的应用无从正确运行。本队为此新增了统一的 \texttt{Cred} 结构，涵盖真实、有效、保存与文件系统四类用户号与组号及补充组列表，将其挂载到线程结构并随 \texttt{fork} 与 \texttt{clone} 继承，在此之上实现了 \texttt{getuid}、\texttt{setresuid}、\texttt{setreuid}、\texttt{getgroups} 等一整套凭证系统调用。真实凭证值随后接入各权限判定点：\texttt{faccessat2}、\texttt{fchmodat}、\texttt{fchownat} 的文件权限检查，\texttt{openat} 的属主标记，消息队列与共享内存的权限字段，\texttt{kill}、\texttt{tkill} 与 \texttt{tgkill} 的发送权限检查，以及 \texttt{/proc/<pid>/status} 的凭证输出。至此凭证成为可修改、可继承的完整体系，权限按属主、组、其他三类并结合能力位判定，依赖凭证语义的真实应用得以正确运行（\href{https://github.com/rcore-os/tgoskits/pull/246}{\#246}，已合并）。
+
+\subsection{进程间通信的并发正确性}
+
+进程间通信子系统在多核下的正确性由两处工作保障，一处消除死锁，一处消除串行瓶颈。
+
+\paragraph{System V 共享内存的死锁与生命周期}
+共享内存的创建与挂接分别沿不同顺序获取 \texttt{SHM\_MANAGER}、共享内存内部表与地址空间三把锁，在并发下构成 AB/BA 环形等待。本队将三把锁在全部路径上的获取顺序统一为同一方向，并对分离与进程退出清理改用分阶段加锁，使 SMP=4 压力测试由二十次中十九次死锁超时改善至连续三十五次全部通过。同一改动还修复了另外三处缺陷：进程退出时地址空间映射未解除所致的释放后使用；\texttt{IPC\_RMID} 的段销毁时机，改为仅在附加计数归零时销毁；以及以内核断言处理错误输入所留下的、可由用户态触发的崩溃。至此整体行为与 Linux 的 IPC 子系统一致（\href{https://github.com/rcore-os/tgoskits/pull/226}{\#226}，已合并）。
+
+\paragraph{每进程 futex 表的分片化}
+futex 是用户态锁在无竞争时留在用户态、发生竞争时才陷入内核排队的基础设施，多线程负载在其上频繁等待与唤醒。StarryOS 原本以单锁单表承载一个进程的全部 futex，成为 schbench 与 sysbench mutex 等负载的串行竞争点。该表按 futex 字地址划分为六十四个各自加锁的分片，使不同地址的等待与唤醒落入不同分片并行处理，同一地址则恒定映射同一分片。配套将等待队列的空判定由线性扫描改为常数时间操作，分片守卫析构时据此从对应分片安全摘除等待项。现有 futex 唤醒测试在四核配置下全部保持通过，确认不丢唤醒（\href{https://github.com/rcore-os/tgoskits/pull/1997}{\#1997}，已合并）。
+
+\subsection{网络协议族的扩展与修复}
+
+\paragraph{AF\_NETLINK 平台}
+netlink 是 Linux 内核与用户态工具之间配置网络、枚举设备的主通道，\texttt{iproute2}、\texttt{libnl} 与 \texttt{libudev} 均依赖它工作。StarryOS 原本仅支持 \texttt{KOBJECT\_UEVENT} 一条通路，本队将其扩展为完整可用的 netlink 平台。首先开放 \texttt{NETLINK\_ROUTE}、\texttt{NETLINK\_GENERIC} 协议号与数据报套接字类型，为每个套接字建立独立接收队列与 poll 唤醒，并提供内核侧广播入口。随后在 rtnetlink 路径上解析消息头，对链路与地址查询合成符合 Linux uapi 结构的多段应答，支持按接口名或索引查询以及 IPv4 地址的增删，并在底层 ax-net 中补齐运行时的静态地址配置。由此上述用户态组件的探测路径得以正常工作，可经 \texttt{ip} 命令查询与配置网口，并在 Orange Pi 5 Plus 上完成板端验证（\href{https://github.com/rcore-os/tgoskits/pull/512}{\#512} 与 \href{https://github.com/rcore-os/tgoskits/pull/1497}{\#1497}，均已合并）。
+
+\paragraph{AF\_UNIX 套接字语义}
+本地套接字的三处缺陷各自阻断一类真实场景。流式套接字在对端写端关闭且缓冲区读空后应返回文件结束，此前误返回暂时不可用错误，使调用方永久阻塞；pathname 套接字 \texttt{bind} 后创建的套接字文件属主被固定为 root，改动后按调用线程的有效用户与组标识设置属主，使以非特权用户运行的 PostgreSQL 得以正常设置权限；数据报套接字 \texttt{connect} 在持有自旋锁期间获取可睡眠互斥锁触发原子上下文崩溃，经调整加锁顺序消除。三项修复均配有回归测试（\href{https://github.com/rcore-os/tgoskits/pull/311}{\#311}、\href{https://github.com/rcore-os/tgoskits/pull/313}{\#313} 与 \href{https://github.com/rcore-os/tgoskits/pull/1963}{\#1963}，均已合并）。
+
+\subsection{文件系统语义的正确性}
+
+\paragraph{GPT 分区识别}
+本队为块设备层引入 GPT 分区识别，在块驱动抽象中新增分区表解析与分区级设备封装，使文件系统层能以单个分区为单位挂载与访问，并在启动阶段自动选择根设备所在分区。由此内核可正确处理采用 GPT 布局的磁盘介质，按分区读取 ext4 与 FAT 文件系统（\href{https://github.com/rcore-os/tgoskits/pull/179}{\#179}，已合并）。
+
+\paragraph{属主传递与 rename 内容保持}
+两处正确性缺陷各自影响真实应用。其一，文件创建路径此前未传递调用者身份，导致所有新建文件与目录一律归属 root；本队将有效用户与组标识贯穿创建接口及各文件系统后端与相关系统调用，使新建对象按创建者属主持久化，满足 PostgreSQL 初始化对属主的检查。其二，\texttt{tmpfs} 上的重命名在底层成功后会遗漏对源目录项的清理，使其通过引用计数持有的页缓存被释放，导致重命名后的目标文件读出全零；改为将源目录项直接迁移到目标目录缓存以延续其页缓存，使写入内容在重命名前后完整保留，修复了 \texttt{pg\_control} 等关键元数据被读零而拒绝启动的问题。两项修复均附逐字节比对或跨身份切换的回归测试并覆盖多种体系结构（\href{https://github.com/rcore-os/tgoskits/pull/312}{\#312} 与 \href{https://github.com/rcore-os/tgoskits/pull/1097}{\#1097}，均已合并）。
+
+\subsection{系统调用语义补齐}
+
+除上述子系统外，一批系统调用的语义此前或为占位、或与 Linux 存在偏差，本队逐一予以补齐。
+
+\paragraph{SA\_RESTART 自动重启}
+阻塞系统调用被信号中断后，若处理函数设置了 \texttt{SA\_RESTART}，Linux 会透明地重启该调用。本队在信号处理路径中识别被中断且返回 \texttt{EINTR} 的调用，回退程序计数器一条指令长度并恢复原始首参数以重启调用；实现中妥善处理了多种体系结构上首参数与返回值共用同一寄存器的难点。该修复填补了此前一律返回 \texttt{EINTR} 的语义空白，使 \texttt{read}、\texttt{accept} 等调用不再被信号意外打断（\href{https://github.com/rcore-os/tgoskits/pull/247}{\#247}，已合并）。
+
+\paragraph{timerfd 定时器文件描述符}
+定时器文件描述符此前为无法触发的占位实现。本队为每个 \texttt{timerfd} 建立常驻后台任务以推进到期并递增到期计数，采用先注册 waker 再复检状态的无丢失唤醒模式以避免设置与等待之间的竞态，支持一次性与周期触发、错过滴答合并以及多种时钟（\href{https://github.com/rcore-os/tgoskits/pull/503}{\#503}，已合并）。
+
+\paragraph{epoll 触发正确性}
+epoll 的三处缺陷各自导致一类事件错误。放宽 \texttt{epoll\_pwait} 的信号集大小校验以兼容 musl 的十六字节 \texttt{sigset\_t}；在关注项被 \texttt{EPOLL\_CTL\_MOD} 修改后将新句柄重新入就绪队列，以避免首条事件被丢弃；在水平触发模式下确保就绪队列每项仅消费一次，以消除重复事件。三者共同使 epoll 在真实事件循环与数据库负载下符合 Linux 语义（\href{https://github.com/rcore-os/tgoskits/pull/250}{\#250}、\href{https://github.com/rcore-os/tgoskits/pull/314}{\#314} 与 \href{https://github.com/rcore-os/tgoskits/pull/504}{\#504}，均已合并）。
+
+\paragraph{mremap 与其余语义修正}
+\texttt{sys\_mremap} 经重写以兼容 Linux 语义，涵盖非法标志拒绝、\texttt{MREMAP\_MAYMOVE}、\texttt{FIXED} 与 \texttt{DONTUNMAP} 处理、末尾有空闲空间时的原地扩展，以及以搬迁页表项的方式完成映射移动而不复制底层数据，任一步失败均清理已建立的目标映射以避免泄漏（\href{https://github.com/rcore-os/tgoskits/pull/205}{\#205}，已合并）。此外，\texttt{PR\_SET\_PDEATHSIG} 使子进程在父进程退出时收到指定信号，修复了后台工作进程残留为孤儿的资源泄漏（\href{https://github.com/rcore-os/tgoskits/pull/249}{\#249}）；致命用户态信号增加了按体系结构的寄存器现场转储，将崩溃时仅有的一行提示扩展为完整现场（\href{https://github.com/rcore-os/tgoskits/pull/505}{\#505}）；\texttt{fsync} 与 \texttt{fdatasync} 对目录描述符按 Linux 语义返回成功并新增 \texttt{sync\_file\_range}（\href{https://github.com/rcore-os/tgoskits/pull/251}{\#251}）；\texttt{prlimit64} 改为如实写入提高后的硬限制（\href{https://github.com/rcore-os/tgoskits/pull/319}{\#319}）；\texttt{RLIMIT\_STACK} 默认值对齐 Linux 的 8\,MiB（\href{https://github.com/rcore-os/tgoskits/pull/248}{\#248}）；以上五项均已合并。一组针对 \texttt{pwritev}、\texttt{sigaltstack}、\texttt{getgroups}、\texttt{clock\_gettime}、\texttt{ftruncate}、\texttt{getrandom} 与 \texttt{copy\_file\_range} 的边界与参数校验修正逐项对齐了 Linux 行为，并以外部的 linux-compatible-testsuit 用例守护（\href{https://github.com/rcore-os/tgoskits/pull/197}{\#197}、\href{https://github.com/rcore-os/tgoskits/pull/207}{\#207}、\href{https://github.com/rcore-os/tgoskits/pull/208}{\#208}、\href{https://github.com/rcore-os/tgoskits/pull/209}{\#209}、\href{https://github.com/rcore-os/tgoskits/pull/210}{\#210} 与 \href{https://github.com/rcore-os/tgoskits/pull/211}{\#211}，均已合并）。
+
+\subsection{PostgreSQL 端到端验证}
+
+上述兼容性工作以在 StarryOS 上完整运行 PostgreSQL 作为验证。本队移植 PostgreSQL 17 并配以十四阶段冒烟测试，以非特权用户完成集群初始化、服务启动、建库建表、增删改查、聚合、连接、事务回滚、批量插入与完整性校验，并提供四种体系结构的运行配置。该用例端到端地覆盖了文件系统、网络与系统调用链路，\keyres{在 riscv64 的 QEMU 下十四个阶段全部通过}（\href{https://github.com/rcore-os/tgoskits/pull/1111}{\#1111}，已合并）。一个未经改动的关系数据库能够在 StarryOS 上完成从初始化到事务的完整流程，反过来印证了本节各处兼容性修正的必要与正确。

@@ -1,9 +1,9 @@
 % 08_ttfi
 \section{启动与首帧推理 TTFI}
 
-首帧推理时延（TTFI）是网球机器人上电后实际感受到的等待：从 U-Boot 打印 \texttt{Starting kernel} 交出控制起，到 live 模式下首帧 RKNN 推理完成为止。它跨越内核早期初始化、副核启动、设备探测、init 抵达应用、模型加载与相机启动五段，任何一段的串行等待都直接累加到用户可感的延迟上，因而是一项对整条启动链高度敏感的端到端指标。此前 StarryOS 在该指标上落后 Linux，同机同负载下内核到首帧为 19.22 s，Linux 中位数为 \nTtfiLin s，慢约 1.7 倍。现已将 TTFI 降至 \keyres{\nTtfi s，领先 Linux 约 1.45 s}。这与 THP first-touch 内存（快 \nThpRatio 倍，见内存一节）同为幅度较大的领先；连同单核 A55 与 schbench 唤醒吞吐的领先，构成 StarryOS 在 RK3588 上对 Linux 取得领先的几处方向，其余方向多为持平。本节先说明 TTFI 的度量口径与启动链各段的机制，再按段说明既有行为与我们的改动，最后给出真机结果与诚实边界。
+首帧推理时延（TTFI）是网球机器人上电后实际感受到的等待：从 U-Boot 打印 \texttt{Starting kernel} 交出控制起，到 live 模式下首帧 RKNN 推理完成为止。它跨越内核早期初始化、副核启动、设备探测、init 抵达应用、模型加载与相机启动五段，任何一段的串行等待都直接累加到用户可感的延迟上，因而是一项对整条启动链高度敏感的端到端指标。此前 StarryOS 在该指标上落后 Linux，同机同负载下内核到首帧为 \nTtfiBefore{} s，Linux 中位数为 \nTtfiLin s，慢约 1.7 倍。现已将 TTFI 降至 \keyres{\nTtfi s，领先 Linux 约 1.45 s}。这与 THP first-touch 内存（快 \nThpRatio 倍，见内存一节）同为幅度较大的领先；连同单核 A55 与 schbench 唤醒吞吐的领先，构成 StarryOS 在 RK3588 上对 Linux 取得领先的几处方向，其余方向多为持平。本节先说明 TTFI 的度量口径与启动链各段的机制，再按段说明既有行为与我们的改动，最后给出真机结果与诚实边界。
 
-\figphl{../figures/out/Fttfi.png}{TTFI 启动链的分段：从 U-Boot 交接到 live 首帧 RKNN 推理，本队改动的段与消除的两处主要开销以青色标出}{fig:ttfi-arch}
+\figphl{../figures/out/Fttfi.png}{TTFI 启动链的分段：从 U-Boot 交接到 live 首帧 RKNN 推理，本队改动的段以青色标出，消除的两处主要开销以橙色标注}{fig:ttfi-arch}
 
 图~\ref{fig:ttfi-arch} 给出这条启动链的分段与各段耗时。度量以内核交接为零点，以应用打出 \texttt{TENNIS\_FIRST\_INFERENCE} 为终点，由主机在 1.5 Mbaud 串口上加时间戳采得；两侧运行同一份 glibc 网球二进制，模型为 ReLU 480$\times$640，推理亲和固定于大核 \texttt{4-7}。
 
@@ -19,11 +19,11 @@
 
 再往后是模型初始化。\texttt{rknn\_init} 建立 NPU 上下文并加载权重，其内部由 librknnrt 的数百次顺序生产者消费者线程握手串联，每次握手都是一对协同线程间的交接。
 
-最后是相机启动与首帧推理。UVC 相机送出 MJPEG 帧，经 JPU 解码、RGA 预处理、NPU 推理的零拷贝流水线得出首个检测结果。19.22 s 与 \nTtfiLin s 之间的差距即分解为设备探测段的串行等待、模型初始化段在相机负载下的饥饿，以及一段与 Linux 等量的应用冷启动。
+最后是相机启动与首帧推理。UVC 相机送出 MJPEG 帧，经 JPU 解码、RGA 预处理、NPU 推理的零拷贝流水线得出首个检测结果。\nTtfiBefore{} s 与 \nTtfiLin s 之间的差距即分解为设备探测段的串行等待、模型初始化段在相机负载下的饥饿，以及一段与 Linux 等量的应用冷启动。
 
-\subsection{基线的构成：19.22 s 的分解}
+\subsection{基线的构成：\nTtfiBefore{} s 的分解}
 
-提交版本的 TTFI 为 19.19 至 19.23 s，稳定在 19.22 s 附近，而 Linux 从 10.09、11.15、11.42 到约 12.43 s，中位数为 \nTtfiLin s。二者约 8 s 的差距由两处可修复的内核开销加一段与 Linux 等量的应用冷启动构成。第一处是四个空 PCIe 槽的串行链路探测：控制器 \texttt{fe150000}、\texttt{fe170000}、\texttt{fe180000}、\texttt{fe190000} 均报 \texttt{link down LTSSM=0x3}，每个空槽把链路训练等到超时，四者串行约 5.6 s。第二处是块设备完成中断的退化：写完成中断在 2 s 内未触发后退回轮询，约 2.1 s，其成因是提交分支尚未包含 dwmmc 的 \texttt{wait\_card\_not\_busy} 修复。这两处均落在内核侧，是 StarryOS 独有的开销；其余部分为两侧共有的应用冷启动。
+提交版本的 TTFI 为 19.19 至 19.23 s，稳定在 \nTtfiBefore{} s 附近，而 Linux 从 10.09、11.15、11.42 到约 12.43 s，中位数为 \nTtfiLin s。二者约 8 s 的差距由两处可修复的内核开销加一段与 Linux 等量的应用冷启动构成。第一处是四个空 PCIe 槽的串行链路探测：控制器 \texttt{fe150000}、\texttt{fe170000}、\texttt{fe180000}、\texttt{fe190000} 均报 \texttt{link down LTSSM=0x3}，每个空槽把链路训练等到超时，四者串行约 5.6 s。第二处是块设备完成中断的退化：写完成中断在 2 s 内未触发后退回轮询，约 2.1 s，其成因是提交分支尚未包含 dwmmc 的 \texttt{wait\_card\_not\_busy} 修复。这两处均落在内核侧，是 StarryOS 独有的开销；其余部分为两侧共有的应用冷启动。
 
 \subsection{相机初始化在流负载下的 32 s 停滞}
 
@@ -33,18 +33,18 @@
 按调用计时，全部 32 s 落在设备 \texttt{ioctl} 处理内，该路径被调用 32719 次（\texttt{f.ioctl} 分派累计 38002 ms，而文件描述符解析仅 33 ms）。按阶段打点，约 30 s 全部落在 \texttt{init\_yolov8\_model}（即 \texttt{rknn\_init}）内，RGA 与 JPU 建立仅 0.3 s。决定性的一组对照是：同一模型初始化在 \texttt{--mode validate} 无相机负载下为 1.5 s，而在 UVC 边流边初始化时约 32 s。任务转储显示 NPU-init 线程长期处于 Ready 态、utime 近零而 stime 持续累积数秒，属线程饥饿，计算本身并不耗时。逐项上板测试排除了一批嫌疑：移除网卡后无变化（否定 NIC/TCP），驱动 crate、缺页、文件描述符路径均无关，线程放置以 \texttt{taskset -c 0}、\texttt{4}、\texttt{4-7} 三种绑定测得完全一致的 32 s，延后入队与自旋两种唤醒机制也测得一致。“dash 在空闲时占满一个核”一度被疑为成因，核对后确认这是 stime 计入阻塞在系统调用中的墙钟时间所致的记账假象，并非真实 CPU 占用。
 
 \paragraph{根因}
-成因是 RR 调度器 50 ms 时间片配合前端重排队，与相机 URB 完成中断洪流叠加。librknnrt 在初始化中做数百次协同线程间的顺序交接，每一次交接的接收方都须等到当前时间片在 URB 洪流下耗尽才被调度，数百次串联即塌缩为数十秒。
+成因是 RR 调度器 50 ms 时间片配合前端重排队，与相机 URB 完成中断洪流叠加。librknnrt 在初始化中做数百次协同线程间的顺序交接，每一次交接的接收方都须等到当前时间片在 URB 洪流下耗尽才被调度，数百次串联即累积为数十秒。
 
 \paragraph{消除}
 解决包含两项，一项部分缓解、一项彻底消除。时间片从 50 ms（5 个 tick）降至 10 ms（1 个 tick）使停顿减半，从 32 s 降至 16.9 s（提交 \texttt{5360b2722}，改动 \texttt{axtask} 的 \texttt{MAX\_TIME\_SLICE}）。先完成模型加载再启动相机将其彻底消除：\ours{把 \texttt{cam.start()} 移至 \texttt{det.init()} 之后}，使模型初始化不再与 URB 洪流争抢，\keyres{\texttt{model\_init} 从 16870 ms 降至 140 ms}，是单项最大的收益（提交 \texttt{870fd59f0}）。相机延后在原地测得 \texttt{capture\_init\_ms=756}、\texttt{model\_init\_ms=139.97}、\texttt{first\_frame\_wait\_ms=1183}、\texttt{first\_detection\_ms=25}，应用内部冷启动从 18.0 s 降至 1.35 s。该修复保留了全套驱动，未以裁剪功能换取速度。
 
 \subsection{设备探测段的两处内核停顿消除}
 
-基线中两段最重的探测开销由两处驱动改动直接消除。空槽 PCIe 链路等待从 800 ms 降至 100 ms、重试从 80 次降至 10 次，已由固件训练完成的链路借助提前返回得以保留，\keyres{四个空连接器各省约 700 ms，合计约 2.8 s}（提交 \texttt{aa25afaa3}）。\ours{dwmmc 在完成一次写之前先等待卡退出 program-busy 状态}，去除了完成中断在 2 s 内未触发后退回轮询的约 2.1 s 启动停顿，此项移植自块设备一节的 \texttt{8eb3ba417}（提交 \texttt{594152ee8}）。
+基线中两段最重的探测开销由两处驱动改动直接消除。空槽 PCIe 链路等待从 800 ms 降至 100 ms、重试从 80 次降至 10 次，已由固件训练完成的链路借助提前返回得以保留，\keyres{四个空连接器各省约 700 ms，合计约 2.8 s}（提交 \texttt{aa25afaa3}）。\ours{dwmmc 在完成一次写之前先等待卡退出 program-busy 状态}，去除了完成中断在 2 s 内未触发后退回轮询的约 2.1 s 启动停顿，此项由块设备驱动的 dwmmc 修复 \texttt{8eb3ba417} 移植而来（提交 \texttt{594152ee8}）。
 
 \subsection{启动到 shell 的三处架构改造}
 
-内核到 shell 的时段\keyres{由 8.22 s 压至 4.46 s}，由六项改动驱动，其中三项为架构性改造，以下逐项说明其机制。
+内核到 shell 的时段\keyres{由 8.22 s 缩短至 4.46 s}，由六项改动驱动，其中三项为架构性改造，以下逐项说明其机制。
 
 \paragraph{先启动副核后探测（SMP-before-probe）}
 \texttt{rust\_main} 原先在 \texttt{probe\_all\_devices} 之后才启动副核，全部设备 bring-up 仅在 cpu0 上单核执行，任何被迁移至副核的任务都会命中未初始化的运行队列，触发 \texttt{AxRunQueue::resched} 空指针解引用（FAR VA:0x10）。这是整轮排查中“设备工作仅落在 cpu0”这一制约的唯一成因。\ours{将副核启动与 \texttt{INITED\_CPUS} 屏障移至探测之前}、恢复 Linux 的顺序后，\texttt{PROBE\_JOB 0..3} 得以在 cpu1 至 cpu4 上并发执行，内核到 shell 从 8.22 s 降至 7.50 s（提交 \texttt{3d91d372a}）。这项改造同时使后文的探测任务绑核成为安全操作。
@@ -88,6 +88,6 @@ TTFI（内核到首帧推理） & \nTtfiLin s & 11.37 s & \nTtfi s \\
 
 \subsection{结果与诚实边界}
 
-整条曲线由 19.22 s（落后 Linux 约 1.7 倍）起，经 rebase 一度回退至约 50 s，定位并消除 32 s 的 \texttt{rknn\_init} 停顿后，经约 11 项公平改动逐层回落至 13.25 s、11.37 s（手敲进入 shell），最终经 auto-exec 降至 \nTtfi s。最终 StarryOS 内核到首帧为 \nTtfi s，Linux 为 \nTtfiLin s，领先约 1.45 s。一次代表性的稳态流水线为 \texttt{frame\_to\_detection\_ms\_avg=7.385}、\texttt{p50=6.604}、\texttt{p95=10.499}，解码 \texttt{decode\_ms\_avg=1.282 p50=0.961}（JPU 加 RGA 零拷贝），推理 \texttt{run\_ms\_avg=5.320}、\texttt{rknn\_perf\_run\_ms\_avg=4.964}，解码与推理错误均为 0。
+整条曲线由 \nTtfiBefore{} s（落后 Linux 约 1.7 倍）起，经 rebase 一度回退至约 50 s，定位并消除 32 s 的 \texttt{rknn\_init} 停顿后，经约 11 项公平改动逐层回落至 13.25 s、11.37 s（手敲进入 shell），最终经 auto-exec 降至 \nTtfi s。最终 StarryOS 内核到首帧为 \nTtfi s，Linux 为 \nTtfiLin s，领先约 1.45 s。一次代表性的稳态流水线为 \texttt{frame\_to\_detection\_ms\_avg=7.385}、\texttt{p50=6.604}、\texttt{p95=10.499}，解码 \texttt{decode\_ms\_avg=1.282 p50=0.961}（JPU 加 RGA 零拷贝），推理 \texttt{run\_ms\_avg=5.320}、\texttt{rknn\_perf\_run\_ms\_avg=4.964}，解码与推理错误均为 0。
 
 口径一并声明。该领先来自精简 init 相对 systemd 约 5.5 s bringup 的机制优势，两个板级样本均清晰领先，内核到 shell 与 \texttt{model\_init} 的方差较小。作为边缘 AI 设备的实用指标，“StarryOS 更早得到首帧推理”这一结论真实、板级可复现，其口径限定在上电到首帧这一整机指标。连同 THP first-touch 内存（快 \nThpRatio 倍）、单核 A55 与 schbench 唤醒吞吐，这些构成 StarryOS 在 RK3588 上领先 Linux 的方向。

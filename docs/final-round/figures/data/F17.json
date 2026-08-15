@@ -50,7 +50,7 @@
       "key": "occ_sched",
       "date": "2026-08-05",
       "label": "占用调度",
-      "detail": "occupancy-aware 唤醒放置\n对齐 Linux CFS",
+      "detail": "占用感知唤醒放置\n对齐 Linux CFS",
       "category": "parity",
       "side": "up",
       "abl": false
@@ -68,7 +68,7 @@
       "key": "sysbench_parity",
       "date": "2026-08-09",
       "label": "sysbench parity",
-      "detail": "8 线程 0.88× Linux\n单核持平/领先",
+      "detail": "8 线程 0.96× Linux\n单核持平/领先",
       "category": "parity",
       "side": "up",
       "abl": false

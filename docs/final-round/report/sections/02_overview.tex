@@ -7,7 +7,7 @@ StarryOS 复用 ArceOS 的模块层，在其上补齐 Linux 兼容的系统调�
 
 机器人负载的闭环起始于相机成帧，依次经 JPU 解码、RGA 预处理、NPU 推理，直至定位与运动控制，再返回相机。帧到指令延迟即该闭环运行一周的端到端时间，各子系统的改动最终都汇入这一个数字。
 
-\figph{../figures/out/F01.png}{跨子系统对 Linux 的性能比值仪表盘（越接近或超过 1.0 越好）}
+\figph{../figures/out/F01.png}{跨子系统性能追平：每项由 StarryOS 优化前（空心点）到优化后（实心点）相对 Linux 基线的性能倍数，1.0 为 Linux 基线，数值越大越好；青色为已达到或超过 Linux；橙色为尚未达到基线，分持平与仍有差距两档，见每项标注}
 
 每个子系统各用一套业界基准测量，并各自配一条同机同频的 Linux 基线：sysbench cpu 考察调度分发与 DVFS 频率，sysbench memory 的 first-touch 考察分页与 THP，其写带宽考察 DDR 侧 DVFS（频率电压），hackbench 考察高并发下的 fork 与调度，schbench 考察唤醒延迟，getpid 等空系统调用单独测量系统调用入口的开销。基准套件与子系统的对应见图~\ref{fig:bench}。
 
@@ -24,13 +24,13 @@ StarryOS 复用 ArceOS 的模块层，在其上补齐 Linux 兼容的系统调�
 \midrule
 观测（perf/ftrace） & 硬件 PMU perf 与 ftrace 已在真机运行，big.LITTLE 全量通过 & 已达 & 板级 perf-validate（39/0、56/0） \\
 调度与大小核 & cpu t8 \nCpuTEight ev/s，为 Linux \nCpuTEightLin 的 \nCpuTEightRatio× & 已达 & sysbench cpu 8 线程 p50 \\
-系统调用入口 & getpid 由 1200 降至 \nGetpid ns，逼近陷入往返的架构地板，对 Linux \nGetpidLin ns 由约 7× 收窄至 \nGetpidRatio× & 已达 & getpid 微基准 p50 \\
+系统调用入口 & getpid 由 \nGetpidBefore{} 降至 \nGetpid ns，逼近陷入往返的架构地板，对 Linux \nGetpidLin ns 由约 7× 收窄至 \nGetpidRatio× & 已达 & getpid 微基准 p50 \\
 内存与分页 & THP first-touch \nThpFT s，Linux 为 \nThpFTLin s，快 \nThpRatio×（领先） & 已达 & 128 MB first-touch \\
 频率电压 & CPU 调频调压经 PVTPLL 环长对齐 Linux，逐核持平；内存写带宽 \nMemBWWriteRatio×，DDR 变频属主线固件限制 & 已达 & 逐核 cpu p50 + memory 写 8 线程 \\
 启动 TTFI & \nTtfi s，优于 Linux \nTtfiLin s（领先） & 已达 & 上电到首帧推理 \\
 显示栈 & VOP2 与 HDMI-QP 上板点亮，ROPLL 像素时钟锁定验证通过 & 已达 & 主机寄存器测试 + 板级 ROPLL 锁定与 \texttt{/dev/fb0} 彩条 \\
 QEMU NPU 模型 & RKNPU 功能级模型已合并，106 项 qtest & 已达 & qtest 回归 \\
-机器人应用 & 网球拾取机器人五阶段闭环在 RK3588 真机完整运行，感知到运动控制全链路打通 & 已达 & 整机闭环端到端运行 \\
+机器人应用 & 网球拾取机器人六状态闭环在 RK3588 真机完整运行，感知到运动控制全链路打通 & 已达 & 整机闭环端到端运行 \\
 \bottomrule
 \end{tabular}
 \caption{前置目标完成情况}

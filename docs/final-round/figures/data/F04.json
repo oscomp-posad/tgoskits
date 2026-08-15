@@ -24,7 +24,7 @@
       "label_zh": "+ 跨核分发",
       "sublabel_zh": "",
       "value": 4987,
-      "series": "teal",
+      "series": "amber",
       "abl": false
     },
     {
@@ -46,8 +46,8 @@
   ],
   "legend_zh": {
     "muted": "单核地板",
-    "teal": "已合并 PR",
-    "amber": "已验证，PR 在审"
+    "teal": "出厂配置",
+    "amber": "已验证的调度改动"
   },
   "footnote_zh": "注：单独启用 wake_affine 就近唤醒会因并发线程聚拢而将 8 线程吞吐降至 3523，出厂配置的唤醒铺开将其恢复至 4987。",
   "note_zh": "全部为板上实测中位值（3 次重复）；频率保持开启，用于隔离放置与调度带来的增益。"

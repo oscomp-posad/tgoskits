@@ -12,7 +12,7 @@
 \midrule
 洪世金（队长） &
 \textbf{perf 观测} 单核 ARM PMUv3 硬件 PMU perf，多核与 big.LITTLE，软件事件与 HW\_CACHE，真实 tid 采样归属与 LOST，事件组、SAMPLE\_READ 与 \texttt{-a}，调用图，ftrace（板级 39/0、矩阵 56/0）。
-\textbf{调度器与大小核} 跨核互唤醒死锁修复、新建与唤醒线程的跨核分发、占用感知的派生与唤醒放置、CFS 对齐的 \texttt{wake\_affine}（跨核唤醒 1042 至 \nWake~µs）、\texttt{CLONE\_VM} 用户拷贝快路径（hackbench -T \nHackT×）。
+\textbf{调度器与大小核} 跨核互唤醒死锁修复、新建与唤醒线程的跨核分发、占用感知的派生与唤醒放置、CFS 对齐的 \texttt{wake\_affine}（跨核唤醒 \nWakeBefore{} 至 \nWake~µs）、\texttt{CLONE\_VM} 用户拷贝快路径（hackbench -T \nHackT×）。
 \textbf{DVFS 与 cpufreq} RK3588 ondemand CPU DVFS 加 PMIC 电压标定，PVTPLL 环长切换与 OPP 顶推（A76 \nDvfsAseven~MHz、A55 \nDvfsAfive~MHz）。
 \textbf{内存与 THP} 2\,MB 私有匿名 first-touch（\nThpFT~s，快 \nThpRatio×）、新建映射跳过 TLB flush、\texttt{MADV\_NOHUGEPAGE} 语义、COW 引用计数 u8 至 u32。
 \textbf{页表与 TLB 正确性} 共享跨内核 crate 上的 not-present huge block 误判 UAF 类修复、\texttt{dsb ishst} 存序、\texttt{vmalle1is} 广播回退、BBM 无分配拆分、空中间表回收与批量失效合并。
@@ -28,7 +28,7 @@
 \textbf{板级 I/O 与网络驱动} RK3588 UART 初始化、USB-serial tty、TTY 输入 flush 与唤醒、PWM sysfs 执行器面、rtnetlink IPv4 与 RTL8125 多网卡及 regulator GPIO 共同打通板级 SSH、ax-net 数据报睡眠锁修复、RKNPU GEM 遵循 cache 标志的 mmap。
 \textbf{UVC 相机} USB 相机异步传输生命周期与测试迁移到 ax-sync。
 \textbf{reboot} reboot(2) 系统调用，支撑板级热重启循环。
-\textbf{机器人拾球应用}（与王乙凡共同）追球到投放的五阶段状态机、执行器后端、底盘电机编码器里程计定位回桶。 \\
+\textbf{机器人拾球应用}（与王乙凡共同）追球到投放的六状态有限状态机、执行器后端、底盘电机编码器里程计定位回桶。 \\
 \bottomrule
 \end{tabular}
 \caption{三名成员按模块与交付物的分工，各贡献的 PR 编号与合入状态见增量贡献一节}

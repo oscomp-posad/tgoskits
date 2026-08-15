@@ -1,0 +1,22 @@
+A premium, modern WIDE LANDSCAPE (16:9) isometric infographic on a SOLID FLAT dark navy background (#0D1B2A). Clean sleek isometric 3D technical illustration, soft shadows, thin glowing vertical connector lines. NO photo texture, NO mascot, NO penguin, NO logo, NO big title.
+
+SUBJECT: an EXPLODED ISOMETRIC STACK of SIX thin rectangular platform slabs floating one above another with a small gap, viewed at a 30-degree angle. On each slab sit small isometric 3D blocks (little boxes), color-coded. A short layer name floats at the LEFT edge of each slab. Group tags may label sub-clusters of blocks on the busy slabs.
+
+BLOCK COLOR MEANING: teal (#2DD4BF)=built from scratch, amber (#F59E0B)=improved, blue (#5B9BFF)=ported upstream, gray (#8AA0B4)=reused hardware.
+
+From BOTTOM to TOP:
+1. layer "RK3588 硬件" — gray blocks: "A76" "A55" "DDR" "VOP2" "HDMI" "RKNPU" "RGA" "JPU" "PCIe" "eMMC" "USB" "GMAC".
+2. layer "驱动" — grouped bays. 显示: teal "VOP2" "HDMI-QP" "HDPTX". 加速器: teal "RKNPU" "RGA2" "JPU" "dma-heap". 电源: teal "cpufreq" "PMIC" "DDR-DVFS" "PWM". USB: amber "xHCI" "UVC". 串口: amber "UART", teal "USB-tty". 存储: amber "dwmmc" "PCIe". 网络: amber "RTL8125". 输入: amber "evdev".
+3. layer "ArceOS HAL" — amber "axtask" "axmm" "page_table" "axhal" "axnet" "rdrive", gray "axsync".
+4. layer "内核子系统" — grouped clusters. 调度: amber "占用放置" "wake_affine". 内存: teal "THP", amber "页表·TLB" "COW". 观测: teal "perf-PMU" "kprobe" "ftrace". 图形: teal "DRM/KMS" "GEM" "dma-buf". 网络: teal "AF_NETLINK", amber "AF_UNIX". IPC: amber "futex" "SHM". VFS: amber "文件系统", teal "GPT".
+5. layer "系统调用" — teal "perf_event_open" "timerfd" "memfd" "signals" "credentials" "reboot" "socket" "ioctl", amber "epoll" "madvise".
+6. top layer "应用" — amber "机器人", teal "仪表盘", blue "Weston" "PostgreSQL" "sysbench".
+
+SIDE TRACK on the RIGHT — a FANCY self-contained highlighted panel with a subtle teal glow and rounded corners, clearly separate from the stack (no arrows leave it), title "板外 AI：功能级仿真 + 模型优化". Inside, two stacked teal cards connected by a short downward arrow:
+Card 1 heading "QEMU RKNPU 功能级模型", one body sentence below it: "在 QEMU 中真实执行 INT8/FP 推理并支持多核协同，106 个 qtest 让 NPU 开发与 CI 无需上板。"
+Card 2 heading "检测模型协同优化", one body sentence below it: "以 ReLU 替换 SiLU 并合并检测头，单次推理由 14.7 降到 5.7ms，快 2.6 倍。"
+Both cards teal. The body text reads as natural full sentences (not dot-separated keyword fragments). Keep the panel compact and legible. No arrow or line connects this panel to the stack.
+
+LEGEND top-right, four chips: "从零实现"(teal) "改进"(amber) "移植上游"(blue) "硬件"(gray).
+
+STRICT TEXT RULE (critical, overrides visual flair): the ONLY text anywhere is the six layer names, the group tags, ONE short label per block, the side-panel text, and the legend. Each block contains EXACTLY ONE label and NOTHING else — NO tiny secondary text above/below/beside blocks, NO faint or decorative characters, NO watermark, NO gibberish, NO random glyphs floating over any slab. Spell every label EXACTLY, in particular: "evdev" (NOT evdex), "页表·TLB" (NOT TL6), "DRM/KMS", "credentials", "AF_NETLINK", "rknn_run", "dma-buf". Keep the blocks neatly aligned inside their group bays. The fancy lighting must never reduce label legibility.

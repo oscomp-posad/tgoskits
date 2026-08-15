@@ -1,0 +1,45 @@
+A polished, modern technical ARCHITECTURE POSTER — a layered kernel map — titled "内核贡献全景 · StarryOS × RK3588". SOLID FLAT dark navy background (#0D1B2A) filling the ENTIRE canvas. Flat vector infographic style: rounded-rectangle nodes with clean fills, thin connector lines, crisp bold sans-serif labels, generous spacing, perfectly legible. A small simple monochrome line-icon may sit beside each band title. Fun but rigorous, presentation-grade.
+
+CRITICAL CONSTRAINTS: Do NOT add any decorative background illustration, circuit-board artwork, 3D chip render, glowing scene, mascot, penguin, animal, or company logo anywhere. NO Tux penguin. The canvas is ONLY the flat dark-navy background plus the titled bands and their labeled boxes and the legend. Keep the background dark navy, not bright blue.
+
+COLOR LEGEND (top-right, four chips with text). FOUR distinct colors, used consistently:
+  teal (#2DD4BF) = "从零实现"
+  amber (#F59E0B) = "改进·修复"
+  blue (#5B9BFF) = "移植·使能上游"
+  gray (#8AA0B4) = "复用基线（硅片）"
+
+TOP-LEFT BADGE (teal border, bold), three stacked lines:
+  "90 PR 已合并上游"
+  "9 大内核子系统"
+  "11 类设备驱动"
+
+The poster is a vertical stack of horizontal bands, each a labeled row of boxes, top to bottom:
+
+BAND 1 — 应用层 (Applications) — FIVE boxes, note the mixed colors:
+  "网球拾取机器人" (amber), "Qt6 遥测仪表盘" (teal), "Weston 合成器" (blue), "PostgreSQL" (blue), "sysbench 基准" (blue).
+
+BAND 2 — 系统调用 / Linux ABI — a row of small boxes:
+  "perf_event_open"(teal) "futex"(amber) "epoll"(amber) "timerfd"(teal) "memfd"(teal) "signals"(teal) "CLONE_VM"(teal) "madvise"(teal) "reboot"(teal) "AF_UNIX / NETLINK"(teal) "ioctl KMS/RGA/MPP"(teal) "credentials"(teal).
+
+BAND 3 — 内核子系统 (Kernel subsystems), titled clusters (NO virtualization cluster):
+  调度/大小核: "占用放置"(amber) "wake_affine"(amber) "跨核唤醒"(amber)
+  内存/分页: "THP 2MB"(teal) "首触快路径"(amber) "页表·TLB正确性"(amber, render the middle dot ·) "COW修复"(amber)
+  观测: "perf 硬件PMU"(teal) "调用栈"(teal) "kprobe"(teal) "ftrace"(teal)
+  图形/DRM-KMS: "原子KMS"(teal) "GEM缓冲"(teal) "dma-buf/PRIME"(teal) "evdev"(amber)
+  网络: "AF_NETLINK"(teal) "AF_UNIX"(amber)   IPC: "futex分片"(amber) "SHM"(amber)
+  VFS: "文件系统正确性"(amber) "GPT分区"(teal)
+
+BAND 4 — ArceOS 模块层 (HAL) — all amber (extended), one gray: "axtask"(amber) "axmm"(amber) "axhal/axcpu"(amber) "page_table"(amber) "axnet"(amber) "rdrive"(amber) "axsync"(gray).
+
+BAND 5 — 驱动层 (Drivers), grouped by device class into small bays:
+  显示: "VOP2"(teal) "HDMI-QP"(teal) "HDPTX PHY"(teal)
+  加速器: "RKNPU"(teal) "RGA2"(teal) "JPU"(teal) "dma-heap"(teal)
+  USB: "xHCI"(amber) "UVC相机"(amber)   串口: "UART"(amber) "USB-tty"(teal)
+  存储: "dwmmc"(amber) "PCIe"(amber)   网络: "RTL8125"(amber)
+  电源: "cpufreq"(teal) "PMIC"(teal) "DDR-DVFS"(teal)   "PWM"(teal)
+
+BAND 6 — RK3588 硬件 (silicon), all gray chip blocks, spell each label EXACTLY: "4×A76" "4×A55" (that is the digits four-times-A-five-five) "DDR" "VOP2" "HDMI" "RKNPU" "RGA" "JPU" "PCIe" "eMMC" "USB" "GMAC".
+
+RIGHT-SIDE CALLOUT (vertical teal box, dashed line to the 加速器 bay): "QEMU RKNPU 功能级模型 · 板外开发/CI".
+
+Render every text label crisply and correctly spelled exactly as written (especially "credentials" and "原子KMS"), no gibberish, no random extra text, no watermark. Balanced composition, aligned grid, professional.

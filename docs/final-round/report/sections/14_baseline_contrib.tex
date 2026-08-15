@@ -1,55 +1,99 @@
 % 14_baseline_contrib
 \section{基础版本与增量贡献}
 
-本节汇总增量工作及其相对基线的位置与状态；原生显示驱动栈（VOP2 与 HDMI）已完成主机侧验证与板级点亮（ROPLL 锁定），正整理为可独立拆分的 PR，稍后列入。基线取 \texttt{rcore-os/tgoskits} 的 \texttt{dev} 分支，commit \texttt{73409e079}，上游仓库为 \texttt{github.com/\allowbreak rcore-os/\allowbreak tgoskits}。其上运行的机器人应用移植自 \texttt{pengzechen/\allowbreak aka-rk3588}，模型转换与量化工具取自 \texttt{airockchip/\allowbreak rknn-toolkit2}。集成分支的首个提交即把基线固定于该提交点，此后每一处改动都以它派生，作为一个原子 PR 回到上游、对应的跨内核共享 crate 或 QEMU fork。改动拆到一次即可独立回归的粒度，每条都能对照固定基线单独核对得失，评审也只需关注单一处逻辑。
+本节汇总增量工作及其相对基线的位置与状态。基线取 \texttt{rcore-os/tgoskits} 的 \texttt{dev} 分支，commit \texttt{73409e079}，上游仓库为 \texttt{github.com/\allowbreak rcore-os/\allowbreak tgoskits}。其上运行的机器人应用移植自 \texttt{pengzechen/\allowbreak aka-rk3588}，模型转换与量化工具取自 \texttt{airockchip/\allowbreak rknn-toolkit2}。集成分支的首个提交即把基线固定于该提交点，此后每一处改动都以它派生，作为一个原子 PR 回到上游、对应的跨内核共享 crate 或 QEMU fork。每处改动都拆到可独立回归的粒度，便于对照固定基线单独核对得失、评审单一逻辑。
 
-全部改动分为两条并行推进的线。系统内核侧覆盖性能观测、调度、内存与页表正确性、CPU DVFS 与基准套件；仿真与板级侧覆盖 QEMU RKNPU 仿真器、加速器与图形驱动、串口与外设、网络及机器人应用。表~\ref{tab:contrib} 按子系统列出全部条目，状态分三档：已合并表示已并入对应目标仓库（上游或 QEMU fork），在审表示已提交并处于评审中，已准备表示已在集成分支实现、待拆分为独立 PR。
+全部改动分为两条并行推进的线。系统内核侧覆盖性能观测、调度、系统调用、内存与页表正确性、CPU 与内存频率电压、启动时延，以及面向真实负载的 Linux 兼容性；仿真与板级侧覆盖 QEMU RKNPU 仿真器、加速器与图形驱动、串口与外设、网络及机器人应用。图~\ref{fig:kmap} 给出跨这两条线的贡献全景，表~\ref{tab:contrib} 按子系统列出条目及其状态，状态分三档：已合并表示已并入对应目标仓库（上游或 QEMU fork），在审表示已提交并处于评审中，已准备表示已在集成分支实现、待拆分为独立 PR。
 
-\begin{table}[H]\centering\small
-\begin{tabular}{@{}p{0.56\linewidth} l l@{}}
+\begin{figure}[htbp]\centering
+\includegraphics[width=\linewidth]{../figures/out/Fkmap.png}
+\caption{内核贡献全景：自机器人应用向下至 RK3588 硬件，本队在每一层的贡献按角色着色，绿为从零实现、橙为改进、蓝为移植使能上游软件、灰为复用硬件；右侧另列板外 QEMU RKNPU 功能级模型与检测模型的协同优化。}
+\label{fig:kmap}
+\end{figure}
+
+图~\ref{fig:kmap} 与表~\ref{tab:contrib} 互为补充：前者回答改动落在软件栈的哪一层、属从零实现、改进还是移植上游，后者回答改动去向哪个仓库、处于合并的哪一档。
+
+{\small
+\begin{longtable}{@{}p{0.44\linewidth} p{0.22\linewidth} l l@{}}
+\caption{增量贡献一览，\texttt{qemu} 前缀指 \texttt{processmission/qemu} fork，\texttt{oscomp-posad} 前缀指本队仓库，其余编号为 \texttt{rcore-os/tgoskits} 上游；“详见”列指向本文对应章节。}\label{tab:contrib}\\
 \toprule
-贡献 & 位置/PR & 状态 \\
+贡献 & 位置/PR & 状态 & 详见 \\
 \midrule
-单核 ARM PMUv3 硬件 perf & \texttt{rcore\#1395} & 已合并 \\
-多核与 big.LITTLE 硬件 PMU perf & \texttt{rcore\#1577} & 在审 \\
-软件事件与 HW\_CACHE 缓存事件 & \texttt{rcore\#1601} & 在审 \\
-采样归属真实 tid 与丢样记录 & \texttt{rcore\#1602} & 在审 \\
-事件组与组采样读 & \texttt{rcore\#1603} & 在审 \\
+\endfirsthead
+\multicolumn{4}{@{}l}{\small（接上页）}\\
+\toprule
+贡献 & 位置/PR & 状态 & 详见 \\
 \midrule
-跨核互唤醒死锁修复 & \texttt{rcore\#1495} & 已合并 \\
-新建与被唤醒线程跨核分发 & \texttt{rcore\#1656} & 在审 \\
+\endhead
 \midrule
-sysbench big.LITTLE 套件与板级 harness & \texttt{rcore\#1658} & 在审 \\
-RK3588 CPU DVFS 与 PMIC 电压标定（cpufreq） & \texttt{rcore\#1657} & 已合并 \\
-\midrule
-RK3588 RGA2 二维加速器 & \texttt{rcore\#1388} & 已合并 \\
-RK3588 JPU（VDPU720）硬件 JPEG 解码 & \texttt{rcore\#1456} & 已合并 \\
-rknpu DRM ioctl 辅助函数整合 & \texttt{rcore\#1351} & 已合并 \\
-RKNPU GEM mmap 遵循 cache 标志 & \texttt{rcore\#1364} & 已合并 \\
-\midrule
-RK3588 RKNPU 功能级仿真 & \texttt{qemu\#19} & 已合并 \\
-RKNPU 多核协同执行 & \texttt{qemu\#26} & 已合并 \\
-\midrule
-\texttt{reboot(2)} 系统调用 & \texttt{rcore\#1358} & 已合并 \\
-USB-serial tty & \texttt{rcore\#1378} & 已合并 \\
-RK3588 UART 初始化 & \texttt{rcore\#1921} & 已合并 \\
-TTY 输入 flush 与唤醒修复 & \texttt{rcore\#1922} & 已合并 \\
-RK3588 PWM sysfs & \texttt{rcore\#1468} & 已合并 \\
-UVC 摄像头异步传输生命周期 & \texttt{rcore\#1924} & 已合并 \\
-UVC 测试迁移到 ax-sync & \texttt{rcore\#1961} & 已合并 \\
-\midrule
-rtnetlink IPv4 与多网卡 regulator GPIO & \texttt{rcore\#1497} & 已合并 \\
-ax-net 数据报睡眠互斥修复 & \texttt{rcore\#1963} & 已合并 \\
-\midrule
-图形合成器栈：Weston 于 StarryOS（DRM/KMS、evdev 输入、\texttt{AF\_UNIX} 传递、\texttt{epoll}/\texttt{timerfd}、Xwayland） & \texttt{rcore\#503}--\texttt{516}、\texttt{\#1160} & 已合并 \\
-\midrule
-THP 首次触碰与 fork/拆分正确性 & \texttt{starry-mm} & 已准备 \\
-页表与 TLB 正确性修复 & \texttt{page\_table\_multiarch} & 已准备 \\
-机器人应用（底盘里程计定位） & \texttt{apps/starry} & 已准备 \\
+\multicolumn{4}{r@{}}{\small（转下页）}\\
+\endfoot
 \bottomrule
-\end{tabular}
-\caption{增量贡献一览，\texttt{qemu} 前缀指 \texttt{processmission/qemu} fork，其余为 \texttt{rcore-os/tgoskits} 上游}
-\label{tab:contrib}
-\end{table}
+\endlastfoot
+\multicolumn{4}{@{}l}{\textit{观测与调度}}\\
+硬件 PMU perf 子系统（PMUv3、多核、软件与 cache 事件、事件组、调用栈、kprobe/tracepoint、ftrace） & \#1395、\#1577、\#1601--\#1603、oscomp-posad\#1 & 已合并/在审 & 观测 \\
+跨核互唤醒死锁修复 & \#1495 & 已合并 & 调度 \\
+新建与被唤醒线程跨核分发 & \#1656 & 在审 & 调度 \\
+占用感知放置与 \texttt{wake\_affine} 唤醒延迟优化 & 集成分支 & 已准备 & 调度 \\
+负载均衡内省原语（工作窃取均衡器经验证回退） & \#1989 & 已合并 & 调度 \\
+sysbench 大小核基准与板级测量框架 & \#1658 & 在审 & 调度 \\
+\midrule
+\multicolumn{4}{@{}l}{\textit{系统调用与内存}}\\
+系统调用返回路径三处优化与 tickacct 记账 & \#1998、\#1999、\#2010、\#2012 & 已合并/在审 & 系统调用 \\
+THP 首触分配与 fork/拆分正确性、\texttt{split\_pages} 原语 & \#1990、集成分支 & 在审/已准备 & 内存 \\
+SMP 页表与 TLB 维护正确性 & \#2008、\#2009 & 在审 & 内存 \\
+无锁 CLONE\_VM 用户指针探测原语 & \#2011 & 在审 & 调度/内存 \\
+COW 正确性、缺页 ENOMEM 上报、文件映射预读 & \#1991、\#1992、\#1993、\#2000 & 已合并/在审 & 内存 \\
+futex 值原子读、clone 亲和性继承 & \#1996、\#1994 & 在审 & 内存 \\
+\midrule
+\multicolumn{4}{@{}l}{\textit{频率电压与启动}}\\
+RK3588 CPU 电压耦合 DVFS 与 PMIC 电压标定 & \#1657 & 已合并 & 频率电压 \\
+PVTPLL 环长机制与 DDR SIP 调频 & 集成分支 & 已准备 & 频率电压 \\
+启动阶段重排（PCIe/dwmmc/预读/init 自执行） & 集成分支 & 已准备 & 启动 \\
+dwmmc 写完成 card-busy 与 PCIe 空槽链路调优 & 集成分支 & 已准备 & 启动/板级 \\
+RK3588 PCIe 与 eMMC 启动稳定性 & \#440 & 已合并 & 启动/板级 \\
+\midrule
+\multicolumn{4}{@{}l}{\textit{显示、图形与仿真}}\\
+原生 VOP2 / HDMI-QP / HDPTX 显示驱动栈 & 集成分支 & 已准备 & 显示 \\
+DRM \texttt{card0} 原子 KMS 与 GEM 引用计数 dumb buffer & \#506、\#514 & 已合并 & 显示/图形 \\
+evdev 与 sysfs/udev 主机侧铺垫 & \#513、\#508 & 已合并 & 图形合成 \\
+Weston/Xwayland 桌面栈修复与视觉回归 & \#509、\#516、\#1160 & 已合并 & 图形合成 \\
+QEMU RKNPU 功能级模型、三核协同与模型优化 & qemu\#19、qemu\#26、逐推理计数（在审） & 已合并/在审 & 仿真 \\
+\midrule
+\multicolumn{4}{@{}l}{\textit{加速器与视觉通路}}\\
+RK3588 RGA2 二维加速器与 dma-heap 零拷贝分配器 & \#1388 & 已合并 & 视觉通路 \\
+RK3588 JPU（VDPU720）硬件 JPEG 解码与 MPP 接口 & \#1456 & 已合并 & 视觉通路 \\
+RKNPU 定频 200 至 800 MHz & \#1908 & 已合并 & --- \\
+RKNPU GEM cache 映射与 DRM ioctl 归并 & \#1364、\#1351 & 已合并 & 视觉通路 \\
+\midrule
+\multicolumn{4}{@{}l}{\textit{板级 I/O 与外设}}\\
+RK3588 UART 初始化与 USB 串口 TTY & \#1921、\#1378 & 已合并 & 板级 I/O \\
+TTY 输入清理与唤醒、termios 格式、控制台 CRLF & \#1922、\#1484、\#1695 & 已合并 & 板级 I/O \\
+RK3588 PWM sysfs 与 pinctrl 修正 & \#1468 & 已合并 & 板级 I/O \\
+\texttt{reboot(2)} 系统调用与统一复位抽象 & \#1358 & 已合并 & 板级/兼容性 \\
+xHCI 主机枚举与 UVC 摄像头传输流水线 & \#1264、\#1924、\#1961 & 已合并 & 板级 I/O \\
+usbfs clear-halt 与接口生命周期清理 & \#1655 & 已合并 & 板级 I/O \\
+\midrule
+\multicolumn{4}{@{}l}{\textit{面向真实负载的 Linux 兼容性}}\\
+进程凭证子系统与权限检查 & \#246 & 已合并 & 兼容性 \\
+System V 共享内存死锁与 futex 表分片 & \#226、\#1997 & 已合并 & 兼容性 \\
+AF\_NETLINK 扩展与 AF\_UNIX 语义修复 & \#512、\#1497、\#311、\#313、\#1963 & 已合并 & 兼容性 \\
+GPT 分区识别、VFS 属主传递与 rename 正确性 & \#179、\#312、\#1097 & 已合并 & 兼容性 \\
+SA\_RESTART、timerfd、epoll、mremap 等语义补齐 & \#247、\#503、\#250、\#314、\#504、\#205、\#249、\#505、\#251、\#319、\#248 & 已合并 & 兼容性 \\
+系统调用 ABI 一致性修复合集 & \#197、\#207--\#211 & 已合并 & 兼容性 \\
+PostgreSQL 应用与十四阶段冒烟测试 & \#1111 & 已合并 & 兼容性 \\
+memfd 封存（seal）语义 & \#507、\#515 & 已合并 & 图形/兼容性 \\
+\midrule
+\multicolumn{4}{@{}l}{\textit{平台与驱动框架}}\\
+rdrive 动态驱动框架稳健性与性能加固 & \#2002、\#2003、\#2004 & 已合并/在审 & --- \\
+从设备树导出的 per-CPU 算力表 & \#2001 & 在审 & 调度 \\
+Orange Pi 5 Plus 启动接入与 axplat-dyn 驱动迁移 & \#170、\#84、\#90 & 已合并 & --- \\
+一次性定时器首拍装填修复 & \#154 & 已合并 & --- \\
+\midrule
+\multicolumn{4}{@{}l}{\textit{机器人应用}}\\
+网球机器人应用与 Qt 遥测面板 & 集成分支 & 已准备 & 机器人 \\
+六状态拾球闭环与里程计回桶 & 集成分支 & 已准备 & 机器人 \\
+\end{longtable}
+}
 
-三项已准备的工作已在集成分支实现并经 RK3588 板级验证，并将按同一原则拆分为独立 PR 回馈上游。内存侧为 \ours{THP 2MB 私有匿名首次触碰}及其在 fork 与拆分路径上的正确性修复；页表侧集中于跨内核共享的 \texttt{page\_table\_multiarch} 与 \texttt{page\_table\_entry}，含一类释放后使用、一处内存序缺陷与一处 SMP 广播漏项；应用侧为基于底盘电机编码器里程计的机器人桶位定位。
+标注为已准备的工作已在集成分支实现并经 RK3588 板级验证，将按同一原则拆分为独立 PR 回馈上游，其中以 THP 2\,MB 私有匿名首触与原生显示驱动栈为最主要者；跨内核共享 \texttt{page\_table\_multiarch} 的页表与 TLB 正确性修复则已作为 \#2008 与 \#2009 提交在审。上表另有一批平台与驱动框架层面的支撑改进。rdrive 框架获得三项加固：设备树 assigned-clocks 的应用改为尽力而为；设备锁引入代际标签与失效持有者回收；以无拷贝借用取代每次探测时的设备树深拷贝。per-CPU 算力表从设备树解析并归一化各核算力，为大小核容量感知放置提供输入。这些改进虽不单独成章，却是真机上并发设备探测与调度放置得以稳健运行的基础。本队三名成员自初赛至今累计提交 \nPROpened{} 个 PR，其中 \nPRMerged{} 个已合并、\nPRInflight{} 个在审，决赛期内新增 \nPRFinalsMerged{} 个已合并。
