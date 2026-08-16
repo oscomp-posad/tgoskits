@@ -192,6 +192,25 @@
   \advance{测量需要工具}{硬件 PMU perf + ftrace 上板，56/0，直接运行上游 perf 二进制}
 \end{frame}
 
+% ============================== perf 真机证据 ==============================
+\begin{frame}
+  \navsegment{2}
+  \frametitle{perf 真机证据：stat / record / report / top / kprobe / ftrace}
+  \centering
+  \includegraphics[width=\linewidth,height=0.82\textheight,keepaspectratio]{Fperf_proof.png}
+\end{frame}
+
+% ============================== perf 火焰图 ==============================
+\begin{frame}
+  \navsegment{2}
+  \frametitle{perf 火焰图：网球推理的 CPU 调用栈}
+  \centering
+  \vfill
+  \includegraphics[width=\linewidth]{Fperf_flame.png}\\[10pt]
+  {\color{muted}\footnotesize \texttt{perf record -g} 采样 6735 次，符号经 \texttt{/proc/kallsyms} 解析 —— 完整用户态调用栈 \texttt{\_start} → \texttt{main} → \texttt{inference\_yolov8} → \texttt{convert\_image} / \texttt{crop\_and\_scale}，右支为 libjpeg 的 NEON 解码 \texttt{jsimd\_idct\_islow\_neon}}
+  \vfill
+\end{frame}
+
 % ============================== 10 调度 cpu 对等阶梯（招牌） ==============================
 \begin{frame}
   \navsegment{2}
@@ -287,6 +306,24 @@
     \end{column}
   \end{columns}
   \advance{性能对比需先能驱动板子}{显示栈上板点亮、Weston 正常运行、约 8 个板级驱动合入上游}
+\end{frame}
+
+% ============================== 真机跑通：PostgreSQL + Weston ==============================
+\begin{frame}
+  \navsegment{2}
+  \frametitle{真机跑通：PostgreSQL 数据库与 Weston 图形栈}
+  \begin{columns}[T]
+    \begin{column}{0.56\textwidth}
+      \includegraphics[width=\linewidth]{Fpostgres_proof.png}
+    \end{column}
+    \begin{column}{0.42\textwidth}
+      \centering
+      \IfFileExists{../figures/out/Fweston_shot.png}%
+        {\includegraphics[width=\linewidth,height=0.62\textheight,keepaspectratio]{Fweston_shot.png}}%
+        {\fbox{\parbox[c][0.42\textheight][c]{0.9\linewidth}{\centering\color{muted}\footnotesize 此处放 Weston 桌面实拍截图\\[4pt]存为 \texttt{figures/out/Fweston\_shot.png}}}}\\[5pt]
+      {\color{muted}\footnotesize Weston 合成器 + GTK4 / Xwayland，四架构验证通过}
+    \end{column}
+  \end{columns}
 \end{frame}
 
 % ============================== R 借鉴与创新 ==============================
