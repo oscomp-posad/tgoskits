@@ -94,7 +94,10 @@
 \setbeamertemplate{frametitle}{%
   \ifnum\posad@nav>0\relax\vskip18pt\else\vskip12pt\fi
   \begingroup\sffamily\bfseries\color{teal}\large\insertframetitle\par\endgroup
-  \vskip1pt{\color{teal}\hbox to\dimexpr\paperwidth-2.4em\relax{\vrule height1pt width\dimexpr\paperwidth-2.4em\relax}}%
+  % kill the automatic \baselineskip interline glue TeX would insert between the
+  % title line and the rule (that glue — not the explicit \vskip — was the big gap)
+  \nointerlineskip\vskip3pt
+  {\color{teal}\hbox to\dimexpr\paperwidth-2.4em\relax{\vrule height1pt width\dimexpr\paperwidth-2.4em\relax}}%
   \vskip2pt}
 
 % ---- Footer: "听众已知 X  →  本页推进 Y"  +  page number ----
