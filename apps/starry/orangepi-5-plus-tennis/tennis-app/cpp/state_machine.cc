@@ -363,8 +363,9 @@ ControlOutput StateMachine::approach_bucket(const BucketObs &bucket,
     int bk_off = static_cast<int>(bucket.cx) - half_w_;
     int bias = (std::abs(bk_off) <= cfg_.center_dead_zone)
                    ? 0
-                   : static_cast<int>(cfg_.bucket_k_turn * bk_off /
-                                      static_cast<float>(half_w_));
+                   : static_cast<int>(std::lround(
+                         cfg_.bucket_k_turn * bk_off /
+                         static_cast<float>(half_w_)));
     bias = clampi(bias, -cfg_.bucket_max_bias, cfg_.bucket_max_bias);
     int spd = (area >= cfg_.bucket_area_brake) ? cfg_.bucket_brake_spd
                                                : cfg_.bucket_approach_spd;
