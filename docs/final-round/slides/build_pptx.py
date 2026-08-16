@@ -40,7 +40,7 @@ OVERLAYS = {
 # underlay is a PHOTO (not a dark terminal panel) so box detection won't apply —
 # the box is the measured position of the static poster frame in the rendered page.
 EXPLICIT = {
-    17: (GIF_DISPLAY, (0.0529, 0.5263, 0.3323, 0.8064)),  # board HDMI poster, left col
+    17: (GIF_DISPLAY, (0.0529, 0.5432, 0.3323, 0.8233)),  # board HDMI poster, left col
 }
 
 
