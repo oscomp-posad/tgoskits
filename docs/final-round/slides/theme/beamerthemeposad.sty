@@ -72,12 +72,16 @@
 \setbeamertemplate{headline}{%
   \ifnum\posad@nav>0\relax
     \vskip4pt
-    \hbox to\paperwidth{\hskip1.4em\footnotesize
-      \posad@navcell{1}{背景与目标}\hfill
-      \posad@navcell{2}{系统能力与性能}\hfill
-      \posad@navcell{3}{增量与展望}\hfill
-      \posad@navcell{4}{方法与复现}%
-      \hskip1.4em}%
+    % 4 equal-width columns spanning the same span as the rule below; each label
+    % centered in its column so the tab centers are evenly spaced regardless of
+    % differing label widths / the active cell's box padding.
+    \hbox to\paperwidth{\hskip1.2em\footnotesize
+      \def\posad@navcol{\dimexpr(\paperwidth-2.4em)/4\relax}%
+      \hbox to\posad@navcol{\hfil\posad@navcell{1}{背景与目标}\hfil}%
+      \hbox to\posad@navcol{\hfil\posad@navcell{2}{系统能力与性能}\hfil}%
+      \hbox to\posad@navcol{\hfil\posad@navcell{3}{增量与展望}\hfil}%
+      \hbox to\posad@navcol{\hfil\posad@navcell{4}{方法与复现}\hfil}%
+      \hskip1.2em}%
     \vskip4pt
     {\color{muted}\hbox to\paperwidth{\hskip1.2em\vrule height0.4pt width\dimexpr\paperwidth-2.4em\relax\hskip1.2em}}%
     \vskip2pt
@@ -89,8 +93,8 @@
 % this the nav rule grazes the CJK glyph tops. nav=0 frames have no headline.
 \setbeamertemplate{frametitle}{%
   \ifnum\posad@nav>0\relax\vskip18pt\else\vskip12pt\fi
-  \begingroup\sffamily\bfseries\color{teal}\large\insertframetitle\endgroup
-  \vskip4pt{\color{teal}\hbox to\dimexpr\paperwidth-2.4em\relax{\vrule height1pt width\dimexpr\paperwidth-2.4em\relax}}%
+  \begingroup\sffamily\bfseries\color{teal}\large\insertframetitle\par\endgroup
+  \vskip1pt{\color{teal}\hbox to\dimexpr\paperwidth-2.4em\relax{\vrule height1pt width\dimexpr\paperwidth-2.4em\relax}}%
   \vskip2pt}
 
 % ---- Footer: "听众已知 X  →  本页推进 Y"  +  page number ----
