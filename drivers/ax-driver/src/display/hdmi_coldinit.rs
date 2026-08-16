@@ -5,12 +5,10 @@
 //! (modeset) and `dw-hdmi-qp` (TX), plus raw GRF pokes.
 //!
 //! ## Board-validation status
-//! Nothing here has run on hardware. The MMIO addresses, reset ids and GRF
-//! writes are hardcoded for the OrangePi-5-Plus / RK3588 (from the board DTB +
-//! mainline), and the *ordering* is a best-effort mirror of mainline — both are
-//! expected to need tuning against the board (the PHY lock-poll bits and a
-//! register dump are the oracle). This compiles + links so the board session is
-//! "debug against lock bits", not "write from scratch". It is opt-in
+//! Board-validated 2026-08-17 on OrangePi-5-Plus / RK3588: a clean cold boot
+//! displays the framebuffer on a 1080p60 HDMI monitor (PHY locks, sink locks,
+//! EDID reads). The MMIO addresses, reset ids and GRF writes are hardcoded for
+//! this board (from the board DTB + mainline). Opt-in
 //! (`rockchip-vop2-coldinit` feature) and never on a default boot path.
 //!
 //! Runs at device-probe time (PostKernel), not from an interrupt: the shared CRU
@@ -65,9 +63,12 @@ const PCLK_HDPTX0_APB: usize = 0x267;
 // VOP_GRF CON2: route VP output to the HDMI0 TX (BIT1).
 const VOP_GRF_CON2: usize = 0x08;
 const VOP_GRF_CON2_HDMI0: u32 = 0x0002_0002;
-// VO1_GRF CON0: HDMI0 sync polarity (from Stage-2 research; board-tunable).
+// VO1_GRF CON0: HDMI0 sync polarity field [6:5]. Mainline `rk3588_get_hdmi_pol`
+// sets a bit only for N(egative)-sync modes; CEA 1080p60 has positive syncs so
+// the field must be 0. (The old 0x0060_0020 drove inverted HSYNC into the TX —
+// sinks locked the TMDS clock but showed black.)
 const VO1_GRF_CON0: usize = 0x00;
-const VO1_GRF_CON0_HDMI0_POL: u32 = 0x0060_0020;
+const VO1_GRF_CON0_HDMI0_POL: u32 = 0x0060_0000;
 // VO1_GRF CON3: DDC SDA/SCL pin mux + HDMI mode + I2S sel; COLOR_DEPTH[7:4]=0 (8bpc).
 const VO1_GRF_CON3: usize = 0x0c;
 const VO1_GRF_CON3_IO: u32 = 0x2e00_2e00;
@@ -77,6 +78,30 @@ const VO1_GRF_CON9_GRANT: u32 = 0x0400_0400;
 // SYS_GRF CON7: HPD IO enable (BIT12|BIT13).
 const SYS_GRF_CON7: usize = 0x31c;
 const SYS_GRF_CON7_HPD_IO: u32 = 0x3000_3000;
+
+// --- Board-level connector enable (OrangePi-5-Plus dts) ---
+// The HPD pins must be IOMUXed to the HDMI function or SYS_GRF hotplug status
+// never sees the sink, and each port's TX-ON switch (dts `hdmiN_tx_on_h`, the
+// connector-side 5V/output enable) must be driven high or nothing reaches the
+// jack regardless of SoC state. BUS_IOC GPIO1A_IOMUX_SEL_H: A5=HDMI0 HPD,
+// A6=HDMI1 HPD, both func 5; GPIO4B_IOMUX_SEL_L: B1/B2 -> GPIO func 0.
+const BUS_IOC_BASE: usize = 0xfd5f_8000;
+const BUS_IOC_GPIO1A_IOMUX_SEL_H: usize = 0x24;
+const BUS_IOC_HPD_MUX: u32 = 0x0ff0_0550;
+const BUS_IOC_GPIO4B_IOMUX_SEL_L: usize = 0x88;
+const BUS_IOC_TX_ON_GPIO_MUX: u32 = 0x0ff0_0000;
+// DDC pins (dts hdmim0_tx0_scl/sda): SCL = GPIO4_B7 func 5 (SEL_H bits
+// [15:12]), SDA = GPIO4_C0 func 5 (SEL_L bits [3:0]).
+const BUS_IOC_GPIO4B_IOMUX_SEL_H: usize = 0x8c;
+const BUS_IOC_DDC_SCL_MUX: u32 = 0xf000_5000;
+const BUS_IOC_GPIO4C_IOMUX_SEL_L: usize = 0x90;
+const BUS_IOC_DDC_SDA_MUX: u32 = 0x000f_0005;
+// GPIO4 (0xfec50000) SWPORT_DR_L/DDR_L are hiword-masked like the GRFs; B1|B2
+// = bits 9|10. Data is written before direction so the pin never drives low.
+const GPIO4_BASE: usize = 0xfec5_0000;
+const GPIO_SWPORT_DR_L: usize = 0x0000;
+const GPIO_SWPORT_DDR_L: usize = 0x0008;
+const GPIO4_TX_ON_BITS: u32 = 0x0600_0600;
 
 /// CRU-backed PHY reset lines (uses the process-wide CRU handle).
 struct CruResets;
@@ -133,6 +158,50 @@ pub fn cold_init_hdmi0_1080p60(vop_mmio: &mut VopMmio, fb_phys: u64) -> Result<(
     }
     let _ = crate::soc::rockchip::pm::power_on_domain(PD_VO1);
 
+    // 1b. Board-level connector enable: HPD pinmux + TX-ON switches high for
+    //     both ports (always-on bus domains, safe before anything else). Without
+    //     this the sink never asserts HPD and may never receive the signal.
+    grf_write_batch(
+        BUS_IOC_BASE,
+        &[
+            (BUS_IOC_GPIO1A_IOMUX_SEL_H, BUS_IOC_HPD_MUX),
+            (BUS_IOC_GPIO4B_IOMUX_SEL_L, BUS_IOC_TX_ON_GPIO_MUX),
+            (BUS_IOC_GPIO4B_IOMUX_SEL_H, BUS_IOC_DDC_SCL_MUX),
+            (BUS_IOC_GPIO4C_IOMUX_SEL_L, BUS_IOC_DDC_SDA_MUX),
+        ],
+    )?;
+    grf_write_batch(
+        GPIO4_BASE,
+        &[
+            (GPIO_SWPORT_DR_L, GPIO4_TX_ON_BITS),
+            (GPIO_SWPORT_DDR_L, GPIO4_TX_ON_BITS),
+        ],
+    )?;
+    info!("coldinit: board connector enable (HPD mux + TX-ON GPIO4_B1/B2 high)");
+
+    // 1c. VOP IOMMU bypass: the VOP's window fetches go through its MMU (two
+    //     instances at 0xfdd97e00/0xfdd97f00, one per AXI port). A cold boot
+    //     can leave paging enabled with no page tables — every fetch then
+    //     bus-errors (VP int raw status latches FS|BUS_ERROR|POST_BUF_EMPTY
+    //     each frame) and the VP scans out black despite a perfect config.
+    //     Command 1 = DISABLE_PAGING (rk_iommu) -> bypass, phys addrs work.
+    match iomap(0xfdd9_7000, 0x1000) {
+        Ok(p) => {
+            for inst in [0xe00usize, 0xf00] {
+                // SAFETY: freshly-mapped device page; MMU regs are 32-bit.
+                unsafe {
+                    let st = core::ptr::read_volatile(p.as_ptr().add(inst + 0x04) as *const u32);
+                    core::ptr::write_volatile(p.as_ptr().add(inst + 0x08) as *mut u32, 1);
+                    let st2 = core::ptr::read_volatile(p.as_ptr().add(inst + 0x04) as *const u32);
+                    info!(
+                        "coldinit: VOP IOMMU@+{inst:#x} status {st:#010x} -> {st2:#010x} (bypass)"
+                    );
+                }
+            }
+        }
+        Err(_) => warn!("coldinit: VOP IOMMU page iomap failed; fetch may fault"),
+    }
+
     // 2. Ungate the PHY's own ref (24 MHz) + apb source clocks before touching
     //    it — the PHY sequence's first APB access assumes they are running, and a
     //    cold boot may have left them gated. Best-effort (idempotent if already on).
@@ -187,6 +256,26 @@ pub fn cold_init_hdmi0_1080p60(vop_mmio: &mut VopMmio, fb_phys: u64) -> Result<(
         &dw_hdmi_qp::avi::AviInfoframe::fhd60_rgb(),
     );
     info!("coldinit: HDMI-QP TX enabled -> 1080p60 RGB should be live");
+
+    // 7b. DDC probe: read the sink's EDID over the TX I2C master. Serves three
+    //     purposes: proves the DDC path end-to-end, identifies the sink, and
+    //     performs the DDC negotiation some sinks (capture boxes) appear to
+    //     gate their video pipeline on. Failure is non-fatal — logged and
+    //     ignored. Timer base: the TX "ref" clock rate; the mainline vendor
+    //     default overstates it at worst (SCL slower than nominal = still
+    //     I2C-legal). TODO board-verify the real rate via vendor TX reg 0x80.
+    dw_hdmi_qp::ddc::init(&mut tx, 428_571_429);
+    match dw_hdmi_qp::ddc::read_edid_block0(&mut tx, |us| KEnv.delay_us(us)) {
+        Ok(edid) => {
+            info!(
+                "coldinit: EDID block0 read OK header_ok={} csum_ok={} bytes[8..16]={:02x?}",
+                dw_hdmi_qp::ddc::header_ok(&edid),
+                dw_hdmi_qp::ddc::checksum_ok(&edid),
+                &edid[8..16]
+            );
+        }
+        Err(e) => warn!("coldinit: EDID read failed: {e:?} (continuing without)"),
+    }
 
     // 8. Monitor-free liveness readback: prove the raster is actually scanning
     //    (frame-start interrupts advancing), the window is fetching our fb, and
