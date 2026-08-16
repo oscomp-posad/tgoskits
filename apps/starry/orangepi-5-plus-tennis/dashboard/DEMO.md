@@ -61,8 +61,14 @@ the viewport at 10 fps publish / 15 fps render.
 - **Use piped telemetry (as `run-demo.sh` does), not `--telemetry` file
   tailing.** Concurrently tailing a tmpfs file the tennis app is writing can
   wedge the writer in-kernel (unkillable; reboot to recover) — a StarryOS
-  filesystem-concurrency bug, tracked as a follow-up. The camera-feed file is
-  written with an atomic rename and has not shown the issue.
+  filesystem-concurrency bug, tracked as a follow-up. The pipe avoids it.
+- **Known bug — stochastic UVC capture stall.** Live camera capture can go
+  quiet after minutes to tens of minutes (observed 23 s–15 min; the display
+  and dashboard keep running, the viewport just stops updating). The stall
+  state lives in the USB stack and survives process restarts — recovery is a
+  reboot (~2 min) and rerunning `run-demo.sh`. Tracked as a follow-up against
+  the USB host stack (completions are polled, no IRQ). For a staged demo,
+  reboot shortly before showing; runs usually last well past 10 minutes.
 - The display config does not include the RGA driver; the tennis app falls
   back to CPU resize automatically (fine for the demo; add the RGA feature for
   the zero-copy path).
