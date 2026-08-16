@@ -21,10 +21,12 @@
 //
 // Non-interference (must not perturb the tennis app AT ALL): the dashboard reads
 // only telemetry + procfs, caps repaints to ~8 fps, runs SCHED_IDLE pinned to the
-// A55 cluster, and can tail a tmpfs file so the app never blocks on a full pipe.
-//   Recommended:  tennis_app … > /tmp/tt.log 2>&1 &
-//                 QT_QPA_PLATFORM=linuxfb ./dashboard --telemetry /tmp/tt.log
-//   Pipe (simple): tennis_app … | QT_QPA_PLATFORM=linuxfb ./dashboard
+// A55 cluster.
+//   Recommended:  tennis_app … | QT_QPA_PLATFORM=linuxfb ./dashboard
+//   (Do NOT use `--telemetry` to tail a tmpfs file the app is concurrently
+//   writing on StarryOS: the concurrent tail can wedge the writer in-kernel —
+//   unkillable, reboot-only recovery. Board-proven 2026-08-17; the pipe and
+//   the atomically-renamed `--camera` feed file are safe. See DEMO.md.)
 // Screenshot (host, offscreen only — never offscreen on StarryOS):
 //   QT_QPA_PLATFORM=offscreen ./dashboard --shot out.png [--size 1600x1200]
 #define _GNU_SOURCE 1
