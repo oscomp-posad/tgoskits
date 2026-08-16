@@ -241,13 +241,85 @@ impl RockchipPM {
             return Ok(());
         }
 
-        // Write power control register
-        self.write_power_control(&domain, power_on)?;
+        if power_on {
+            // Write power control register
+            self.write_power_control(&domain, true)?;
 
-        // Wait for power domain status to stabilize
-        self.wait_power_domain_stable(&domain, power_on)?;
+            // Wait for power domain status to stabilize
+            self.wait_power_domain_stable(&domain, true)?;
+
+            // Release the interconnect idle request: gating power alone leaves
+            // the domain's AXI master ports isolated from the NoC — MMIO works
+            // but every DMA access bus-errors until this is released.
+            self.set_idle_request(&domain, false)?;
+        } else {
+            // Isolate the domain's masters before removing power
+            // (mainline `rockchip_pd_power` order).
+            self.set_idle_request(&domain, true)?;
+
+            self.write_power_control(&domain, false)?;
+            self.wait_power_domain_stable(&domain, false)?;
+        }
 
         Ok(())
+    }
+
+    /// Request or release the NoC idle state for a domain's bus interfaces.
+    ///
+    /// Mirrors mainline `rockchip_pmu_set_idle_request`: write the request
+    /// (write-enable-mask style when available), then wait for the ack and the
+    /// idle status to reflect the requested state. Domains without a request
+    /// mask have no bus isolation to manage.
+    fn set_idle_request(&mut self, domain: &PowerDomain, idle: bool) -> PmResult<()> {
+        let domain_info = self
+            .info
+            .domains
+            .get(domain)
+            .ok_or(PmError::DomainNotFound)?;
+
+        if domain_info.req_mask == 0 {
+            return Ok(());
+        }
+
+        let req_offset = (self.info.req_offset + domain_info.req_offset) as usize;
+        if domain_info.req_w_mask != 0 {
+            let value = if idle {
+                (domain_info.req_mask | domain_info.req_w_mask) as u32
+            } else {
+                domain_info.req_w_mask as u32
+            };
+            self.reg.write_u32(req_offset, value);
+        } else {
+            let current = self.reg.read_u32(req_offset);
+            let new_value = if idle {
+                current | domain_info.req_mask as u32
+            } else {
+                current & !(domain_info.req_mask as u32)
+            };
+            self.reg.write_u32(req_offset, new_value);
+        }
+
+        mb();
+
+        let want_ack = if idle { domain_info.ack_mask as u32 } else { 0 };
+        let ack_mask = domain_info.ack_mask as u32;
+        let mut acked = ack_mask == 0;
+        for _ in 0..10000 {
+            if self.reg.read_u32(self.info.ack_offset as usize) & ack_mask == want_ack {
+                acked = true;
+                break;
+            }
+        }
+        if !acked {
+            return Err(PmError::Timeout);
+        }
+
+        for _ in 0..10000 {
+            if self.is_domain_idle(domain)? == idle {
+                return Ok(());
+            }
+        }
+        Err(PmError::Timeout)
     }
 
     /// Write to power control register
