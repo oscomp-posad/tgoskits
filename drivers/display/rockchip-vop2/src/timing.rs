@@ -82,6 +82,12 @@ impl VideoTiming {
     pub const fn post_vact_info(&self) -> u32 {
         self.vact_st_end()
     }
+    /// `PRE_SCAN_HTIMING = ((bg_dly + hactive/2 - 1) << 16) | hsync_len`
+    /// (mainline `rk3568_vop2_setup_bg_dly`). `bg_dly` must equal the value
+    /// programmed into the VP's `BG_MIX_CTRL` BG_DLY field.
+    pub const fn pre_scan_htiming(&self, bg_dly: u32) -> u32 {
+        ((bg_dly + self.hactive / 2 - 1) << 16) | self.hsync
+    }
 }
 
 #[cfg(test)]
@@ -109,5 +115,9 @@ mod tests {
         // POST info mirrors the display active window (no underscan)
         assert_eq!(t.post_hact_info(), (192 << 16) | 2112);
         assert_eq!(t.post_vact_info(), (41 << 16) | 1121);
+        // pre-scan with the RK3588 VP0 bg_dly of 54: (54+960-1)<<16 | 44
+        // (board-proven 2026-08-17: this exact value ended the per-line
+        // POST_BUF_EMPTY underrun and produced first light)
+        assert_eq!(t.pre_scan_htiming(54), (1013 << 16) | 44);
     }
 }

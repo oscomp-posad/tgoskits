@@ -22,6 +22,20 @@ pub const fn cfg_done_value(vp: u8) -> u32 {
     GLB_CFG_DONE_EN | bit | (bit << 16)
 }
 
+/// System auto clock-gating control. Mainline clears the master enable (bit 31)
+/// at `vop2_enable` — "workaround to avoid display image shift when a window
+/// enabled". Cold reset leaves the register all-ones.
+pub const SYS_AUTO_GATING_CTRL: usize = 0x008;
+pub const AUTO_GATING_EN: u32 = 1 << 31;
+
+/// VOP2-internal window-memory power domains (`RK3588_SYS_PD_CTRL`): a SET bit
+/// = domain powered DOWN. Cold reset = 0xff (all down); a powered-down window
+/// fetches zeros — a full-screen black window with every config register
+/// looking correct. Mainline `rk3588_vop2_power_domain_enable_all` clears
+/// Cluster0-3 (bits 0-3) + Esmart (bit 7) at enable, before any window config.
+pub const SYS_PD_CTRL: usize = 0x034;
+pub const PD_ALL_WINDOWS: u32 = 0x8f;
+
 /// Window base offsets (RK3588).
 pub mod win_base {
     pub const CLUSTER0: usize = 0x1000;
@@ -93,7 +107,29 @@ pub mod vp {
     // Offsets within a VP block (add to `base(vp)`):
     pub const DSP_CTRL: usize = 0x00;
     pub const MIPI_CTRL: usize = 0x04;
+    /// VP interface clock control (`RK3588_VP_CLK_CTRL`): DCLK_CORE_DIV[1:0] and
+    /// DCLK_OUT_DIV[3:2], each holding log2(divisor). For HDMI with DCLK_VOP muxed
+    /// straight to the HDPTX pixel clock, the VP core must run at dclk/4.
+    pub const CLK_CTRL: usize = 0x0C;
+    /// `CLK_CTRL` value for DCLK_CORE_DIV=/4 (log2=2), DCLK_OUT_DIV=/1.
+    pub const CLK_CTRL_DCLK_CORE_DIV4: u32 = 2;
+    /// VP hardware color-bar test-pattern control (`RK3568_VP_COLOR_BAR_CTRL`).
+    /// Bit 0 = enable: when set, the VP emits an internal color-bar pattern that
+    /// OVERRIDES the composited window output (the framebuffer is ignored). U-Boot
+    /// enables this for its own bring-up and never clears it, so a from-scratch
+    /// modeset must write 0 here or the panel shows color bars regardless of fb.
+    pub const COLOR_BAR_CTRL: usize = 0x08;
+    /// Enable bit of `COLOR_BAR_CTRL`.
+    pub const COLOR_BAR_CTRL_EN: u32 = 1 << 0;
     pub const DSP_BG: usize = 0x2C;
+    /// Pre-scan horizontal timing (`RK3568_VP_PRE_SCAN_HTIMING`):
+    /// `((bg_dly + hactive/2 - 1) << 16) | hsync_len` (mainline
+    /// `rk3568_vop2_setup_bg_dly`), written together with the matching
+    /// `BG_MIX_CTRL` bg_dly. Left at the cold-reset 0 the post pipeline gets no
+    /// per-line pre-fetch lead: the scanout FIFO underruns on EVERY line
+    /// (`POST_BUF_EMPTY` latches each frame) and the VP outputs solid black
+    /// with an otherwise perfect config — the sink locks, the picture is black.
+    pub const PRE_SCAN_HTIMING: usize = 0x30;
     pub const POST_DSP_HACT_INFO: usize = 0x34;
     pub const POST_DSP_VACT_INFO: usize = 0x38;
     pub const DSP_HTOTAL_HS_END: usize = 0x48;
@@ -115,10 +151,15 @@ pub mod ovl {
     pub const CTRL: usize = 0x600;
     pub const LAYER_SEL: usize = 0x604;
     pub const PORT_SEL: usize = 0x608;
-    /// Per-VP background-mix control: `0x6E0 + vp*4`.
+    /// Per-VP background-mix control: `0x6E0 + vp*4`. BG_DLY field [31:24].
     pub const fn vp_bg_mix_ctrl(vp: u8) -> usize {
         0x6E0 + (vp as usize) * 4
     }
+    pub const BG_MIX_BG_DLY_SHIFT: u32 = 24;
+    /// RK3588 VP0/VP1 background delay (mainline `pre_scan_max_dly[3]` of
+    /// `rk3588_vop_video_ports`); must match the delay baked into the VP's
+    /// `PRE_SCAN_HTIMING` value.
+    pub const VP_BG_DLY: u32 = 54;
     /// Esmart-window delay-number register (holds ESMART0..3 delays).
     pub const SMART_DLY_NUM: usize = 0x6F8;
 
@@ -127,8 +168,10 @@ pub mod ovl {
     pub const fn layer_sel_shift(layer: u8) -> u32 {
         (layer as u32) * 4
     }
-    /// Esmart0's `layer_sel_id` on RK3588 (mainline win data) == 2.
-    pub const ESMART0_LAYER_SEL_ID: u32 = 2;
+    /// Esmart0's `layer_sel_id` on RK3588 (mainline `rk3588_vop_win_data`:
+    /// Cluster0..3 = 0..3, Esmart0..3 = 4..7). 2 is the RK3568 id — using it
+    /// here routes Cluster2 into the mixer instead and the VP scans background.
+    pub const ESMART0_LAYER_SEL_ID: u32 = 4;
 
     /// `PORT_SEL` window→VP field for Esmart0: bits [25:24].
     pub const PORT_SEL_ESMART0_SHIFT: u32 = 24;
@@ -152,6 +195,16 @@ pub mod dsp_if {
     pub const EN_EDP_HDMI0_MUX_MASK: u32 = 0b11 << 16;
     /// `CFG_DONE_IMD` (BIT 28) of `POL`: make the DSP_IF bank latch immediately.
     pub const POL_CFG_DONE_IMD: u32 = 1 << 28;
+
+    /// `CTRL` EDP0/HDMI0 interface dividers: DCLK_DIV[17:16] + PCLK_DIV[18], each
+    /// log2(divisor). Without these the HDMI0 TX gets an ill-timed pixel stream
+    /// (VP0 scans, but the transmitter outputs black).
+    pub const CTRL_HDMI0_DIV_MASK: u32 = (0b11 << 16) | (1 << 18);
+    /// HDMI0 interface dclk=/4 (DCLK_DIV[17:16]=2), pixclk=/2 (PCLK_DIV[18]=1) —
+    /// the exact value mainline `rk3588_set_intf_mux` writes for 1080p60 8bpc
+    /// (`rk3588_calc_cru_cfg`: if_dclk_div=ilog2(4)=2, if_pixclk_div=ilog2(2)=1).
+    /// == 0x00060000.
+    pub const CTRL_HDMI0_DCLK4_PCLK2: u32 = (2 << 16) | (1 << 18);
 }
 
 /// Interrupt registers (Stage 2 vsync). Per-VP block at `0xA0 + vp*0x10`.

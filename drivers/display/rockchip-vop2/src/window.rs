@@ -102,6 +102,17 @@ pub fn program_vp_timing<R: Regs>(regs: &mut R, mode: &DisplayMode) {
     regs.write32(base + vp::DSP_VACT_ST_END, t.vact_st_end());
     regs.write32(base + vp::POST_DSP_HACT_INFO, t.post_hact_info());
     regs.write32(base + vp::POST_DSP_VACT_INFO, t.post_vact_info());
+    // Background delay + the matching pre-scan lead (one pair, mainline
+    // `rk3568_vop2_setup_bg_dly`). Without the pre-scan value the post FIFO
+    // underruns on every line and the VP outputs solid black.
+    regs.write32(
+        crate::regs::ovl::vp_bg_mix_ctrl(mode.vp),
+        crate::regs::ovl::VP_BG_DLY << crate::regs::ovl::BG_MIX_BG_DLY_SHIFT,
+    );
+    regs.write32(
+        base + vp::PRE_SCAN_HTIMING,
+        t.pre_scan_htiming(crate::regs::ovl::VP_BG_DLY),
+    );
 }
 
 /// Enable the frame-start interrupt for video port `vp` (read-modify-write, so

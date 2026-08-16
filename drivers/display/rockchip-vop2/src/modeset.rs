@@ -56,7 +56,7 @@ pub fn setup_esmart0<R: Regs>(regs: &mut R, fb_phys: u32, mode: &DisplayMode) {
 /// output. Read-modify-write throughout, to preserve U-Boot's routing of any
 /// other windows/ports.
 pub fn route_esmart0_to_vp<R: Regs>(regs: &mut R, vp_id: u8) {
-    // LAYER_SEL: place Esmart0's layer_sel_id (2) into mixer layer 0. Clear only
+    // LAYER_SEL: place Esmart0's layer_sel_id (4) into mixer layer 0. Clear only
     // the low 3 bits of the nibble (mainline `LAYER(id, 0x7)`) — layer_sel_ids
     // are 0..=7, so the 4th bit is reserved and preserved.
     let mut layer_sel = regs.read32(ovl::LAYER_SEL);
@@ -93,6 +93,17 @@ pub fn route_esmart0_to_vp<R: Regs>(regs: &mut R, vp_id: u8) {
 /// Enable video port `vp_id` → HDMI0 at the output interface (RMW: preserves the
 /// other interfaces), and force the DSP_IF bank to latch immediately.
 pub fn route_vp_to_hdmi0<R: Regs>(regs: &mut R, vp_id: u8) {
+    // Interface clock dividers for VP{vp_id} -> HDMI0 (RK3588's `set_intf_mux`
+    // does these; a from-scratch modeset that omits them makes the TX transmit a
+    // valid signal but BLACK video because VP0's pixels clock out at the wrong
+    // rate). Our DCLK_VOP0 is muxed directly to the HDPTX pixel clock, so the VP
+    // core runs at dclk/4 and the HDMI0 interface pixclk at dclk/1.
+    regs.write32(vp::base(vp_id) + vp::CLK_CTRL, vp::CLK_CTRL_DCLK_CORE_DIV4);
+    let mut ctrl = regs.read32(dsp_if::CTRL);
+    ctrl &= !dsp_if::CTRL_HDMI0_DIV_MASK;
+    ctrl |= dsp_if::CTRL_HDMI0_DCLK4_PCLK2; // 0x60000 = mainline (dclk/4, pixclk/2)
+    regs.write32(dsp_if::CTRL, ctrl);
+
     let mut en = regs.read32(dsp_if::EN);
     en &= !dsp_if::EN_EDP_HDMI0_MUX_MASK;
     en |= dsp_if::EN_HDMI0 | ((vp_id as u32) << dsp_if::EN_EDP_HDMI0_MUX_SHIFT);
@@ -122,10 +133,27 @@ pub fn modeset_vp0<R: Regs>(
     let vp_id = mode.vp;
     let vbase = vp::base(vp_id);
 
+    // 0. Power the VOP2-internal window-memory domains and disable auto
+    //    clock-gating BEFORE any window/VP configuration (mainline
+    //    `vop2_enable` order). Cold reset leaves SYS_PD_CTRL=0xff — a
+    //    powered-down window fetches zeros, i.e. a full-screen black window.
+    let pd = regs.read32(crate::regs::SYS_PD_CTRL);
+    regs.write32(crate::regs::SYS_PD_CTRL, pd & !crate::regs::PD_ALL_WINDOWS);
+    let ag = regs.read32(crate::regs::SYS_AUTO_GATING_CTRL);
+    regs.write32(
+        crate::regs::SYS_AUTO_GATING_CTRL,
+        ag & !crate::regs::AUTO_GATING_EN,
+    );
+
     // 1. VP display timing (values verified against mainline in `timing`).
     program_vp_timing(regs, mode);
 
     // 2. VP control: RGB (AAAA) out, MIPI off, black background, STANDBY cleared.
+    //    Also disable the VP hardware color-bar test pattern: U-Boot leaves it
+    //    enabled for its own bring-up, and while set the VP emits an internal
+    //    color-bar pattern that overrides the composited window (the framebuffer
+    //    is ignored). Clearing it makes the VP scan our Esmart0 window/fb.
+    regs.write32(vbase + vp::COLOR_BAR_CTRL, 0);
     regs.write32(vbase + vp::MIPI_CTRL, 0);
     regs.write32(vbase + vp::DSP_BG, 0);
     regs.write32(vbase + vp::DSP_CTRL, vp_dsp_ctrl_rgb());
@@ -178,8 +206,8 @@ mod tests {
         r.write32(ovl::LAYER_SEL, 0x3300_0000); // upper nibbles occupied
         r.write32(ovl::PORT_SEL, 0x00FF_0000); // other window→VP bits set
         route_esmart0_to_vp(&mut r, 0);
-        // layer0 nibble == Esmart0 id (2), upper nibbles preserved.
-        assert_eq!(r.read32(ovl::LAYER_SEL) & 0xF, 2);
+        // layer0 nibble == Esmart0 id (4), upper nibbles preserved.
+        assert_eq!(r.read32(ovl::LAYER_SEL) & 0xF, 4);
         assert_eq!(r.read32(ovl::LAYER_SEL) & 0xFF00_0000, 0x3300_0000);
         // Esmart0 field [25:24] == 0 (VP0); other window bits preserved.
         assert_eq!(r.read32(ovl::PORT_SEL) & (0b11 << 24), 0);
