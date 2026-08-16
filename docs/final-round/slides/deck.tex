@@ -99,7 +99,7 @@
   \navsegment{1}
   \frametitle{自底向上：本队贡献贯穿整个软件栈}
   \centering
-  \includegraphics[width=\linewidth,height=0.80\textheight,keepaspectratio]{Fkmap.png}
+  \includegraphics[width=\linewidth,height=0.72\textheight,keepaspectratio]{Fkmap.png}
 \end{frame}
 
 % ============================== 19a 感知加速器驱动 + 零拷贝 ==============================
@@ -147,7 +147,7 @@
   \navsegment{1}
   \frametitle{跨子系统对 Linux 的性能追平：优化前 $\to$ 优化后}
   \centering
-  \includegraphics[width=\linewidth,height=0.80\textheight,keepaspectratio]{F01_deck.png}
+  \includegraphics[width=\linewidth,height=0.72\textheight,keepaspectratio]{F01_deck.png}
   \advance{每项从优化前到优化后向 Linux 基线追平}{青色达到或超过 Linux，橙色分持平与仍有差距两档}
 \end{frame}
 
@@ -177,6 +177,45 @@
   \advance{一图看清对 Linux 的位置}{十个轴：领先 THP/TTFI/A55/schbench，其余持平或收窄}
 \end{frame}
 
+% ============================== 系统调用入口 getpid（系统层） ==============================
+\begin{frame}
+  \navsegment{2}
+  \frametitle{系统调用入口：getpid 微阶梯}
+  \begin{columns}[T]
+    \begin{column}{0.54\textwidth}
+      \includegraphics[width=\linewidth]{F07.png}
+    \end{column}
+    \begin{column}{0.43\textwidth}
+      \begin{itemize}
+        \item 空系统调用 getpid 基线 1200\,ns，Linux \nGetpidLin\,ns，相差约 7 倍，开销集中于进入与返回路径
+        \item 三层剥离每次调用均付而多数不用的固定成本：ptrace 快路径 $-25\%$、跳过 poll\_process\_timer $-17\%$、无锁 timer\_state 粗 tick 记账 $-50\%$
+        \item getpid 降至 \nGetpid\,ns，相对 Linux 由 7 倍收窄至 \nGetpidRatio 倍，stime 秒占比 0.71 对齐 Linux 0.72（残余为 \texttt{uctx.run} 陷入的架构地板）
+      \end{itemize}
+    \end{column}
+  \end{columns}
+  \advance{getpid 基线慢 Linux 约 7 倍}{三层剥离固定成本 $\to$ \nGetpid\,ns（\nGetpidRatio× Linux），贴陷入下限}
+\end{frame}
+
+% ============================== 频率电压 DVFS/PVTPLL（系统层） ==============================
+\begin{frame}
+  \navsegment{2}
+  \frametitle{频率电压：DVFS / PVTPLL 与 DDR 变频固件外因}
+  \begin{columns}[T]
+    \begin{column}{0.52\textwidth}
+      \includegraphics[width=\linewidth]{F10.png}
+    \end{column}
+    \begin{column}{0.45\textwidth}
+      \begin{itemize}
+        \item RK3588 CPU 时钟为电压耦合的 PVTPLL，频率随轨压变化，CPU CRU 由 BL31 保护
+        \item \#1657：按簇 ondemand governor + PMIC 电压标定（A76 走 I2C、A55 走 SPI），事务式先电压后时钟
+        \item 环长调节：更高 SCMI 速率将环由 17 重编为 11，同压更高频；A76 顶 \nDvfsAseven\,MHz、A55 顶 \nDvfsAfive\,MHz，八线程达 \nCpuTEightRatio× Linux
+        \item \vwarn{DDR 变频}驱动已实现，因主线 TF-A 缺 SIP DRAM 的 EL3 处理器而停在探测态（外因）
+      \end{itemize}
+    \end{column}
+  \end{columns}
+  \advance{CPU 固定于上电低频、落后约三十倍}{ondemand + PMIC + 环长调节逐核 \nPerCoreRatio× Linux；DDR 变频受主线固件限制}
+\end{frame}
+
 % ============================== 9 观测 perf + ftrace ==============================
 \begin{frame}
   \navsegment{2}
@@ -192,12 +231,12 @@
   \advance{测量需要工具}{硬件 PMU perf + ftrace 上板，56/0，直接运行上游 perf 二进制}
 \end{frame}
 
-% ============================== perf 真机证据 ==============================
+% ============================== perf 真机实测（真机采集，非重绘） ==============================
 \begin{frame}
   \navsegment{2}
-  \frametitle{perf 真机证据：stat / record / report / top / kprobe / ftrace}
+  \frametitle{perf 真机实测：硬件 PMU stat / record / report}
   \centering
-  \includegraphics[width=\linewidth,height=0.82\textheight,keepaspectratio]{Fperf_proof.png}
+  \includegraphics[width=\linewidth,height=0.74\textheight,keepaspectratio]{Fperf_real.png}
 \end{frame}
 
 % ============================== perf 火焰图 ==============================
@@ -270,25 +309,6 @@
   \advance{提交版 TTFI 慢 Linux 约 1.7 倍}{根因定位降至 \nTtfi\,s 领先，机制为精简 init 相对 systemd bringup 的优势}
 \end{frame}
 
-% ============================== 18 QEMU NPU 模型 + 模型协同 ==============================
-\begin{frame}
-  \navsegment{2}
-  \frametitle{QEMU RKNPU 设备模型与机器人检测模型的协同优化}
-  \begin{columns}[T]
-    \begin{column}{0.54\textwidth}
-      \includegraphics[width=\linewidth]{F13.png}
-    \end{column}
-    \begin{column}{0.43\textwidth}
-      \begin{itemize}
-        \item 本队将闭源 RK3588 RKNPU 实现为功能级 QEMU 模型（qemu\#19、qemu\#26，106 qtests），真实执行 INT8/FP 并接入 IOMMU
-        \item 模型将板上调试的加速器转为 board-free、寄存器精确的开发、CI 与优化载体
-        \item 逐层重塑网球检测模型：输入缩放与 SiLU 改 ReLU 累计使 LUT 任务 107$\to$3、rknn\_run 减半，叠加类别头收窄、头框合并（左图为模拟器实测，非真机）
-      \end{itemize}
-    \end{column}
-  \end{columns}
-  \advance{加速器闭源、原本只能板上调试}{QEMU RKNPU 功能模型上测得模型协同：rknn\_run 降至约三分之一、精度基本持平}
-\end{frame}
-
 % ============================== B 显示与板级广度 ==============================
 \begin{frame}
   \navsegment{2}
@@ -314,7 +334,7 @@
   \frametitle{真机跑通：PostgreSQL 数据库与 Weston 图形栈}
   \begin{columns}[T]
     \begin{column}{0.56\textwidth}
-      \includegraphics[width=\linewidth]{Fpostgres_proof.png}
+      \includegraphics[width=\linewidth,height=0.64\textheight,keepaspectratio]{Fdemo_pg.png}
     \end{column}
     \begin{column}{0.42\textwidth}
       \centering
@@ -324,6 +344,25 @@
       {\color{muted}\footnotesize Weston 合成器 + GTK4 / Xwayland，四架构验证通过}
     \end{column}
   \end{columns}
+\end{frame}
+
+% ============================== 创新：QEMU NPU 模型 + 模型协同 ==============================
+\begin{frame}
+  \navsegment{3}
+  \frametitle{QEMU RKNPU 设备模型与机器人检测模型的协同优化}
+  \begin{columns}[T]
+    \begin{column}{0.55\textwidth}
+      \includegraphics[width=\linewidth]{Fdemo_npu.png}
+    \end{column}
+    \begin{column}{0.42\textwidth}
+      \begin{itemize}
+        \item 本队将闭源 RK3588 RKNPU 实现为功能级 QEMU 模型（qemu\#19、qemu\#26，106 qtests），真实执行 INT8/FP 并接入 IOMMU
+        \item 模型将板上调试的加速器转为 board-free、寄存器精确的开发、CI 与优化载体
+        \item 在该模型上逐层重塑网球检测模型：SiLU 改 ReLU 使 LUT 任务 107$\to$3、\texttt{rknn\_run} 减半，叠加类别头收窄与头框合并
+      \end{itemize}
+    \end{column}
+  \end{columns}
+  \advance{加速器闭源、原本只能板上调试}{QEMU RKNPU 功能模型上测得模型协同：rknn\_run 降至约三分之一、精度基本持平}
 \end{frame}
 
 % ============================== R 借鉴与创新 ==============================
@@ -351,26 +390,6 @@
     \end{column}
   \end{columns}
   \advance{清楚区分借鉴与自研}{基础：tgoskits / aka-rk3588 / rknn-toolkit2；增量：机器人推理对等 + 整 OS 对等 + QEMU NPU 模型 + AI 方法}
-\end{frame}
-
-% ============================== M AI 方法与测试台 ==============================
-\begin{frame}
-  \navsegment{4}
-  \frametitle{AI 掌控-闭环开发方法与自治测试台}
-  \begin{columns}[T]
-    \begin{column}{0.42\textwidth}
-      \includegraphics[width=\linewidth]{Fharness.png}
-    \end{column}
-    \begin{column}{0.55\textwidth}
-      \begin{itemize}
-        \item 人掌架构与验收，AI 在真机与 QEMU 闭环内迭代实现，运行至判定门：一次运行产出一个可由机器比对的数值
-        \item 四类判定门：sysbench 对等回归、schbench 延迟阈值、多智能体对抗评审、s\_frac 计时 oracle；触及 SMP 同步的改动每次配 7 到 26 名评审
-        \item 带外电源自治测试台：计量式智能插座（miIO 本地）分级恢复 L0 暖重启、L1 硬断电冷启、L2 U-Boot 黄金映像、L3 人工，令会挂死内核的改动也可无人值守
-        \item 实例：cpufreq 静默吞掉电压写失败（欠压风险）经 26 人评审查出，改为失败即中止
-      \end{itemize}
-    \end{column}
-  \end{columns}
-  \advance{工作量大、共享 crate 风险高}{人掌架构、AI 闭环迭代至判定门，带外电源使真机回路无人值守}
 \end{frame}
 
 % ============================== C 小结分工与材料 ==============================
@@ -440,26 +459,6 @@
   \advance{放置均衡后仍聚簇、唤醒存在下限}{驻留均匀 + \texttt{wake\_affine} 唤醒 \nWake\,µs 追平 Linux}
 \end{frame}
 
-% ============================== 15 频率电压 DVFS/PVTPLL + DDR 外因 ==============================
-\begin{frame}
-  \navsegment{0}
-  \frametitle{频率电压：DVFS / PVTPLL 与 DDR 变频固件外因}
-  \begin{columns}[T]
-    \begin{column}{0.52\textwidth}
-      \includegraphics[width=\linewidth]{F10.png}
-    \end{column}
-    \begin{column}{0.45\textwidth}
-      \begin{itemize}
-        \item RK3588 CPU 时钟为电压耦合的 PVTPLL，频率随轨压变化，CPU CRU 由 BL31 保护
-        \item \#1657：按簇 ondemand governor + PMIC 电压标定（A76 走 I2C、A55 走 SPI），事务式先电压后时钟
-        \item 环长调节：更高 SCMI 速率将环由 17 重编为 11，同压更高频；A76 顶 \nDvfsAseven\,MHz、A55 顶 \nDvfsAfive\,MHz，八线程达 \nCpuTEightRatio× Linux
-        \item \vwarn{DDR 变频}走 Rockchip SIP DRAM 接口，主线 TF-A 缺该 EL3 处理器，驱动已实现，停在探测态，受主线固件限制
-      \end{itemize}
-    \end{column}
-  \end{columns}
-  \advance{CPU 固定于上电低频、落后约三十倍}{ondemand + PMIC + 环长调节逐核 \nPerCoreRatio× Linux；DDR 变频受主线固件限制}
-\end{frame}
-
 % ============================== 14 页表·TLB 正确性 + blast radius ==============================
 \begin{frame}
   \navsegment{0}
@@ -501,41 +500,21 @@
   \advance{每一项改动都上板 A/B}{四条测平或测负者如实回退，并列出各自的适用边界}
 \end{frame}
 
-% ============================== 12 系统调用 getpid 微阶梯 ==============================
-\begin{frame}
-  \navsegment{0}
-  \frametitle{系统调用入口：getpid 微阶梯}
-  \begin{columns}[T]
-    \begin{column}{0.54\textwidth}
-      \includegraphics[width=\linewidth]{F07.png}
-    \end{column}
-    \begin{column}{0.43\textwidth}
-      \begin{itemize}
-        \item 空系统调用 getpid 基线 1200\,ns，Linux \nGetpidLin\,ns，相差约 7 倍，开销集中于进入与返回路径
-        \item 三层剥离每次调用均付而多数不用的固定成本：ptrace 快路径 $-25\%$、跳过 poll\_process\_timer $-17\%$、无锁 timer\_state 粗 tick 记账 $-50\%$
-        \item getpid 降至 \nGetpid\,ns，相对 Linux 由 7 倍收窄至 \nGetpidRatio 倍，stime 秒占比 0.71 对齐 Linux 0.72
-        \item 残余 \nGetpid\,ns 为 \texttt{uctx.run} 陷入的架构地板，三套系统共用，无冗余可摘
-      \end{itemize}
-    \end{column}
-  \end{columns}
-  \advance{getpid 基线慢 Linux 约 7 倍}{三层剥离固定成本 $\to$ \nGetpid\,ns（\nGetpidRatio× Linux），贴陷入下限}
-\end{frame}
-
 % ============================== 20 机器人拾球应用 ==============================
 \begin{frame}
   \navsegment{0}
   \frametitle{机器人拾球应用：状态机与里程计回桶}
   \begin{columns}[T]
     \begin{column}{0.34\textwidth}
-      \gfxt[0.92\linewidth]{F20.png}\\[3pt]
-      \gfxt[0.72\linewidth]{F21.png}
+      \gfxt[0.80\linewidth]{F20.png}\\[3pt]
+      \gfxt[0.62\linewidth]{F21.png}
     \end{column}
     \begin{column}{0.63\textwidth}
       \begin{itemize}
         \item 应用为一份 C++ 状态机，主机 dry-run 与板端同源，仅替换电机与机械臂后端
         \item 六状态拾球闭环（追球、抓取、回桶、寻桶、趋近、投放）纯逻辑非阻塞，定时时相由单调时钟推进而与相机 FPS 解耦
         \item 里程计引导回桶：投放时 reset\_anchor 把桶设为原点，航位推算按 distance 与 bearing 回锚点，视觉一旦捕获桶即抢占
-        \item 慢速轮速遥测移出控制回路，由后台线程 100\,ms 周期采样并更新位姿快照，控制回路每轮只取一次快照
+        \item 慢速轮速遥测移出控制回路，由后台线程异步更新位姿快照供每轮读取
       \end{itemize}
     \end{column}
   \end{columns}

@@ -52,3 +52,5 @@ epoll 的三处缺陷各自导致一类事件错误。放宽 \texttt{epoll\_pwai
 \subsection{PostgreSQL 端到端验证}
 
 上述兼容性工作以在 StarryOS 上完整运行 PostgreSQL 作为验证。本队移植 PostgreSQL 17 并配以十四阶段冒烟测试，以非特权用户完成集群初始化、服务启动、建库建表、增删改查、聚合、连接、事务回滚、批量插入与完整性校验，并提供四种体系结构的运行配置。该用例端到端地覆盖了文件系统、网络与系统调用链路，\keyres{在 riscv64 的 QEMU 下十四个阶段全部通过}（\href{https://github.com/rcore-os/tgoskits/pull/1111}{\#1111}，已合并）。一个未经改动的关系数据库能够在 StarryOS 上完成从初始化到事务的完整流程，反过来印证了本节各处兼容性修正的必要与正确。
+
+\figph{../figures/out/Fdemo_pg.png}{PostgreSQL 17 在 StarryOS 上的实时会话（节选）：每条 SQL 于 \texttt{starry\_test=\#} 提示符回显、由服务端直接打印结果表——\texttt{SELECT version()} 确认为 musl 构建的真实 PostgreSQL 17，\texttt{\textbackslash dt} 列出建好的表，随后是 \texttt{users} 全表与按金额过滤的联接查询；完整会话另含聚合与事务回滚}

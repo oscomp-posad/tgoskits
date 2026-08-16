@@ -150,18 +150,6 @@ def render(data, dark: bool, out_path: Path):
         fontweight="bold",
         pad=14,
     )
-    if data.get("subtitle_zh"):
-        ax.text(
-            0.0,
-            1.02,
-            data["subtitle_zh"],
-            transform=ax.transAxes,
-            fontsize=9.5,
-            color=style.MUTED,
-            ha="left",
-            va="bottom",
-        )
-
     ax.grid(axis="y", zorder=0)
     ax.grid(axis="x", visible=False)
     ax.set_axisbelow(True)

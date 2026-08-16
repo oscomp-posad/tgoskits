@@ -1,0 +1,96 @@
+### perf --version
+perf version 6.6.0
+
+### perf stat -e cycles,instructions,cache-references,cache-misses /usr/bin/true
+
+ Performance counter stats for '/usr/bin/true':
+
+          27387142      armv8_cortex_a55/cycles/                                                (91.17%)
+          27374447      armv8_cortex_a76/cycles/                                                (92.07%)
+          27364487      armv8_pmuv3_0/cycles/                                                   (98.90%)
+          33678116      armv8_cortex_a55/instructions/   #    1.23  insn per cycle              (99.19%)
+          33690203      armv8_cortex_a76/instructions/   #    1.23  insn per cycle            
+          33682595      armv8_pmuv3_0/instructions/      #    1.23  insn per cycle            
+           9165444      armv8_cortex_a55/cache-references/                                        (8.84%)
+           9520167      armv8_cortex_a76/cache-references/                                        (7.95%)
+           7554180      armv8_pmuv3_0/cache-references/                                         (1.11%)
+             93449      armv8_cortex_a55/cache-misses/   #    1.02% of all cache refs           (0.83%)
+     <not counted>      armv8_cortex_a76/cache-misses/                                          (0.00%)
+     <not counted>      armv8_pmuv3_0/cache-misses/                                             (0.00%)
+
+       0.060107250 seconds time elapsed
+
+       0.000000000 seconds user
+       0.000000000 seconds sys
+
+
+
+### perf-validate (BOARD_PERF_SUMMARY / VERDICT)
+BOARD_PERF_VALIDATE_START mode=board midr0=0x412fd050 (raw="00000000412fd050") wscale=1
+STEP0 PASS override-off force_clusters=0
+TOPO-1 PASS online=8 sysconf=8 affinity=8 online_str="0-7" getcpu=ok
+TOPO-2 PASS real-MIDR a55=4 a76=4 (part0=0xd05)
+TOPO-4 PASS types generic=8 a55=9 a76=10
+TOPO-5 PASS a55="0,1,2,3" a76="4,5,6" generic="0-7" contiguous
+TOPO-8 PASS format/event=config:0-15 on all 3 PMUs
+TOPO-9 PASS 7 named events resolve to expected configs
+TOPO-7 INFO cpuid= pinned-A55 (reader-core relative)
+TOPO-3 INFO reader-relative MIDR: pinnedA55=0x412fd050 pinnedA76=0x414fd0b0 (track affinity, not index — documented)
+TOPO-6 INFO warm masks a55=4 a76=4 (cold-init gap is report-only)
+SYSFS-1 PASS masks partition matches MIDR, types 8/9/10, format ok
+CAP-1 PASS a55 programmable_advanced=6 (>=6) 7th_enomem=0 dedicated_cycles_ok=1
+CAP-2 PASS a76 programmable_advanced=6 7th_enomem=0
+CAP-3 PASS PMUVer>=1 (cycles=18455307); >u32 period rejected EINVAL
+CAP-4 PASS dedicated cycle + programmable advance on every A76 secondary
+CTR-EL PASS user_only=160000040 >> kernel_only=35034 (filter works)
+CLU-1 PASS A76-PMU-on-A55 -> ENOENT (control A55-on-A55 opens)
+CLU-2 PASS A55-PMU-on-A76 -> ENOENT (control opens)
+CLU-3 PASS generic event counts on a55(63382652) and a76(91411)
+CLU-4 PASS A76 per-task value=569633924 enabled=1287548504 running=698090752 (Big counted, Little skipped ~50%)
+CLU-LIVE PASS intermediate reads monotonic<=final=3200707505
+BR-1 PASS a55 branch value=4086851 in [1000000,16000000]
+BR-2 PASS a76 branch value=8017224 in band
+BR-3 INFO open-core-pmceid open=a55(0x0c) run=a76 value=11733 baseline_a76=8016186 verdict=GAP-CONFIRMED (known deferral)
+BR-4 PASS open-a76(0x21) run-a55 value=8101186 in band (no under-count)
+BR-6 INFO a55_0c=-1 a76_0c=-1 a76_21=3 (silicon premise?)
+BR-7 PASS a55 raw 0x0C=7320123 0x21=12097909 both count
+SMP-MANYTHREADS PASS 12/12 monitored threads counted
+SMP-MIGRATE-X PASS cross-cluster value=1093686892 running<=enabled
+SMP-ALLCPU PASS fan-out loaded_min=590518535 idle_anchor=432214 (>10x)
+SMP-ROTATE PASS 10 events all counted, >=1 scaled (multiplexing)
+SMP-HOME-IPI-X PASS far-read=305767404 in band of same-core baseline=307952326
+SMP-PERCORE-INIT PASS PMCR.E live on every online PE
+SMP-INHERIT INFO inherit value=1287851274 single_thread_baseline=320071954 n_children=4 verdict=ok (counting child-fold-back is deferred §8.6)
+SMP-HW-OTHER PASS non-branch generic hw_ids consistent across clusters
+CYC-1 PASS cycles=258336068 instructions=400185844 running<=enabled
+INST-DET INFO r1=252792803 r2=240108458 (variance > 5%, TCG/board noise)
+IPC-1 INFO ILP-loop A55 IPC=0.67 A76 IPC=0.67 (A76 higher, as expected)
+MULTI-1 PASS cyc=207780969 inst=326532877 l1d=41584515 all unscaled
+SAMP-1 PASS samples=2048 in_loop_range=2022
+SAMP-2 PASS a76-secondary samples=29 (per-PE INTID23 fires)
+SAMP-3 FAIL freq-mode samples=1 (<2; period not adapting?)
+RDPMC-1 PASS cap=1 index=1 width=32 rdpmc=164552769 read=164554087
+RDPMC-2 PASS cycle cap=1 index=32 width=64 pmccntr=101201468 read=101204061
+RDPMC-3 PASS cycle value=6025928971 > 2^32 (no 32-bit wrap)
+PERF-PARANOID PASS perf_event_paranoid=-1 force_clusters=0
+SW-1 PASS cpu_clock=160995916 task_clock=128667293 page_faults=512 ctx_sw=24 migrations=0 (all read()==8)
+CACHE-1 PASS opened=8 unsupported=0 no-routing-error; L1D-prefetch rejected
+CACHE-2 PASS L1D-load counted=42940847 (>0)
+CACHE-2 PASS L1D-load counted=42940847 (>0)
+LOST-1 FAIL no in-band LOST (records=0 total=0 samples=18)
+TID-1 PASS pid=91 worker_tid=203 samples=242 (every sample tid/tgid correct)
+GRP-1 PASS nr=2 task_clock=11746671993 cpu_clock=11796386000 ids-match (group-scheduled)
+GRP-2 PASS cross-thread member EINVAL; same-thread member opens (UAF gate holds)
+SREAD-1 PASS samples=3 last=300000 strictly-increasing
+SREAD-2 PASS group-sample samples=244 nr==2 ids-match member_val=24400000
+SYSW-A PASS cpu_clock=221942000 ctx_switches=28 (pid=-1 aggregate)
+SYSW-B PASS 8/8 per-cpu events counted (cpu=i honoured)
+SYSW-C PASS 8/8 rings sampled, cpu-tag correct (armed on target core)
+SYSW-D PASS opened=8 comm=1 mmap2=4 fork=1 exit=1 name='true' file='/usr/bin/true'
+CHAIN-KERNEL PASS samples=3 kchains=3 max_kips=1
+CHAIN-USER FAIL samples=3 uchains=0 max_uips=0 bad=0 (user FP unwind not observed)
+DWARF-1 FAIL samples=3 uregs=0 good=0 bad=0
+KPROBE-1 PASS id=32768 samples=501 removed=1 (probe hit -> SAMPLE)
+BOARD_PERF_SUMMARY pass=51 fail=4 skip=0 info=8 online=8 clusters=4+4
+BOARD_PERF_VALIDATE_VERDICT FAIL
+BOARD_PERF_VALIDATE_DONE

@@ -54,7 +54,6 @@ ax.text(0.5,0.087,"big.LITTLE PMU 矩阵  39 / 0 通过        perf_event_open �
         transform=ax.transAxes, ha="center", va="center", color=TEAL, fontsize=14, fontweight="bold")
 ax.text(0.5,0.042,"A55(type 9)/A76(type 10) 双簇独立编程 · 用户态 160000055 vs 内核态 28455（5600× exclude-bit 过滤验证）",
         transform=ax.transAxes, ha="center", va="center", color=MUTED, fontsize=10.5)
-fig.suptitle("硬件 PMU perf：在真机上跑通 stat / record / report / top / kprobe / ftrace",
-             color=INK, fontsize=16.5, fontweight="bold", y=0.985)
+# titleless: the deck/report frametitle supplies the title (avoids double-title + bottom overflow)
 fig.savefig("figures/out/Fperf_proof.png", dpi=200, facecolor=NAVY, bbox_inches="tight")
 print("wrote figures/out/Fperf_proof.png")

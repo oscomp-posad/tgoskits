@@ -71,6 +71,8 @@ ftrace 是内核的函数跟踪器，它借编译期在每个函数入口埋下�
 
 perf 子系统在 OrangePi-5-Plus 上做了两套硬件在环验证，验证脚本即机器可判定的判定门，一次运行产出一个可比对的通过计数。第一套是 big.LITTLE PMU 拓扑矩阵，最终 39 项通过、0 失败，两簇各自独立编程（A55 type 9、A76 type 10）、跨簇迁移、每核溢出采样与 rdpmc 均通过。单核阶段的 18 项锚定了真机 A55 上的计数通路：真实 \texttt{PMCR.N=6}、用户态与内核态计数约 5600 倍之差、复用轮转、64 位周期计数器无回绕。第二套是完整的 \texttt{perf\_event\_open} 特性矩阵，\keyres{56 项通过、0 失败}，覆盖软件事件、缓存计数、丢样记录、真实 tid 归属、事件组与组采样读、系统级采样与旁带、帧指针与 DWARF 调用栈以及 kprobe。上游 perf 二进制直接测得 IPC 0.91。缓存计数、tid 归属、组调度与 kprobe 命中只能在真机上取得，QEMU 的 PMU 仅建模周期一项。
 
+\figph{../figures/out/Fperf_real.png}{OrangePi-5-Plus 真机上的 perf 会话：\texttt{perf stat} 三个 PMU（A55 / A76 / generic）同时计数，\texttt{perf record} 采样 1062 次、\texttt{perf report} 逐帧符号化内核热点}
+
 单核阶段的一项测量与直觉相反。压测所用的循环是一条内存串行的依赖链，A55 在这类负载上的 IPC 读到 1.60，高于 A76 的 1.30，顺序发射的小核在缺乏指令级并行时可以追平乱序的大核，A76 的 IPC 高于 A55 的假设只在指令级并行充足的负载上成立。核对后确认这是真实的硬件结果，遂如实记录，并把对应用例列为信息项。
 
 \subsection{硬件受限特性}

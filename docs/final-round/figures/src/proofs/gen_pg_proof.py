@@ -36,6 +36,6 @@ ax.add_patch(FancyBboxPatch((0.008,0.02),0.984,0.135, boxstyle="round,pad=0.004,
              transform=ax.transAxes, fc="#122e2a", ec=TEAL, lw=1.3, zorder=0))
 ax.text(0.5,0.088,"POSTGRESQL_TEST_PASSED    ·    14 / 14 阶段全部通过", transform=ax.transAxes,
         ha="center", va="center", color=TEAL, fontsize=17, fontweight="bold")
-fig.suptitle("真实数据库负载：PostgreSQL 在 StarryOS 上完整跑通", color=INK, fontsize=16.5, fontweight="bold", y=0.985)
+# titleless: the deck/report frametitle supplies the title
 fig.savefig("figures/out/Fpostgres_proof.png", dpi=200, facecolor=NAVY, bbox_inches="tight")
 print("wrote figures/out/Fpostgres_proof.png")

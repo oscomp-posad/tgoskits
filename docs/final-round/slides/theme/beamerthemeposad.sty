@@ -88,7 +88,7 @@
 % reserved head height, so the frametitle must skip further to clear it; without
 % this the nav rule grazes the CJK glyph tops. nav=0 frames have no headline.
 \setbeamertemplate{frametitle}{%
-  \ifnum\posad@nav>0\relax\vskip21pt\else\vskip13pt\fi
+  \ifnum\posad@nav>0\relax\vskip18pt\else\vskip12pt\fi
   \begingroup\sffamily\bfseries\color{teal}\large\insertframetitle\endgroup
   \vskip4pt{\color{teal}\hbox to\dimexpr\paperwidth-2.4em\relax{\vrule height1pt width\dimexpr\paperwidth-2.4em\relax}}%
   \vskip2pt}
@@ -111,7 +111,7 @@
   \ifnum\posad@nav>0\relax
     \vskip-3pt
     \hbox to\paperwidth{\hskip1.4em\scriptsize\color{muted}\hfill \insertframenumber\hskip1.4em}%
-    \vskip5pt
+    \vskip2pt
   \fi}
 
 \mode<all>

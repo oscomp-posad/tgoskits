@@ -95,3 +95,5 @@ RK3588 的 RKNPU 由三个物理核构成，卷积任务可按协同模式在一
 \figph{../figures/out/F13.png}{模拟器实测：网球模型结构协同优化把 MAC 3.15$\to$2.06 GMac、LUT 任务 107$\to$3、\texttt{rknn\_run} 14.66$\to$5.68 ms，同时 mAP50 保持在 92.9$\to$91.1\%}
 
 本节的 MAC、LUT 任务数、\texttt{rknn\_run} 与 mAP50 均为 QEMU RKNPU 功能模拟器的逐推理实测，属结构成本与运行时计数口径，非真机测量。优化后模型在开发板上的端到端首帧与逐帧时延由网球应用的板级运行给出，见启动与推理相关各节。模拟器本身是一项可复用的产物，使这套逐算子的成本与精度分析，连同 RKNN 的 CI 与驱动 bring-up，均可脱离开发板进行。
+
+\figph{../figures/out/Fdemo_npu.png}{仿真 NPU 上运行网球 YOLOv8 推理的真实终端输出：模型加载、INT8 反量化张量与逐帧推理，末端给出检测结果 \texttt{sports ball}、置信度 70.8\%（单命令可复现，无需真机）}
