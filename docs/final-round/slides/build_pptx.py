@@ -25,13 +25,22 @@ DEMOS = "/Users/jsph273/Desktop/Code/tgoskits/.claude/worktrees/demos/demos/cast
 GIF_NPU = os.path.join(DEMOS, "qemu-npu-tennis.gif")
 GIF_PG = os.path.join(DEMOS, "postgresql.gif")
 GIF_PERF = "figures/out/Fperf_cast.gif"  # real board perf recording (repo-local)
+GIF_DISPLAY = os.path.join(DEMOS, "display-dashboard.gif")  # 2x board HDMI dashboard
 OUT = "slides/build/deck.pptx"
 
-# page (1-based) -> (gif, x-search-fraction range) for the in-place overlay
+# page (1-based) -> (gif, x-search-fraction range) for the in-place overlay.
+# These underlays are dark asciinema panels, located by detect_terminal_box().
 OVERLAYS = {
     12: (GIF_PERF, (0.02, 0.98)),  # perf recording, full width
     18: (GIF_PG, (0.02, 0.62)),    # postgres session, left column
     19: (GIF_NPU, (0.02, 0.60)),   # NPU inference, left column
+}
+
+# page (1-based) -> (gif, (left,top,right,bottom) slide fractions). Used where the
+# underlay is a PHOTO (not a dark terminal panel) so box detection won't apply —
+# the box is the measured position of the static poster frame in the rendered page.
+EXPLICIT = {
+    17: (GIF_DISPLAY, (0.0529, 0.5263, 0.3323, 0.8064)),  # board HDMI poster, left col
 }
 
 
@@ -85,6 +94,15 @@ for i, png in enumerate(pages, start=1):
                   f"({bx0/pw:.2f},{by0/ph:.2f})-({bx1/pw:.2f},{by1/ph:.2f})")
         else:
             print(f"page {i}: WARNING terminal box not detected — no overlay")
+    if i in EXPLICIT:
+        gif, (fl, ft, fr, fb) = EXPLICIT[i]
+        left = Emu(round(fl * SW))
+        top = Emu(round(ft * SH))
+        wid = Emu(round((fr - fl) * SW))
+        hei = Emu(round((fb - ft) * SH))
+        s.shapes.add_picture(gif, left, top, width=wid, height=hei)
+        print(f"page {i}: explicit overlay {os.path.basename(gif)} @ "
+              f"({fl:.2f},{ft:.2f})-({fr:.2f},{fb:.2f})")
 
 prs.save(OUT)
 print(f"saved {OUT} — {len(prs.slides._sldIdLst)} slides, gifs overlaid in place")

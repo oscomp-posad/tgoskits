@@ -315,7 +315,12 @@
   \frametitle{显示、图形与板级：从零打通的广度}
   \begin{columns}[T]
     \begin{column}{0.32\textwidth}
-      \includegraphics[width=\linewidth]{Fwayland.png}
+      \centering
+      \includegraphics[width=0.80\linewidth]{Fwayland.png}\\[5pt]
+      \IfFileExists{../figures/out/Fdisplay_board.png}%
+        {\includegraphics[width=\linewidth]{Fdisplay_board.png}\\[2pt]
+         {\color{muted}\scriptsize 真机 HDMI 输出：实时仪表盘（2× 加速）}}%
+        {}%
     \end{column}
     \begin{column}{0.64\textwidth}
       \begin{itemize}
