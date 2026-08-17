@@ -18,7 +18,7 @@ TGOSKits 是一个面向操作系统与虚拟化开发的集成仓库，汇聚 A
 
 项目网站：[https://rcore-os.cn/tgoskits/](https://rcore-os.cn/tgoskits/)。如果想先理解项目定位和系统关系，请从 [TGOSKits 文档](https://rcore-os.cn/tgoskits/docs/introduction) 开始。
 
-> **竞赛材料**：本仓库为 Team Posad（清华大学）全国大学生操作系统竞赛「面向边缘智能的 AIOS 设计与优化」参赛工作。**决赛**技术报告与进展汇报见 [`docs/final-round/`](docs/final-round/)；**初赛**进展汇报见 [`slides/进展汇报（初赛）.pdf`](slides/进展汇报（初赛）.pdf)。
+> **竞赛材料**：本仓库为 Team Posad（清华大学）全国大学生操作系统竞赛「面向边缘智能的 AIOS 设计与优化」参赛工作。**决赛**技术报告、进展汇报（PDF/PPTX）与答辩视频均统一存放于 [`docs/final-round/`](docs/final-round/)；**初赛**进展汇报见 [`slides/进展汇报（初赛）.pdf`](slides/进展汇报（初赛）.pdf)。
 
 ## 2. 仓库
 

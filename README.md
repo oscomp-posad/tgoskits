@@ -29,8 +29,10 @@
 
 | 材料 | 入口 |
 |---|---|
-| 技术报告（决赛）| 📄 [`docs/设计方案（决赛）.pdf`](docs/设计方案（决赛）.pdf) |
-| 进展汇报（决赛）| 📑 [`slides/进展汇报（决赛）.pdf`](slides/进展汇报（决赛）.pdf) |
+| 技术报告（决赛，83 页）| 📄 [`docs/final-round/技术报告（决赛）.pdf`](docs/final-round/技术报告（决赛）.pdf) |
+| 进展汇报（决赛，33 页）| 📑 [`docs/final-round/进展汇报（决赛）.pdf`](docs/final-round/进展汇报（决赛）.pdf) |
+| 进展汇报（决赛，可放映 PPTX）| 📊 [`docs/final-round/进展汇报（决赛）.pptx`](docs/final-round/进展汇报（决赛）.pptx) |
+| 答辩视频（决赛，约 8 分钟）| 🎬 [`docs/final-round/答辩视频.mp4`](docs/final-round/答辩视频.mp4) |
 | 决赛材料目录（LaTeX 源码、数据、图）| 📁 [`docs/final-round/`](docs/final-round/) |
 
 ## 基础版本
