@@ -186,20 +186,49 @@ impl<C> FinishedData<C> {
     }
 
     pub fn set_finished(&self, value: C) {
-        if self
-            .state
-            .compare_exchange(
-                SLOT_EMPTY,
-                SLOT_WRITING,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_err()
-        {
-            if take_queue_log_budget() {
-                warn!("usb queue: dropping duplicate completion for busy slot");
+        // The newest completion must win: ring addresses are reused every lap,
+        // so a leftover READY value here belongs to a PREVIOUS submission at
+        // this address — dropping the new completion (the old behaviour) left
+        // the current transfer's waiter pending forever (stochastic stream
+        // stalls). Overwrite stale READY data; spin briefly through the
+        // transient WRITING/READING windows, bounded so an interrupt-context
+        // caller preempting a mid-read waiter cannot livelock.
+        let mut attempts = 0u32;
+        loop {
+            let claimed = self
+                .state
+                .compare_exchange(
+                    SLOT_EMPTY,
+                    SLOT_WRITING,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .or_else(|_| {
+                    self.state.compare_exchange(
+                        SLOT_READY,
+                        SLOT_WRITING,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                });
+            match claimed {
+                Ok(prev) => {
+                    if prev == SLOT_READY && take_queue_log_budget() {
+                        warn!("usb queue: overwriting stale unconsumed completion");
+                    }
+                    break;
+                }
+                Err(_) => {
+                    attempts += 1;
+                    if attempts > 10_000 {
+                        if take_queue_log_budget() {
+                            warn!("usb queue: dropping completion for stuck busy slot");
+                        }
+                        return;
+                    }
+                    spin_loop();
+                }
             }
-            return;
         }
 
         unsafe {

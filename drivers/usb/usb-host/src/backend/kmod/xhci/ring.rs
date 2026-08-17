@@ -210,8 +210,16 @@ impl<R> SendRing<R> {
     }
 
     pub fn enque_transfer(&mut self, trb: transfer::Allowed) -> BusAddr {
-        let addr = self.ring.enque_transfer(trb);
+        // Clear the completion slot BEFORE the TRB becomes visible to the
+        // controller (deferred-cycle publish, like the TD path's first TRB).
+        // The previous order (publish, then clear) raced a running endpoint
+        // ring: the controller could complete the fresh TRB inside the window
+        // and the clear then destroyed that completion — the transfer's
+        // waiter hung forever (observed as a stochastic UVC capture stall).
+        let (addr, index, visible) = self.ring.enque_transfer_deferred_cycle(trb);
         self.finished.clear_finished(addr);
+        mb();
+        self.ring.set_transfer_trb(index, visible);
         addr
     }
 
