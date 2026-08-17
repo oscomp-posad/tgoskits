@@ -322,7 +322,68 @@ fn print_log_fmt(args: fmt::Arguments) {
     let mut buf = LogBuffer::<LOG_BUFFER_SIZE>::new();
     buf.write_fmt(args).unwrap();
     buf.append_truncation_marker();
+    record_ring().lock().append(buf.as_str().as_bytes());
     write_fmt_locked(format_args!("{}", buf.as_str())).unwrap();
+}
+
+// --- In-memory ring of recent log records ---
+// Once a runtime tty claims the console, the boot-console write path stops
+// emitting kernel log bytes to the UART, so runtime records would otherwise be
+// unobservable. Every formatted record is also appended here; the OS's syslog
+// path drains it (e.g. `dmesg`).
+
+const LOG_RING_SIZE: usize = 64 * 1024;
+
+struct LogRing {
+    buf: [u8; LOG_RING_SIZE],
+    head: usize,
+    len: usize,
+}
+
+impl LogRing {
+    fn append(&mut self, bytes: &[u8]) {
+        // Records are bounded by LOG_BUFFER_SIZE (< LOG_RING_SIZE), so a plain
+        // byte loop is cheap; the ring overwrites its oldest content.
+        for &b in bytes {
+            self.buf[self.head] = b;
+            self.head = (self.head + 1) % LOG_RING_SIZE;
+            if self.len < LOG_RING_SIZE {
+                self.len += 1;
+            }
+        }
+    }
+}
+
+// A static (.bss) ring: no allocation, usable from the very first record —
+// early-boot logging runs before the allocator is initialized.
+fn record_ring() -> &'static ax_kspin::SpinNoIrq<LogRing> {
+    static RING: ax_kspin::SpinNoIrq<LogRing> = ax_kspin::SpinNoIrq::new(LogRing {
+        buf: [0; LOG_RING_SIZE],
+        head: 0,
+        len: 0,
+    });
+    &RING
+}
+
+/// Drains all buffered log-record bytes, oldest first, invoking `f` with up to
+/// two contiguous chunks, then clears the ring. Intended for the OS syslog
+/// path (`dmesg`); safe from task context.
+pub fn drain_records(mut f: impl FnMut(&[u8])) {
+    let mut ring = record_ring().lock();
+    if ring.len == 0 {
+        return;
+    }
+    let start = (ring.head + LOG_RING_SIZE - ring.len) % LOG_RING_SIZE;
+    if start + ring.len <= LOG_RING_SIZE {
+        f(&ring.buf[start..start + ring.len]);
+    } else {
+        let first = LOG_RING_SIZE - start;
+        let second = ring.len - first;
+        f(&ring.buf[start..]);
+        f(&ring.buf[..second]);
+    }
+    ring.head = 0;
+    ring.len = 0;
 }
 
 /// Prints the formatted string to the console.

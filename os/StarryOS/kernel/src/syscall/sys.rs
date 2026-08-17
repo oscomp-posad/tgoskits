@@ -121,6 +121,24 @@ impl SyslogState {
         let len = self.buffer.occupied_len();
         unsafe { self.buffer.advance_read_index(len) };
     }
+
+    /// Pulls any kernel log records buffered in `ax_log`'s ring into this
+    /// syslog buffer (oldest data is discarded on overflow). The console stops
+    /// carrying kernel records once the runtime tty claims it, so this is how
+    /// runtime records become observable (`dmesg`).
+    fn drain_kernel_records(&mut self) {
+        ax_log::drain_records(|mut chunk| {
+            let cap = self.buffer.capacity().get();
+            if chunk.len() > cap {
+                chunk = &chunk[chunk.len() - cap..];
+            }
+            let vacant = cap - self.buffer.occupied_len();
+            if chunk.len() > vacant {
+                unsafe { self.buffer.advance_read_index(chunk.len() - vacant) };
+            }
+            self.buffer.push_slice(chunk);
+        });
+    }
 }
 
 static SYSLOG_STATE: spin::LazyLock<Mutex<SyslogState>> =
@@ -756,6 +774,7 @@ pub fn sys_syslog(ty: i32, buf: *mut c_char, len: usize) -> AxResult<isize> {
             require_syslog_privilege()?;
             let data = {
                 let mut state = SYSLOG_STATE.lock();
+                state.drain_kernel_records();
                 state.read(len)
             };
             if !data.is_empty() {
@@ -766,7 +785,8 @@ pub fn sys_syslog(ty: i32, buf: *mut c_char, len: usize) -> AxResult<isize> {
         SYSLOG_ACTION_READ_ALL => {
             require_syslog_privilege()?;
             let data = {
-                let state = SYSLOG_STATE.lock();
+                let mut state = SYSLOG_STATE.lock();
+                state.drain_kernel_records();
                 state.read_all(len)
             };
             if !data.is_empty() {
@@ -778,6 +798,7 @@ pub fn sys_syslog(ty: i32, buf: *mut c_char, len: usize) -> AxResult<isize> {
             require_syslog_privilege()?;
             let data = {
                 let mut state = SYSLOG_STATE.lock();
+                state.drain_kernel_records();
                 let data = state.read_all(len);
                 state.clear();
                 data
@@ -817,7 +838,8 @@ pub fn sys_syslog(ty: i32, buf: *mut c_char, len: usize) -> AxResult<isize> {
         }
         SYSLOG_ACTION_SIZE_UNREAD => {
             require_syslog_privilege()?;
-            let state = SYSLOG_STATE.lock();
+            let mut state = SYSLOG_STATE.lock();
+            state.drain_kernel_records();
             Ok(state.unread_len() as isize)
         }
         SYSLOG_ACTION_SIZE_BUFFER => {
